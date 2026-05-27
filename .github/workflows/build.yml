@@ -7,11 +7,17 @@ on:
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: windows-2025
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        env:
+          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+      - name: Create deps folder
+        run: New-Item -ItemType Directory -Force -Path "deps\nssm"
+        shell: powershell
 
       - name: Download Node.js installer
         run: |
@@ -27,7 +33,6 @@ jobs:
         run: |
           Invoke-WebRequest -Uri "https://nssm.cc/release/nssm-2.24.zip" -OutFile "nssm.zip"
           Expand-Archive -Path "nssm.zip" -DestinationPath "nssm-tmp" -Force
-          New-Item -ItemType Directory -Force -Path "deps\nssm"
           Copy-Item "nssm-tmp\nssm-2.24\win64\nssm.exe" "deps\nssm\nssm.exe"
         shell: powershell
 
