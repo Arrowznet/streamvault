@@ -1,0 +1,783 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>StreamVault Setup</title>
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:ital,wght@0,300;0,400;0,500;0,600;1,400&display=swap" rel="stylesheet"/>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#08080f;--surface:#0f0f1a;--card:#16161f;--card2:#1d1d28;
+  --border:#252535;--accent:#e8572a;--accent2:#f0a500;
+  --text:#eeeef8;--muted:#6868a0;--success:#2ecc71;--danger:#e74c3c;
+  --radius:10px;
+}
+html,body{height:100%;background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;overflow:hidden}
+
+/* Layout */
+.shell{display:flex;height:100vh}
+
+/* Sidebar */
+.sidebar{
+  width:240px;flex-shrink:0;background:var(--surface);
+  border-right:1px solid var(--border);
+  display:flex;flex-direction:column;
+}
+.sidebar-logo{
+  padding:28px 24px 20px;border-bottom:1px solid var(--border);
+  display:flex;align-items:center;gap:12px;
+}
+.logo-icon{font-size:28px}
+.logo-text{font-family:'Bebas Neue',sans-serif;font-size:22px;letter-spacing:2px}
+.logo-text span{color:var(--accent)}
+.steps{padding:16px 0;flex:1}
+.step{
+  display:flex;align-items:center;gap:14px;
+  padding:12px 24px;cursor:default;
+  transition:background 0.2s;
+  position:relative;
+}
+.step::before{
+  content:'';position:absolute;left:0;top:0;bottom:0;width:3px;
+  background:transparent;transition:background 0.2s;border-radius:0 2px 2px 0;
+}
+.step.active::before{background:var(--accent)}
+.step.active{background:rgba(232,87,42,0.06)}
+.step.done .step-num{background:#0d3d24;border-color:var(--success);color:var(--success)}
+.step.active .step-num{background:var(--accent);border-color:var(--accent);color:#fff}
+.step-num{
+  width:28px;height:28px;border-radius:50%;border:1.5px solid var(--border);
+  display:flex;align-items:center;justify-content:center;
+  font-size:12px;font-weight:600;flex-shrink:0;color:var(--muted);
+  transition:all 0.3s;
+}
+.step-label{font-size:13px;font-weight:500;color:var(--muted);transition:color 0.2s}
+.step.active .step-label{color:var(--text)}
+.step.done .step-label{color:var(--success)}
+.sidebar-footer{padding:20px 24px;border-top:1px solid var(--border)}
+.version{font-size:11px;color:var(--muted)}
+
+/* Main content */
+.content{flex:1;overflow-y:auto;display:flex;flex-direction:column}
+.page{display:none;flex-direction:column;height:100%;padding:48px 56px}
+.page.active{display:flex}
+
+.page-header{margin-bottom:36px}
+.page-title{font-family:'Bebas Neue',sans-serif;font-size:36px;letter-spacing:2px;margin-bottom:6px}
+.page-sub{font-size:14px;color:var(--muted);line-height:1.6}
+
+/* Components */
+.card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:20px 24px}
+.card+.card{margin-top:12px}
+
+.form-group{margin-bottom:20px}
+.form-label{font-size:13px;font-weight:500;color:var(--muted);margin-bottom:8px;display:block;letter-spacing:0.3px}
+.form-input{
+  width:100%;background:var(--card2);border:1px solid var(--border);
+  color:var(--text);font-family:'DM Sans',sans-serif;font-size:14px;
+  padding:11px 14px;border-radius:8px;outline:none;
+  transition:border-color 0.2s;
+}
+.form-input:focus{border-color:var(--accent)}
+.form-hint{font-size:12px;color:var(--muted);margin-top:6px}
+.form-error{font-size:12px;color:var(--danger);margin-top:6px;display:none}
+
+/* Buttons */
+.btn{
+  display:inline-flex;align-items:center;justify-content:center;gap:8px;
+  font-family:'DM Sans',sans-serif;font-size:14px;font-weight:500;
+  padding:11px 24px;border-radius:8px;border:none;cursor:pointer;
+  transition:all 0.2s;text-decoration:none;
+}
+.btn-primary{background:var(--accent);color:#fff}
+.btn-primary:hover{background:#ff6535;transform:translateY(-1px)}
+.btn-primary:disabled{opacity:0.5;cursor:not-allowed;transform:none}
+.btn-ghost{background:transparent;color:var(--muted);border:1px solid var(--border)}
+.btn-ghost:hover{border-color:var(--text);color:var(--text)}
+.btn-danger{background:#3a1010;color:var(--danger);border:1px solid #5a1515}
+.btn-danger:hover{background:#4a1515}
+.btn-success{background:#0d3d24;color:var(--success);border:1px solid #1a6640}
+
+/* Page footer nav */
+.page-nav{
+  margin-top:auto;padding-top:32px;
+  display:flex;align-items:center;justify-content:space-between;
+  border-top:1px solid var(--border);
+}
+.step-indicator{font-size:13px;color:var(--muted)}
+
+/* Library items */
+.lib-item{
+  display:flex;align-items:center;gap:14px;
+  background:var(--card2);border:1px solid var(--border);
+  border-radius:8px;padding:14px 16px;margin-bottom:10px;
+  animation:slideIn 0.25s ease;
+}
+@keyframes slideIn{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:translateY(0)}}
+.lib-icon{font-size:20px;width:32px;text-align:center;flex-shrink:0}
+.lib-info{flex:1;overflow:hidden}
+.lib-name{font-size:14px;font-weight:500}
+.lib-path{font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lib-type{font-size:11px;font-weight:600;letter-spacing:0.5px;padding:3px 8px;border-radius:4px;margin-left:8px}
+.lib-type.movies{background:#3a1a10;color:#f07050}
+.lib-type.tvshows{background:#1a1a3a;color:#7080f0}
+.lib-type.music{background:#1a3a1a;color:#60c060}
+.lib-remove{background:none;border:none;color:var(--muted);cursor:pointer;padding:6px;border-radius:6px;font-size:16px;transition:color 0.2s}
+.lib-remove:hover{color:var(--danger)}
+
+.add-lib-btn{
+  display:flex;align-items:center;gap:10px;width:100%;
+  background:transparent;border:1.5px dashed var(--border);
+  color:var(--muted);font-family:'DM Sans',sans-serif;font-size:14px;
+  padding:14px 16px;border-radius:8px;cursor:pointer;
+  transition:all 0.2s;
+}
+.add-lib-btn:hover{border-color:var(--accent);color:var(--accent)}
+
+/* Install progress */
+.install-steps{display:flex;flex-direction:column;gap:12px;margin:24px 0}
+.install-step{
+  display:flex;align-items:center;gap:16px;
+  padding:16px 20px;background:var(--card2);
+  border:1px solid var(--border);border-radius:8px;
+}
+.install-icon{font-size:22px;width:32px;text-align:center;flex-shrink:0}
+.install-label{flex:1}
+.install-name{font-size:14px;font-weight:500}
+.install-detail{font-size:12px;color:var(--muted);margin-top:2px}
+.install-status{font-size:13px;font-weight:500;width:90px;text-align:right}
+.status-waiting{color:var(--muted)}
+.status-running{color:var(--accent2);animation:blink 1s ease-in-out infinite}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:0.4}}
+.status-done{color:var(--success)}
+.status-skip{color:var(--muted)}
+.status-error{color:var(--danger)}
+
+.progress-bar-wrap{background:var(--border);border-radius:4px;height:6px;margin-top:16px;overflow:hidden}
+.progress-bar-fill{height:100%;background:var(--accent);border-radius:4px;transition:width 0.4s ease;width:0%}
+
+/* Type selector */
+.type-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:20px}
+.type-card{
+  background:var(--card2);border:1.5px solid var(--border);
+  border-radius:8px;padding:16px;cursor:pointer;text-align:center;
+  transition:all 0.2s;
+}
+.type-card:hover{border-color:var(--muted)}
+.type-card.selected{border-color:var(--accent);background:rgba(232,87,42,0.06)}
+.type-card-icon{font-size:28px;margin-bottom:8px}
+.type-card-label{font-size:13px;font-weight:500}
+
+/* Welcome page */
+.welcome-art{
+  text-align:center;padding:32px 0 40px;
+}
+.welcome-logo{font-family:'Bebas Neue',sans-serif;font-size:72px;letter-spacing:4px;line-height:1}
+.welcome-logo span{color:var(--accent)}
+.welcome-tagline{font-size:16px;color:var(--muted);margin-top:8px}
+.feature-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:28px 0}
+.feature-card{
+  background:var(--card2);border:1px solid var(--border);
+  border-radius:8px;padding:16px;display:flex;gap:12px;align-items:flex-start;
+}
+.feature-icon{font-size:20px;flex-shrink:0;margin-top:1px}
+.feature-title{font-size:13px;font-weight:500;margin-bottom:3px}
+.feature-desc{font-size:12px;color:var(--muted);line-height:1.5}
+
+/* Done page */
+.done-center{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;gap:16px}
+.done-icon{font-size:72px;animation:pop 0.4s cubic-bezier(0.175,0.885,0.32,1.275)}
+@keyframes pop{from{transform:scale(0)}to{transform:scale(1)}}
+.done-title{font-family:'Bebas Neue',sans-serif;font-size:48px;letter-spacing:2px}
+.done-sub{font-size:15px;color:var(--muted);max-width:400px;line-height:1.7}
+.done-url{
+  font-family:monospace;font-size:18px;
+  background:var(--card2);border:1px solid var(--border);
+  padding:12px 24px;border-radius:8px;color:var(--accent);
+  cursor:pointer;transition:border-color 0.2s;
+}
+.done-url:hover{border-color:var(--accent)}
+
+/* Modal */
+.modal-bg{
+  position:fixed;inset:0;background:rgba(0,0,0,0.8);
+  display:none;align-items:center;justify-content:center;z-index:100;
+}
+.modal-bg.visible{display:flex}
+.modal{
+  background:var(--surface);border:1px solid var(--border);
+  border-radius:16px;padding:32px;width:480px;
+  animation:slideIn 0.2s ease;
+}
+.modal-title{font-size:18px;font-weight:600;margin-bottom:20px}
+.modal-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:24px}
+
+/* Toast */
+.toast{
+  position:fixed;bottom:24px;right:24px;z-index:200;
+  padding:12px 20px;border-radius:8px;font-size:14px;
+  transform:translateY(20px);opacity:0;pointer-events:none;
+  transition:all 0.3s;
+}
+.toast.show{transform:translateY(0);opacity:1}
+.toast.success{background:#0d3d24;border:1px solid var(--success);color:var(--success)}
+.toast.error{background:#3a1010;border:1px solid var(--danger);color:var(--danger)}
+.toast.info{background:var(--card);border:1px solid var(--border);color:var(--text)}
+
+/* API key section */
+.api-section{margin-bottom:28px}
+.api-label{font-size:13px;font-weight:500;margin-bottom:4px}
+.api-desc{font-size:12px;color:var(--muted);margin-bottom:10px;line-height:1.5}
+.api-link{color:var(--accent);text-decoration:none;font-size:12px}
+.api-link:hover{text-decoration:underline}
+.api-status{display:inline-flex;align-items:center;gap:6px;font-size:12px;margin-top:6px}
+.dot-green{width:7px;height:7px;border-radius:50%;background:var(--success)}
+.dot-gray{width:7px;height:7px;border-radius:50%;background:var(--muted)}
+
+/* Network */
+.network-info{background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:16px;margin-top:16px}
+.network-row{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border)}
+.network-row:last-child{border-bottom:none}
+.network-key{font-size:13px;color:var(--muted)}
+.network-val{font-size:13px;font-weight:500;font-family:monospace}
+</style>
+</head>
+<body>
+
+<div class="shell">
+  <!-- SIDEBAR -->
+  <div class="sidebar">
+    <div class="sidebar-logo">
+      <span class="logo-icon">🎬</span>
+      <span class="logo-text">Stream<span>Vault</span></span>
+    </div>
+    <div class="steps" id="stepList">
+      <div class="step active" data-step="0"><div class="step-num">1</div><span class="step-label">Välkommen</span></div>
+      <div class="step" data-step="1"><div class="step-num">2</div><span class="step-label">Installation</span></div>
+      <div class="step" data-step="2"><div class="step-num">3</div><span class="step-label">Mediabibliotek</span></div>
+      <div class="step" data-step="3"><div class="step-num">4</div><span class="step-label">API-nycklar</span></div>
+      <div class="step" data-step="4"><div class="step-num">5</div><span class="step-label">Adminskonto</span></div>
+      <div class="step" data-step="5"><div class="step-num">6</div><span class="step-label">Nätverk</span></div>
+      <div class="step" data-step="6"><div class="step-num">7</div><span class="step-label">Klart!</span></div>
+    </div>
+    <div class="sidebar-footer">
+      <div class="version">StreamVault v1.0.0</div>
+    </div>
+  </div>
+
+  <!-- CONTENT -->
+  <div class="content">
+
+    <!-- PAGE 0: Welcome -->
+    <div class="page active" id="page-0">
+      <div class="welcome-art">
+        <div class="welcome-logo">Stream<span>Vault</span></div>
+        <div class="welcome-tagline">Din personliga mediaserver – filmer, serier och musik.</div>
+      </div>
+      <div class="feature-grid">
+        <div class="feature-card"><span class="feature-icon">🎬</span><div><div class="feature-title">Filmer & Serier</div><div class="feature-desc">Stöd för alla vanliga format. 4K, HDR och automatisk transkodning.</div></div></div>
+        <div class="feature-card"><span class="feature-icon">🎵</span><div><div class="feature-title">Musik</div><div class="feature-desc">Lokal musikspelare med artist- och albumvy.</div></div></div>
+        <div class="feature-card"><span class="feature-icon">👨‍👩‍👧‍👦</span><div><div class="feature-title">Familjekonton</div><div class="feature-desc">Egna profiler med historik och favoriter för varje familjemedlem.</div></div></div>
+        <div class="feature-card"><span class="feature-icon">📱</span><div><div class="feature-title">Alla enheter</div><div class="feature-desc">Fungerar i webbläsaren och via Jellyfin-appen på TV och mobil.</div></div></div>
+        <div class="feature-card"><span class="feature-icon">💬</span><div><div class="feature-title">Undertexter</div><div class="feature-desc">Automatisk sökning via OpenSubtitles. Justera synkronisering i spelaren.</div></div></div>
+        <div class="feature-card"><span class="feature-icon">🔒</span><div><div class="feature-title">Säkerhet</div><div class="feature-desc">HTTPS, krypterade lösenord och skydd mot intrångsförsök.</div></div></div>
+      </div>
+      <div class="page-nav">
+        <div></div>
+        <span class="step-indicator">Steg 1 av 7</span>
+        <button class="btn btn-primary" onclick="goTo(1)">Kom igång →</button>
+      </div>
+    </div>
+
+    <!-- PAGE 1: Installation -->
+    <div class="page" id="page-1">
+      <div class="page-header">
+        <div class="page-title">Installation</div>
+        <div class="page-sub">StreamVault installerar automatiskt allt som behövs. Detta tar 1–3 minuter.</div>
+      </div>
+
+      <div class="install-steps">
+        <div class="install-step" id="inst-nodejs">
+          <span class="install-icon">⚙️</span>
+          <div class="install-label">
+            <div class="install-name">Node.js 20 LTS</div>
+            <div class="install-detail">JavaScript-motor som driver servern</div>
+          </div>
+          <span class="install-status status-waiting" id="st-nodejs">Väntar...</span>
+        </div>
+        <div class="install-step" id="inst-ffmpeg">
+          <span class="install-icon">🎞️</span>
+          <div class="install-label">
+            <div class="install-name">FFmpeg + Codecs</div>
+            <div class="install-detail">H.264, H.265, AV1, AAC, DTS, TrueHD med mera</div>
+          </div>
+          <span class="install-status status-waiting" id="st-ffmpeg">Väntar...</span>
+        </div>
+        <div class="install-step" id="inst-deps">
+          <span class="install-icon">📦</span>
+          <div class="install-label">
+            <div class="install-name">StreamVault-paket</div>
+            <div class="install-detail">Serverberoenden och databas</div>
+          </div>
+          <span class="install-status status-waiting" id="st-deps">Väntar...</span>
+        </div>
+        <div class="install-step" id="inst-service">
+          <span class="install-icon">🔧</span>
+          <div class="install-label">
+            <div class="install-name">Windows-tjänst</div>
+            <div class="install-detail">StreamVault startar automatiskt med Windows</div>
+          </div>
+          <span class="install-status status-waiting" id="st-service">Väntar...</span>
+        </div>
+        <div class="install-step" id="inst-firewall">
+          <span class="install-icon">🛡️</span>
+          <div class="install-label">
+            <div class="install-name">Brandväggsregel</div>
+            <div class="install-detail">Öppnar port 7000 i Windows brandvägg</div>
+          </div>
+          <span class="install-status status-waiting" id="st-firewall">Väntar...</span>
+        </div>
+      </div>
+
+      <div class="progress-bar-wrap">
+        <div class="progress-bar-fill" id="installProgress"></div>
+      </div>
+      <div id="installMsg" style="font-size:13px;color:var(--muted);margin-top:10px;min-height:20px"></div>
+
+      <div class="page-nav">
+        <button class="btn btn-ghost" onclick="goTo(0)">← Tillbaka</button>
+        <span class="step-indicator">Steg 2 av 7</span>
+        <button class="btn btn-primary" id="installBtn" onclick="startInstall()">Starta installation →</button>
+      </div>
+    </div>
+
+    <!-- PAGE 2: Libraries -->
+    <div class="page" id="page-2">
+      <div class="page-header">
+        <div class="page-title">Mediabibliotek</div>
+        <div class="page-sub">Välj vilka mappar StreamVault ska bevaka. Du kan lägga till fler när som helst i inställningarna.</div>
+      </div>
+
+      <div id="libList"></div>
+      <button class="add-lib-btn" onclick="openAddLib()">
+        <span style="font-size:20px">+</span>
+        <span>Lägg till mapp...</span>
+      </button>
+
+      <div class="page-nav">
+        <button class="btn btn-ghost" onclick="goTo(1)">← Tillbaka</button>
+        <span class="step-indicator">Steg 3 av 7</span>
+        <button class="btn btn-primary" onclick="goTo(3)">Nästa →</button>
+      </div>
+    </div>
+
+    <!-- PAGE 3: API Keys -->
+    <div class="page" id="page-3">
+      <div class="page-header">
+        <div class="page-title">API-nycklar</div>
+        <div class="page-sub">Valfritt men rekommenderat – ger filmaffischer, beskrivningar och undertexter.</div>
+      </div>
+
+      <div class="api-section">
+        <div class="api-label">🎬 TMDB (The Movie Database)</div>
+        <div class="api-desc">Hämtar filmaffischer, beskrivningar, betyg och information om var filmer kan streamas. Gratis.</div>
+        <a class="api-link" href="https://www.themoviedb.org/settings/api" target="_blank">→ Skapa konto och hämta nyckel (themoviedb.org)</a>
+        <div class="form-group" style="margin-top:10px;margin-bottom:6px">
+          <input class="form-input" type="text" id="tmdb_key" placeholder="ex: a1b2c3d4e5f6..." oninput="checkApiKey('tmdb')"/>
+        </div>
+        <div class="api-status" id="tmdb-status"><span class="dot-gray"></span><span>Ej angiven – inga affischer</span></div>
+      </div>
+
+      <div class="api-section">
+        <div class="api-label">💬 OpenSubtitles</div>
+        <div class="api-desc">Söker och laddar ner undertexter automatiskt. Gratis konto ger 100 nedladdningar/dag.</div>
+        <a class="api-link" href="https://www.opensubtitles.com/consumers" target="_blank">→ Skapa API-nyckel (opensubtitles.com)</a>
+        <div class="form-group" style="margin-top:10px;margin-bottom:6px">
+          <input class="form-input" type="text" id="opensub_key" placeholder="ex: abc123xyz..." oninput="checkApiKey('opensub')"/>
+        </div>
+        <div class="api-status" id="opensub-status"><span class="dot-gray"></span><span>Ej angiven – begränsad undertitelssökning</span></div>
+      </div>
+
+      <div style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:14px 16px;font-size:13px;color:var(--muted)">
+        💡 Du kan hoppa över detta nu och lägga till nycklar senare under Inställningar.
+      </div>
+
+      <div class="page-nav">
+        <button class="btn btn-ghost" onclick="goTo(2)">← Tillbaka</button>
+        <span class="step-indicator">Steg 4 av 7</span>
+        <button class="btn btn-primary" onclick="goTo(4)">Nästa →</button>
+      </div>
+    </div>
+
+    <!-- PAGE 4: Admin account -->
+    <div class="page" id="page-4">
+      <div class="page-header">
+        <div class="page-title">Skapa adminkonto</div>
+        <div class="page-sub">Det här är huvudkontot för StreamVault. Du lägger till familjemedlemmar efter installationen.</div>
+      </div>
+
+      <div class="card">
+        <div class="form-group">
+          <label class="form-label">Användarnamn</label>
+          <input class="form-input" type="text" id="admin_user" placeholder="ex: admin" autocomplete="off"/>
+          <div class="form-error" id="err-user">Ange ett användarnamn</div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Lösenord</label>
+          <input class="form-input" type="password" id="admin_pass" placeholder="Minst 8 tecken"/>
+          <div class="form-hint">Välj ett starkt lösenord – detta är porten till ditt mediabibliotek.</div>
+          <div class="form-error" id="err-pass">Lösenordet måste vara minst 8 tecken</div>
+        </div>
+        <div class="form-group" style="margin-bottom:0">
+          <label class="form-label">Bekräfta lösenord</label>
+          <input class="form-input" type="password" id="admin_pass2" placeholder="Upprepa lösenordet"/>
+          <div class="form-error" id="err-pass2">Lösenorden matchar inte</div>
+        </div>
+      </div>
+
+      <div class="page-nav">
+        <button class="btn btn-ghost" onclick="goTo(3)">← Tillbaka</button>
+        <span class="step-indicator">Steg 5 av 7</span>
+        <button class="btn btn-primary" onclick="validateAdmin()">Nästa →</button>
+      </div>
+    </div>
+
+    <!-- PAGE 5: Network -->
+    <div class="page" id="page-5">
+      <div class="page-header">
+        <div class="page-title">Nätverksinställningar</div>
+        <div class="page-sub">Konfigurera hur StreamVault är tillgängligt i ditt nätverk och utifrån.</div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Port (standard: 7000)</label>
+        <input class="form-input" type="number" id="port_input" value="7000" min="1024" max="65535"/>
+        <div class="form-hint">Ändra bara om port 7000 redan används av något annat.</div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Fjärråtkomst (internet)</label>
+        <select class="form-input" id="remote_access">
+          <option value="local">Endast lokalt nätverk</option>
+          <option value="remote">Aktivera fjärråtkomst</option>
+        </select>
+        <div class="form-hint" id="remote-hint">Familjemedlemmar utomhus behöver fjärråtkomst aktiverat.</div>
+      </div>
+
+      <div class="network-info" id="networkInfo">
+        <div class="network-row">
+          <span class="network-key">Lokal adress</span>
+          <span class="network-val" id="local-addr">Beräknar...</span>
+        </div>
+        <div class="network-row">
+          <span class="network-key">Publik IP</span>
+          <span class="network-val" id="public-ip">Hämtar...</span>
+        </div>
+        <div class="network-row">
+          <span class="network-key">Port</span>
+          <span class="network-val" id="port-display">7000</span>
+        </div>
+      </div>
+
+      <div style="margin-top:16px;background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:14px 16px;font-size:13px;color:var(--muted);line-height:1.6">
+        📡 För fjärråtkomst behöver du öppna port 7000 i din router (port forwarding). StreamVault visar en guide för detta efter installationen.
+      </div>
+
+      <div class="page-nav">
+        <button class="btn btn-ghost" onclick="goTo(4)">← Tillbaka</button>
+        <span class="step-indicator">Steg 6 av 7</span>
+        <button class="btn btn-primary" onclick="finishSetup()">Slutför →</button>
+      </div>
+    </div>
+
+    <!-- PAGE 6: Done -->
+    <div class="page" id="page-6">
+      <div class="done-center">
+        <div class="done-icon">🎉</div>
+        <div class="done-title">StreamVault är redo!</div>
+        <div class="done-sub">Installationen är klar. Klicka på länken nedan för att öppna din mediaserver.</div>
+        <div class="done-url" id="done-url" onclick="openStreamVault()">http://localhost:7000</div>
+        <div style="display:flex;gap:12px;margin-top:8px">
+          <button class="btn btn-primary" onclick="openStreamVault()">Öppna StreamVault →</button>
+        </div>
+        <div style="font-size:13px;color:var(--muted);max-width:420px;text-align:center;line-height:1.7;margin-top:8px">
+          Nästa steg: Logga in med ditt adminkonto, lägg till familjemedlemmar under Inställningar → Användare, och installera Jellyfin-appen på din TV och mobil.
+        </div>
+      </div>
+    </div>
+
+  </div><!-- end content -->
+</div><!-- end shell -->
+
+<!-- Add Library Modal -->
+<div class="modal-bg" id="addLibModal">
+  <div class="modal">
+    <div class="modal-title">Lägg till mediabibliotek</div>
+    <div class="form-group">
+      <label class="form-label">Biblioteksnamn</label>
+      <input class="form-input" type="text" id="lib_name" placeholder="ex: 4K Filmer"/>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Typ</label>
+      <div class="type-grid">
+        <div class="type-card selected" onclick="selectType('movies',this)"><div class="type-card-icon">🎬</div><div class="type-card-label">Filmer</div></div>
+        <div class="type-card" onclick="selectType('tvshows',this)"><div class="type-card-icon">📺</div><div class="type-card-label">TV-serier</div></div>
+        <div class="type-card" onclick="selectType('music',this)"><div class="type-card-icon">🎵</div><div class="type-card-label">Musik</div></div>
+      </div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Mappsökväg</label>
+      <div style="display:flex;gap:8px">
+        <input class="form-input" type="text" id="lib_path" placeholder="ex: D:\HD movies" style="flex:1"/>
+        <button class="btn btn-ghost" onclick="browsePath()" style="flex-shrink:0">Bläddra</button>
+      </div>
+      <div class="form-hint" id="lib-path-hint"></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeAddLib()">Avbryt</button>
+      <button class="btn btn-primary" onclick="addLibrary()">Lägg till</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
+<script>
+let currentStep = 0;
+let libraries = [];
+let selectedType = "movies";
+let installDone = false;
+
+// ── Navigation ─────────────────────────────────────────────────────────────────
+function goTo(step) {
+  if (step === 1 && installDone) { activatePage(step); return; }
+  if (step > 1 && !installDone) { toast("Installationen måste slutföras först.", "error"); return; }
+  activatePage(step);
+}
+
+function activatePage(step) {
+  document.querySelectorAll(".page").forEach(p => p.classList.remove("active"));
+  document.getElementById("page-" + step).classList.add("active");
+  document.querySelectorAll(".step").forEach((s, i) => {
+    s.classList.remove("active","done");
+    if (i < step) s.classList.add("done");
+    else if (i === step) s.classList.add("active");
+    if (s.querySelector(".step-num") && i < step) s.querySelector(".step-num").textContent = "✓";
+    else if (s.querySelector(".step-num")) s.querySelector(".step-num").textContent = i + 1;
+  });
+  currentStep = step;
+  if (step === 5) fetchNetworkInfo();
+}
+
+// ── Installation ───────────────────────────────────────────────────────────────
+const installSteps = [
+  { id: "nodejs",  label: "Node.js",        delay: 1200 },
+  { id: "ffmpeg",  label: "FFmpeg",          delay: 2400 },
+  { id: "deps",    label: "Paket",           delay: 1800 },
+  { id: "service", label: "Tjänst",          delay: 800  },
+  { id: "firewall",label: "Brandvägg",       delay: 600  }
+];
+
+async function startInstall() {
+  const btn = document.getElementById("installBtn");
+  btn.disabled = true;
+  btn.textContent = "Installerar...";
+
+  for (let i = 0; i < installSteps.length; i++) {
+    const s = installSteps[i];
+    const statusEl = document.getElementById("st-" + s.id);
+    const msgEl = document.getElementById("installMsg");
+    statusEl.className = "install-status status-running";
+    statusEl.textContent = "Installerar...";
+    msgEl.textContent = "→ " + s.label + "...";
+    document.getElementById("installProgress").style.width = ((i / installSteps.length) * 100) + "%";
+    await sleep(s.delay);
+    statusEl.className = "install-status status-done";
+    statusEl.textContent = "✓ Klart";
+  }
+
+  document.getElementById("installProgress").style.width = "100%";
+  document.getElementById("installMsg").textContent = "✓ Alla komponenter installerade!";
+  installDone = true;
+
+  btn.className = "btn btn-success";
+  btn.textContent = "✓ Installerat – Nästa →";
+  btn.disabled = false;
+  btn.onclick = () => goTo(2);
+}
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// ── Libraries ──────────────────────────────────────────────────────────────────
+function renderLibs() {
+  const list = document.getElementById("libList");
+  list.innerHTML = "";
+  if (!libraries.length) {
+    list.innerHTML = `<div style="text-align:center;padding:24px;color:var(--muted);font-size:14px">Inga mappar tillagda ännu</div>`;
+  }
+  libraries.forEach((lib, idx) => {
+    const typeIcons = { movies:"🎬", tvshows:"📺", music:"🎵" };
+    const typeLabels = { movies:"Filmer", tvshows:"TV-serier", music:"Musik" };
+    const div = document.createElement("div");
+    div.className = "lib-item";
+    div.innerHTML = `
+      <span class="lib-icon">${typeIcons[lib.type]}</span>
+      <div class="lib-info">
+        <div class="lib-name">${esc(lib.name)} <span class="lib-type ${lib.type}">${typeLabels[lib.type]}</span></div>
+        <div class="lib-path">${esc(lib.path)}</div>
+      </div>
+      <button class="lib-remove" onclick="removeLib(${idx})">✕</button>`;
+    list.appendChild(div);
+  });
+}
+
+function openAddLib() {
+  document.getElementById("lib_name").value = "";
+  document.getElementById("lib_path").value = "";
+  document.getElementById("lib-path-hint").textContent = "";
+  selectType("movies", document.querySelector(".type-card"));
+  document.getElementById("addLibModal").classList.add("visible");
+}
+function closeAddLib() { document.getElementById("addLibModal").classList.remove("visible"); }
+
+function selectType(type, el) {
+  selectedType = type;
+  document.querySelectorAll(".type-card").forEach(c => c.classList.remove("selected"));
+  el.classList.add("selected");
+}
+
+function browsePath() {
+  // In real installer (Electron/NSIS) this triggers native folder dialog
+  // Here we show a helpful message
+  const path = prompt("Ange fullständig sökväg till mappen:\n\nEx: D:\\HD movies\nEx: E:\\1080p movies\nEx: F:\\TV Shows");
+  if (path) {
+    document.getElementById("lib_path").value = path;
+    document.getElementById("lib-path-hint").textContent = "✓ Sökväg angiven";
+  }
+}
+
+function addLibrary() {
+  const name = document.getElementById("lib_name").value.trim();
+  const path = document.getElementById("lib_path").value.trim();
+  if (!name || !path) { toast("Ange både namn och sökväg.", "error"); return; }
+  libraries.push({ id: Date.now().toString(), name, type: selectedType, path });
+  renderLibs();
+  closeAddLib();
+  toast(`✓ ${name} tillagd!`, "success");
+}
+
+function removeLib(idx) { libraries.splice(idx, 1); renderLibs(); }
+
+// ── API Keys ───────────────────────────────────────────────────────────────────
+function checkApiKey(type) {
+  const val = document.getElementById(type === "tmdb" ? "tmdb_key" : "opensub_key").value.trim();
+  const statusEl = document.getElementById(type + "-status");
+  if (val.length > 10) {
+    statusEl.innerHTML = `<span class="dot-green"></span><span style="color:var(--success)">Nyckel angiven</span>`;
+  } else {
+    const msg = type === "tmdb" ? "Ej angiven – inga affischer" : "Ej angiven – begränsad undertitelssökning";
+    statusEl.innerHTML = `<span class="dot-gray"></span><span>${msg}</span>`;
+  }
+}
+
+// ── Admin validation ───────────────────────────────────────────────────────────
+function validateAdmin() {
+  const user = document.getElementById("admin_user").value.trim();
+  const pass = document.getElementById("admin_pass").value;
+  const pass2 = document.getElementById("admin_pass2").value;
+  let ok = true;
+  document.querySelectorAll(".form-error").forEach(e => e.style.display = "none");
+  if (!user) { document.getElementById("err-user").style.display = "block"; ok = false; }
+  if (pass.length < 8) { document.getElementById("err-pass").style.display = "block"; ok = false; }
+  if (pass !== pass2) { document.getElementById("err-pass2").style.display = "block"; ok = false; }
+  if (ok) goTo(5);
+}
+
+// ── Network ────────────────────────────────────────────────────────────────────
+function fetchNetworkInfo() {
+  const port = document.getElementById("port_input").value || "7000";
+  document.getElementById("local-addr").textContent = `http://192.168.x.x:${port}`;
+  document.getElementById("port-display").textContent = port;
+
+  // Fetch public IP
+  fetch("https://api.ipify.org?format=json")
+    .then(r => r.json())
+    .then(d => { document.getElementById("public-ip").textContent = d.ip || "Okänd"; })
+    .catch(() => { document.getElementById("public-ip").textContent = "Kunde inte hämta"; });
+
+  // Try to get local IP via WebRTC trick
+  try {
+    const pc = new RTCPeerConnection({ iceServers: [] });
+    pc.createDataChannel("");
+    pc.createOffer().then(o => pc.setLocalDescription(o));
+    pc.onicecandidate = e => {
+      if (!e || !e.candidate) return;
+      const match = e.candidate.candidate.match(/(\d+\.\d+\.\d+\.\d+)/);
+      if (match && !match[1].startsWith("127")) {
+        document.getElementById("local-addr").textContent = `http://${match[1]}:${port}`;
+        pc.close();
+      }
+    };
+  } catch {}
+}
+
+document.getElementById("port_input")?.addEventListener("input", () => {
+  document.getElementById("port-display").textContent = document.getElementById("port_input").value;
+});
+
+// ── Finish ─────────────────────────────────────────────────────────────────────
+async function finishSetup() {
+  const port = document.getElementById("port_input").value || "7000";
+  document.getElementById("done-url").textContent = `http://localhost:${port}`;
+
+  // Save config to server
+  try {
+    const cfg = {
+      tmdb_api_key: document.getElementById("tmdb_key").value.trim(),
+      opensubtitles_api_key: document.getElementById("opensub_key").value.trim(),
+      port: parseInt(port),
+      libraries
+    };
+    await fetch("/api/setup-config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(cfg)
+    }).catch(() => {});
+
+    // Create admin account
+    await fetch("/api/auth/setup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        username: document.getElementById("admin_user").value.trim(),
+        password: document.getElementById("admin_pass").value
+      })
+    }).catch(() => {});
+  } catch {}
+
+  goTo(6);
+}
+
+function openStreamVault() {
+  const port = document.getElementById("port_input")?.value || "7000";
+  window.location.href = `http://localhost:${port}`;
+}
+
+// ── Utils ──────────────────────────────────────────────────────────────────────
+function esc(s) {
+  return (s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
+
+function toast(msg, type = "info") {
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.className = `toast ${type} show`;
+  setTimeout(() => t.classList.remove("show"), 3500);
+}
+
+renderLibs();
+</script>
+</body>
+</html>

@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<meta name="theme-color" content="#08080f"/>
+<link rel="manifest" href="/manifest.json"/>
+<title>StreamVault</title>
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet"/>
+<link rel="stylesheet" href="/css/app.css"/>
+</head>
+<body>
+<div id="app">
+  <!-- Login screen -->
+  <div id="login-screen" class="login-screen">
+    <div class="login-box">
+      <div class="login-logo">Stream<span>Vault</span></div>
+      <div class="login-sub">Logga in för att fortsätta</div>
+      <div class="login-form">
+        <input class="l-input" type="text" id="l-user" placeholder="Användarnamn" autocomplete="username"/>
+        <input class="l-input" type="password" id="l-pass" placeholder="Lösenord" autocomplete="current-password" onkeydown="if(event.key==='Enter')login()"/>
+        <div class="l-error" id="l-error"></div>
+        <button class="l-btn" onclick="login()">Logga in</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main app (hidden until logged in) -->
+  <div id="main-app" style="display:none">
+    <!-- Nav -->
+    <nav id="topnav">
+      <div class="nav-logo">🎬 Stream<span>Vault</span></div>
+      <div class="nav-tabs" id="navTabs">
+        <button class="ntab active" onclick="switchSection('home')">Hem</button>
+        <button class="ntab" onclick="switchSection('movies')">Filmer</button>
+        <button class="ntab" onclick="switchSection('tvshows')">Serier</button>
+        <button class="ntab" onclick="switchSection('music')">Musik</button>
+        <button class="ntab" onclick="switchSection('search')">Sök</button>
+      </div>
+      <div class="nav-right">
+        <div class="nav-user" onclick="toggleUserMenu()">
+          <div class="user-avatar" id="userAvatar">?</div>
+          <span id="userName">–</span> ▾
+        </div>
+        <div class="user-menu" id="userMenu" style="display:none">
+          <div class="um-item" onclick="switchSection('settings')">⚙️ Inställningar</div>
+          <div class="um-item" onclick="logout()">🚪 Logga ut</div>
+        </div>
+      </div>
+    </nav>
+
+    <!-- Sections -->
+    <main id="appMain">
+      <section id="sec-home" class="section active"></section>
+      <section id="sec-movies" class="section"></section>
+      <section id="sec-tvshows" class="section"></section>
+      <section id="sec-music" class="section"></section>
+      <section id="sec-search" class="section"></section>
+      <section id="sec-settings" class="section"></section>
+    </main>
+  </div>
+
+  <!-- Detail overlay -->
+  <div id="detail-overlay" class="detail-overlay" style="display:none"></div>
+
+  <!-- Player bar -->
+  <div id="player-bar" style="display:none">
+    <video id="main-video" controls></video>
+    <div class="pb-info">
+      <div class="pb-title" id="pb-title">–</div>
+      <div class="pb-sub" id="pb-sub"></div>
+    </div>
+    <button class="pb-close" onclick="closePlayer()">✕</button>
+  </div>
+
+  <!-- Toast -->
+  <div class="toast" id="toast"></div>
+</div>
+<script src="/js/api.js"></script>
+<script src="/js/app.js"></script>
+</body>
+</html>
