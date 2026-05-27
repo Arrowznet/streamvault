@@ -1,0 +1,50 @@
+name: Build StreamVault Setup
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download Node.js installer
+        run: |
+          Invoke-WebRequest -Uri "https://nodejs.org/dist/v20.14.0/node-v20.14.0-x64.msi" -OutFile "deps\node-v20.14.0-x64.msi"
+        shell: powershell
+
+      - name: Download FFmpeg
+        run: |
+          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile "deps\ffmpeg-release-essentials.zip"
+        shell: powershell
+
+      - name: Download NSSM
+        run: |
+          Invoke-WebRequest -Uri "https://nssm.cc/release/nssm-2.24.zip" -OutFile "nssm.zip"
+          Expand-Archive -Path "nssm.zip" -DestinationPath "nssm-tmp" -Force
+          New-Item -ItemType Directory -Force -Path "deps\nssm"
+          Copy-Item "nssm-tmp\nssm-2.24\win64\nssm.exe" "deps\nssm\nssm.exe"
+        shell: powershell
+
+      - name: Install Inno Setup
+        run: |
+          Invoke-WebRequest -Uri "https://jrsoftware.org/download.php/is.exe" -OutFile "innosetup.exe"
+          Start-Process -FilePath "innosetup.exe" -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART" -Wait
+        shell: powershell
+
+      - name: Build installer
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" StreamVault.iss
+        shell: powershell
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: StreamVault-Setup
+          path: Output\StreamVault-Setup.exe
+          retention-days: 30
