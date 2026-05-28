@@ -1,5 +1,5 @@
 ; StreamVault v1.0.0 - Inno Setup 6
-; v10 - Fixed npm install, NSSM service, auto admin setup
+; v11 - Fixed npm install using full path
 
 #define AppName "StreamVault"
 #define AppVersion "1.0.0"
@@ -82,51 +82,26 @@ end;
 function FindNodeExe: String;
 var
   InstallPath: String;
-  ProgramFiles: String;
 begin
   Result := '';
-  // Check registry first (most reliable after fresh install)
   if RegQueryStringValue(HKLM, 'SOFTWARE\Node.js', 'InstallPath', InstallPath) then
-  begin
-    if FileExists(InstallPath + '\node.exe') then
-    begin
-      Result := InstallPath + '\node.exe';
-      Exit;
-    end;
-  end;
-  // Check 64-bit registry
+    if FileExists(InstallPath + '\node.exe') then begin Result := InstallPath + '\node.exe'; Exit; end;
   if RegQueryStringValue(HKLM, 'SOFTWARE\WOW6432Node\Node.js', 'InstallPath', InstallPath) then
-  begin
-    if FileExists(InstallPath + '\node.exe') then
-    begin
-      Result := InstallPath + '\node.exe';
-      Exit;
-    end;
-  end;
-  // Common install locations
-  ProgramFiles := 'C:\Program Files\nodejs\node.exe';
-  if FileExists(ProgramFiles) then begin Result := ProgramFiles; Exit; end;
-  ProgramFiles := 'C:\Program Files (x86)\nodejs\node.exe';
-  if FileExists(ProgramFiles) then begin Result := ProgramFiles; Exit; end;
-  // Last resort
+    if FileExists(InstallPath + '\node.exe') then begin Result := InstallPath + '\node.exe'; Exit; end;
+  if FileExists('C:\Program Files\nodejs\node.exe') then begin Result := 'C:\Program Files\nodejs\node.exe'; Exit; end;
+  if FileExists('C:\Program Files (x86)\nodejs\node.exe') then begin Result := 'C:\Program Files (x86)\nodejs\node.exe'; Exit; end;
   Result := 'node.exe';
 end;
 
-function FindNpmCmd: String;
+function FindNpmCli: String;
 var
   InstallPath: String;
 begin
   Result := '';
   if RegQueryStringValue(HKLM, 'SOFTWARE\Node.js', 'InstallPath', InstallPath) then
-  begin
-    if FileExists(InstallPath + '\npm.cmd') then
-    begin
-      Result := InstallPath + '\npm.cmd';
-      Exit;
-    end;
-  end;
-  if FileExists('C:\Program Files\nodejs\npm.cmd') then begin Result := 'C:\Program Files\nodejs\npm.cmd'; Exit; end;
-  Result := 'npm.cmd';
+    if FileExists(InstallPath + '\node_modules\npm\bin\npm-cli.js') then begin Result := InstallPath + '\node_modules\npm\bin\npm-cli.js'; Exit; end;
+  if FileExists('C:\Program Files\nodejs\node_modules\npm\bin\npm-cli.js') then begin Result := 'C:\Program Files\nodejs\node_modules\npm\bin\npm-cli.js'; Exit; end;
+  Result := '';
 end;
 
 procedure WriteConfig;
@@ -153,17 +128,17 @@ procedure CurStepChanged(CurStep: TSetupStep);
 var
   NssmPath: String;
   NodeExe: String;
-  NpmCmd: String;
-  ResultCode: Integer;
+  NpmCli: String;
   DataDir: String;
+  ResultCode: Integer;
 begin
   if CurStep <> ssPostInstall then Exit;
 
   DataDir := ExpandConstant('{commonappdata}\StreamVault');
 
   ProgressPage := CreateOutputProgressPage(
-    'Installing StreamVault components',
-    'Please wait while StreamVault is being configured...'
+    'Installing StreamVault',
+    'Please wait...'
   );
   ProgressPage.Show;
 
@@ -174,13 +149,10 @@ begin
     Exec('msiexec.exe',
       '/i "' + ExpandConstant('{tmp}\node-v20.14.0-x64.msi') + '" /qn /norestart ADDLOCAL=ALL',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-
-    // Refresh environment so node is findable immediately
-    Exec('cmd.exe', '/c setx PATH "%PATH%" /M', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    Sleep(1000);
+    Sleep(2000);
 
     // ── Step 2: FFmpeg ─────────────────────────────────────────────────────────
-    SetStep(1, 8, 'Installing FFmpeg and codecs...', 'H.264, H.265, AV1, AAC, DTS, TrueHD...');
+    SetStep(1, 8, 'Installing FFmpeg and codecs...', 'H.264, H.265, AV1, AAC, DTS...');
     if not FileExists(ExpandConstant('{#InstallDir}\ffmpeg\bin\ffmpeg.exe')) then
     begin
       Exec('powershell.exe',
@@ -197,41 +169,35 @@ begin
       DelTree(ExpandConstant('{#InstallDir}\ffmpeg-tmp'), True, True, True);
     end;
 
-    // ── Step 3: Find Node + npm paths ──────────────────────────────────────────
-    SetStep(2, 8, 'Locating Node.js installation...', '');
+    // ── Step 3: Find Node paths ────────────────────────────────────────────────
+    SetStep(2, 8, 'Locating Node.js...', '');
     NodeExe := FindNodeExe;
-    NpmCmd := FindNpmCmd;
+    NpmCli := FindNpmCli;
 
-    // ── Step 4: npm install ────────────────────────────────────────────────────
-    SetStep(3, 8, 'Installing Node.js dependencies...', 'express, bcrypt, sqlite3...');
-
-    // Use full path to npm to avoid PATH issues
-    if FileExists(NpmCmd) then
+    // ── Step 4: npm install using full path to node + npm-cli.js ──────────────
+    SetStep(3, 8, 'Installing dependencies...', 'express, bcrypt, sqlite3...');
+    if (NodeExe <> 'node.exe') and (NpmCli <> '') then
     begin
-      Exec('cmd.exe',
-        '/c "' + NpmCmd + '" install --production --prefix "' + ExpandConstant('{#InstallDir}') + '"',
-        ExpandConstant('{#InstallDir}'), SW_HIDE, ewWaitUntilTerminated, ResultCode);
+      // Best method: node + npm-cli.js with full paths
+      Exec(NodeExe,
+        '"' + NpmCli + '" install --production',
+        ExpandConstant('{#InstallDir}'),
+        SW_HIDE, ewWaitUntilTerminated, ResultCode);
     end
     else
     begin
-      // Fallback: use node directly with npm script
-      Exec(NodeExe,
-        '"C:\Program Files\nodejs\node_modules\npm\bin\npm-cli.js" install --production',
-        ExpandConstant('{#InstallDir}'), SW_HIDE, ewWaitUntilTerminated, ResultCode);
+      // Fallback: use powershell to run npm with refreshed PATH
+      Exec('powershell.exe',
+        '-NoProfile -ExecutionPolicy Bypass -Command "' +
+        '$env:Path = [System.Environment]::GetEnvironmentVariable(''Path'',''Machine'') + '';'' + [System.Environment]::GetEnvironmentVariable(''Path'',''User''); ' +
+        'Set-Location ''' + ExpandConstant('{#InstallDir}') + '''; ' +
+        'npm install --production"',
+        '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     end;
 
     // ── Step 5: Write config ───────────────────────────────────────────────────
     SetStep(4, 8, 'Creating configuration...', '');
     WriteConfig;
-
-    // Write env file so server knows where data is
-    SaveStringToFile(
-      ExpandConstant('{#InstallDir}\streamvault.env'),
-      'STREAMVAULT_DATA=' + DataDir,
-      False
-    );
-
-    // Write start.bat
     SaveStringToFile(
       ExpandConstant('{#InstallDir}\start.bat'),
       '@echo off' + #13#10 +
@@ -240,49 +206,40 @@ begin
       False
     );
 
-    // ── Step 6: Windows Service via NSSM ──────────────────────────────────────
-    SetStep(5, 8, 'Registering Windows service...', 'StreamVault will start automatically with Windows');
+    // ── Step 6: Windows Service ────────────────────────────────────────────────
+    SetStep(5, 8, 'Registering Windows service...', 'StreamVault will start automatically');
     NssmPath := ExpandConstant('{#InstallDir}\tools\nssm.exe');
-
-    // Remove old service if exists
     Exec(NssmPath, 'stop StreamVault', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Exec(NssmPath, 'remove StreamVault confirm', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-
-    // Install service with full paths
     Exec(NssmPath,
       'install StreamVault "' + NodeExe + '" "' + ExpandConstant('{#InstallDir}\server\index.js') + '"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    Exec(NssmPath,
-      'set StreamVault AppDirectory "' + ExpandConstant('{#InstallDir}') + '"',
+    Exec(NssmPath, 'set StreamVault AppDirectory "' + ExpandConstant('{#InstallDir}') + '"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    Exec(NssmPath,
-      'set StreamVault AppEnvironmentExtra "STREAMVAULT_DATA=' + DataDir + '"',
+    Exec(NssmPath, 'set StreamVault AppEnvironmentExtra "STREAMVAULT_DATA=' + DataDir + '"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Exec(NssmPath, 'set StreamVault Description "StreamVault Media Server"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Exec(NssmPath, 'set StreamVault Start SERVICE_AUTO_START',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    Exec(NssmPath,
-      'set StreamVault AppStdout "' + DataDir + '\streamvault.log"',
+    Exec(NssmPath, 'set StreamVault AppStdout "' + DataDir + '\streamvault.log"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    Exec(NssmPath,
-      'set StreamVault AppStderr "' + DataDir + '\error.log"',
+    Exec(NssmPath, 'set StreamVault AppStderr "' + DataDir + '\error.log"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Exec(NssmPath, 'start StreamVault', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
     // ── Step 7: Firewall ───────────────────────────────────────────────────────
     SetStep(6, 8, 'Adding firewall rule...', 'Opening port 7000');
-    Exec('netsh.exe',
-      'advfirewall firewall delete rule name="StreamVault"',
+    Exec('netsh.exe', 'advfirewall firewall delete rule name="StreamVault"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Exec('netsh.exe',
       'advfirewall firewall add rule name="StreamVault" dir=in action=allow protocol=TCP localport=7000',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
-    // ── Step 8: Wait and open setup wizard ────────────────────────────────────
-    SetStep(7, 8, 'Starting StreamVault...', 'Waiting for server to start...');
+    // ── Step 8: Done ───────────────────────────────────────────────────────────
+    SetStep(7, 8, 'Starting StreamVault...', 'Waiting for server...');
     Sleep(5000);
-    SetStep(8, 8, 'Done!', 'StreamVault is ready');
+    SetStep(8, 8, 'Installation complete!', '');
 
   finally
     ProgressPage.Hide;
@@ -294,13 +251,10 @@ var
   ResultCode: Integer;
 begin
   if CurUninstallStep <> usPostUninstall then Exit;
-  if MsgBox(
-    'Do you also want to remove StreamVault data?' + #13#10 +
+  if MsgBox('Do you also want to remove StreamVault data?' + #13#10 +
     '(Library settings, user accounts, watch history)',
     mbConfirmation, MB_YESNO) = IDYES then
-  begin
     DelTree(ExpandConstant('{commonappdata}\StreamVault'), True, True, True);
-  end;
   Exec('netsh.exe', 'advfirewall firewall delete rule name="StreamVault"',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
