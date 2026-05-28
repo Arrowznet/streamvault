@@ -459,3 +459,76 @@ server.listen(PORT,()=>{
 });
 process.on("SIGTERM",()=>{server.close();process.exit(0);});
 process.on("SIGINT",()=>{server.close();process.exit(0);});
+
+// ── FOLDER BROWSER API ─────────────────────────────────────────────────────────
+const os = require("os");
+
+app.get("/api/browse", requireAuth, (req, res) => {
+  const reqPath = req.query.path || "";
+
+  try {
+    // Root level – show drives on Windows, / on Linux
+    if (!reqPath) {
+      if (process.platform === "win32") {
+        // Get Windows drives
+        const { execSync } = require("child_process");
+        try {
+          const output = execSync("wmic logicaldisk get name", { encoding: "utf8", windowsHide: true });
+          const drives = output.split("\n")
+            .map(l => l.trim())
+            .filter(l => /^[A-Z]:$/.test(l))
+            .map(d => ({ name: d, path: d + "\\", type: "drive" }));
+          return res.json({ current: "", items: drives, parent: null });
+        } catch {
+          return res.json({ current: "", items: [{ name: "C:", path: "C:\\", type: "drive" }], parent: null });
+        }
+      } else {
+        // Linux/Mac – start at /
+        const items = fs.readdirSync("/", { withFileTypes: true })
+          .filter(e => e.isDirectory())
+          .map(e => ({ name: e.name, path: "/" + e.name, type: "folder" }));
+        return res.json({ current: "/", items, parent: null });
+      }
+    }
+
+    // Validate path exists
+    if (!fs.existsSync(reqPath)) {
+      return res.status(400).json({ error: "Sökvägen finns inte" });
+    }
+
+    const stat = fs.statSync(reqPath);
+    if (!stat.isDirectory()) {
+      return res.status(400).json({ error: "Inte en mapp" });
+    }
+
+    // Get parent path
+    const parentPath = path.dirname(reqPath);
+    const parent = parentPath === reqPath ? null : parentPath;
+
+    // List directory contents – only folders
+    const entries = fs.readdirSync(reqPath, { withFileTypes: true });
+    const items = entries
+      .filter(e => {
+        if (!e.isDirectory()) return false;
+        // Skip hidden/system folders on Windows
+        if (process.platform === "win32") {
+          const skip = ["$Recycle.Bin", "System Volume Information", "$WINDOWS.~BT", "$WinREAgent", "Recovery", "Config.Msi"];
+          if (skip.includes(e.name)) return false;
+          if (e.name.startsWith("$")) return false;
+        }
+        // Skip hidden folders (starting with .)
+        if (e.name.startsWith(".")) return false;
+        return true;
+      })
+      .map(e => ({
+        name: e.name,
+        path: path.join(reqPath, e.name),
+        type: "folder"
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+
+    res.json({ current: reqPath, items, parent });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
