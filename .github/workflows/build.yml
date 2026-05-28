@@ -35,7 +35,7 @@ jobs:
 
       - name: Download NSSM
         run: |
-          Invoke-WebRequest -Uri "https://nssm.cc/release/nssm-2.24.zip" -OutFile "nssm.zip"
+          Invoke-WebRequest -Uri "https://github.com/nicholasgasior/nssm-windows/releases/download/v2.24/nssm-2.24.zip" -OutFile "nssm.zip"
           Expand-Archive -Path "nssm.zip" -DestinationPath "nssm-tmp" -Force
           Copy-Item "nssm-tmp\nssm-2.24\win64\nssm.exe" "deps\nssm\nssm.exe"
         shell: powershell
