@@ -529,7 +529,10 @@ async function loadSettings() {
             <option value="tvshows">📺 TV-serier</option>
             <option value="music">🎵 Musik</option>
           </select>
-          <input class="s-input" id="new-lib-path" placeholder="Sökväg (ex: D:\\Movies)"/>
+          <div style="display:flex;gap:6px;flex:1">
+            <input class="s-input" id="new-lib-path" placeholder="Sökväg (ex: D:\\Movies)" style="flex:1"/>
+            <button class="s-btn" onclick="openFolderBrowser(p => { document.getElementById('new-lib-path').value = p; })" style="flex-shrink:0">📁 Bläddra</button>
+          </div>
           <button class="s-btn primary" onclick="addLib()">Lägg till</button>
         </div>
       </div>
@@ -649,4 +652,113 @@ function toast(msg, type = "info") {
   t.textContent = msg;
   t.className = `toast ${type} show`;
   setTimeout(() => t.classList.remove("show"), 3500);
+}
+
+// ── FOLDER BROWSER ─────────────────────────────────────────────────────────────
+let fbCallback = null;
+let fbSelected = null;
+
+async function openFolderBrowser(callback) {
+  fbCallback = callback;
+  fbSelected = null;
+
+  const overlay = document.createElement("div");
+  overlay.className = "fb-overlay";
+  overlay.id = "fb-overlay";
+  overlay.innerHTML = `
+    <div class="fb-modal">
+      <div class="fb-header">
+        <span style="font-size:20px">📁</span>
+        <span class="fb-title">Välj mapp</span>
+        <button class="fb-close" onclick="closeFolderBrowser()">✕</button>
+      </div>
+      <div class="fb-path" id="fb-path">Väljer startposition...</div>
+      <div class="fb-body" id="fb-body">
+        <div class="fb-spinner">⏳ Laddar...</div>
+      </div>
+      <div class="fb-footer">
+        <span class="fb-selected-path" id="fb-selected-display">Ingen mapp vald</span>
+        <button class="btn btn-ghost btn-sm" onclick="closeFolderBrowser()">Avbryt</button>
+        <button class="btn btn-primary btn-sm" id="fb-select-btn" onclick="confirmFolderSelection()" disabled>Välj denna mapp</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  await loadFolder("");
+}
+
+function closeFolderBrowser() {
+  document.getElementById("fb-overlay")?.remove();
+  fbCallback = null;
+  fbSelected = null;
+}
+
+async function loadFolder(folderPath) {
+  const body = document.getElementById("fb-body");
+  const pathEl = document.getElementById("fb-path");
+  if (!body) return;
+
+  body.innerHTML = `<div class="fb-spinner">⏳ Laddar...</div>`;
+
+  try {
+    const url = "/api/browse" + (folderPath ? "?path=" + encodeURIComponent(folderPath) : "");
+    const data = await API.get(url.replace("/api", ""));
+    
+    pathEl.textContent = data.current || "Enheter";
+
+    let html = "";
+
+    // Up button
+    if (data.parent !== null && data.parent !== undefined) {
+      html += `<div class="fb-up" onclick='loadFolder(${JSON.stringify(data.parent)})'>
+        <span class="fb-icon">⬆️</span>
+        <span>.. (upp en nivå)</span>
+      </div>`;
+    }
+
+    if (!data.items.length) {
+      html += `<div style="text-align:center;padding:32px;color:var(--muted);font-size:13px">Mappen är tom</div>`;
+    }
+
+    data.items.forEach(item => {
+      const icon = item.type === "drive" ? "💾" : "📁";
+      html += `<div class="fb-item" onclick='selectFolderItem(${JSON.stringify(item.path)}, ${JSON.stringify(item.name)})'>
+        <span class="fb-icon">${icon}</span>
+        <span class="fb-name">${esc(item.name)}</span>
+        <span class="fb-arrow">›</span>
+      </div>`;
+    });
+
+    body.innerHTML = html;
+
+    // If we're in a folder (not root), allow selecting current folder
+    if (data.current) {
+      fbSelected = data.current;
+      const display = document.getElementById("fb-selected-display");
+      const btn = document.getElementById("fb-select-btn");
+      if (display) display.textContent = data.current;
+      if (btn) btn.disabled = false;
+    }
+
+  } catch(e) {
+    body.innerHTML = `<div class="fb-spinner">⚠️ Kunde inte ladda mappen: ${e.message}</div>`;
+  }
+}
+
+function selectFolderItem(itemPath, name) {
+  // Mark as selected and navigate into it
+  document.querySelectorAll(".fb-item").forEach(el => el.classList.remove("selected"));
+  event.currentTarget.classList.add("selected");
+  fbSelected = itemPath;
+  const display = document.getElementById("fb-selected-display");
+  const btn = document.getElementById("fb-select-btn");
+  if (display) display.textContent = itemPath;
+  if (btn) btn.disabled = false;
+  // Navigate into folder after short delay
+  setTimeout(() => loadFolder(itemPath), 200);
+}
+
+function confirmFolderSelection() {
+  if (!fbSelected || !fbCallback) return;
+  fbCallback(fbSelected);
+  closeFolderBrowser();
 }
