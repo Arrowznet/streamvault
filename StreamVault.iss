@@ -202,12 +202,17 @@ begin
     NssmPath := AppDir + '\tools\nssm.exe';
     Exec(NssmPath, 'stop StreamVault', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Exec(NssmPath, 'remove StreamVault confirm', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    // Install with just node.exe, set script as AppParameters
     Exec(NssmPath,
-      'install StreamVault "' + NodeExe + '" "' + AppDir + '\server\index.js"',
+      'install StreamVault "' + NodeExe + '"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Exec(NssmPath, 'set StreamVault AppDirectory "' + AppDir + '"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Exec(NssmPath, 'set StreamVault AppParameters ""' + AppDir + '\server\index.js""',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Exec(NssmPath, 'set StreamVault AppEnvironmentExtra "STREAMVAULT_DATA=' + DataDir + '"',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Exec(NssmPath, 'set StreamVault AppEnvironment "STREAMVAULT_DATA=' + DataDir + '"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Exec(NssmPath, 'set StreamVault Description "StreamVault Media Server"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
@@ -227,7 +232,7 @@ begin
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
     SetStep(7, 8, 'Starting StreamVault...', 'Waiting for server...');
-    Sleep(5000);
+    Sleep(8000);
     SetStep(8, 8, 'Installation complete!', '');
 
   finally

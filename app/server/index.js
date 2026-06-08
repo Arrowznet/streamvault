@@ -32,8 +32,8 @@ function loadConfig() {
 let config = loadConfig();
 
 // Default API keys - users can override in Settings
-const DEFAULT_TMDB_KEY = "YOUR_TMDB_KEY_HERE";
-const DEFAULT_OPENSUBTITLES_KEY = "YOUR_OPENSUBTITLES_KEY_HERE";
+const DEFAULT_TMDB_KEY = "439613bac1cb0c87f7de88ebac8c1384";
+const DEFAULT_OPENSUBTITLES_KEY = "SSxWHxl1XOgPQjSe4D9hzZxKIkj9vQDW";
 if (!config.tmdb_api_key && DEFAULT_TMDB_KEY !== "YOUR_TMDB_KEY_HERE")
   config.tmdb_api_key = DEFAULT_TMDB_KEY;
 if (!config.opensubtitles_api_key && DEFAULT_OPENSUBTITLES_KEY !== "YOUR_OPENSUBTITLES_KEY_HERE")
