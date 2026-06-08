@@ -81,26 +81,32 @@
 
   <!-- Main app -->
   <div id="main-app" style="display:none">
-    <nav id="topnav">
-      <div class="nav-logo">🎬 Stream<span>Vault</span></div>
-      <div class="nav-tabs" id="navTabs">
-        <button class="ntab active" onclick="switchSection('home')">Hem</button>
-        <button class="ntab" onclick="switchSection('movies')">Filmer</button>
-        <button class="ntab" onclick="switchSection('tvshows')">Serier</button>
-        <button class="ntab" onclick="switchSection('music')">Musik</button>
-        <button class="ntab" onclick="switchSection('search')">Sök</button>
-      </div>
-      <div class="nav-right">
-        <div class="nav-user" onclick="toggleUserMenu()">
-          <div class="user-avatar" id="userAvatar">?</div>
-          <span id="userName">–</span> ▾
+    <!-- Plex-style sidebar -->
+    <aside id="sidebar">
+      <div class="sb-logo">Stream<span>Vault</span></div>
+      <nav class="sb-nav">
+        <div class="sb-item active" id="sb-home" onclick="switchSection('home')">
+          <span class="sb-icon">🏠</span><span class="sb-label">Hem</span>
         </div>
+        <div class="sb-item" id="sb-search" onclick="switchSection('search')">
+          <span class="sb-icon">🔍</span><span class="sb-label">Sök</span>
+        </div>
+        <div class="sb-sep">BIBLIOTEK</div>
+        <div id="sb-libraries"></div>
+        <div class="sb-sep">ÖVRIGT</div>
+        <div class="sb-item" id="sb-settings" onclick="switchSection('settings')">
+          <span class="sb-icon">⚙️</span><span class="sb-label">Inställningar</span>
+        </div>
+      </nav>
+      <div class="sb-user" onclick="toggleUserMenu()">
+        <div class="user-avatar" id="userAvatar">?</div>
+        <span id="userName">–</span>
         <div class="user-menu" id="userMenu" style="display:none">
           <div class="um-item" onclick="switchSection('settings')">⚙️ Inställningar</div>
           <div class="um-item" onclick="logout()">🚪 Logga ut</div>
         </div>
       </div>
-    </nav>
+    </aside>
     <main id="appMain">
       <section id="sec-home" class="section active"></section>
       <section id="sec-movies" class="section"></section>
@@ -108,6 +114,7 @@
       <section id="sec-music" class="section"></section>
       <section id="sec-search" class="section"></section>
       <section id="sec-settings" class="section"></section>
+      <section id="sec-library" class="section"></section>
     </main>
   </div>
 
