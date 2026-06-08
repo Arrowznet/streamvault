@@ -2,6 +2,8 @@ name: Build StreamVault Setup
 on:
   push:
     branches: [ main ]
+    tags:
+      - 'v*'
   workflow_dispatch:
 jobs:
   build:
@@ -43,9 +45,27 @@ jobs:
         run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" StreamVault.iss'
         shell: powershell
 
-      - name: Upload installer
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: StreamVault-Setup
           path: Output\StreamVault-Setup.exe
           retention-days: 30
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Output\StreamVault-Setup.exe
+          name: StreamVault ${{ github.ref_name }}
+          body: |
+            ## StreamVault ${{ github.ref_name }}
+            
+            ### Installation
+            Ladda ner och kör **StreamVault-Setup.exe**
+            
+            ### Krav
+            - Windows 10/11
+            - Internetanslutning (Node.js och FFmpeg laddas ner automatiskt)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
