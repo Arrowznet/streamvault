@@ -114,12 +114,33 @@
   <div id="detail-overlay" class="detail-overlay" style="display:none"></div>
 
   <div id="player-bar" style="display:none">
-    <video id="main-video" controls></video>
-    <div class="pb-info">
-      <div class="pb-title" id="pb-title">–</div>
-      <div class="pb-sub" id="pb-sub"></div>
+    <video id="main-video"></video>
+    <div class="custom-controls" id="custom-controls">
+      <div class="ctrl-progress-wrap" id="ctrl-progress-wrap">
+        <div class="ctrl-progress-bg" id="ctrl-progress-bg">
+          <div class="ctrl-buffer-fill" id="ctrl-buffer-fill"></div>
+          <div class="ctrl-progress-fill" id="ctrl-progress-fill"></div>
+          <input type="range" class="ctrl-seek" id="ctrl-seek" min="0" max="1000" value="0" step="1">
+          <div class="ctrl-hover-time" id="ctrl-hover-time"></div>
+        </div>
+        <span class="ctrl-time" id="ctrl-time">0:00 / 0:00</span>
+      </div>
+      <div class="ctrl-row">
+        <button class="ctrl-btn" id="ctrl-play" onclick="togglePlay()">▶</button>
+        <button class="ctrl-btn" onclick="skipTime(-30)">-30s</button>
+        <button class="ctrl-btn" onclick="skipTime(30)">+30s</button>
+        <div class="ctrl-vol">
+          <button class="ctrl-btn" onclick="toggleMute()">🔊</button>
+          <input type="range" id="ctrl-volume" min="0" max="100" value="100" oninput="setVolume(this.value)">
+        </div>
+        <button class="ctrl-btn" onclick="toggleFullscreen()">⛶</button>
+        <button class="ctrl-btn ctrl-close" onclick="closePlayer()">✕</button>
+        <div class="pb-info">
+          <div class="pb-title" id="pb-title">–</div>
+          <div class="pb-sub" id="pb-sub"></div>
+        </div>
+      </div>
     </div>
-    <button class="pb-close" onclick="closePlayer()">✕</button>
   </div>
 
   <div class="toast" id="toast"></div>

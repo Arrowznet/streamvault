@@ -1,19 +1,20 @@
 {
   "name": "streamvault",
   "version": "1.0.0",
-  "description": "StreamVault Media Server",
+  "description": "StreamVault - Self-hosted media server",
   "main": "server/index.js",
   "scripts": {
-    "start": "node server/index.js"
+    "start": "node server/index.js",
+    "install-deps": "npm install express cors bcryptjs jsonwebtoken nedb express-rate-limit"
   },
+  "author": "Arrowznet",
+  "license": "MIT",
   "dependencies": {
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "express": "^4.18.2",
     "express-rate-limit": "^7.1.5",
     "jsonwebtoken": "^9.0.2",
-    "uuid": "^9.0.0",
-    "lowdb": "^1.0.0",
     "nedb": "^1.8.0"
   }
 }

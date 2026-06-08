@@ -1,3 +1,6 @@
+const STREAMVAULT_VERSION = "1.0.0";
+const GITHUB_REPO = "Arrowznet/streamvault";
+
 const express = require("express");
 const fs = require("fs");
 const path = require("path");
@@ -27,6 +30,15 @@ function loadConfig() {
   return JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
 }
 let config = loadConfig();
+
+// ── DEFAULT API KEYS ──────────────────────────────────────────────────────────
+// Fill in your own keys here - users can override in Settings
+const DEFAULT_TMDB_KEY     = "439613bac1cb0c87f7de88ebac8c1384";
+const DEFAULT_OPENSUBTITLES_KEY = "SSxWHxl1XOgPQjSe4D9hzZxKIkj9vQDW";
+if (!config.tmdb_api_key && DEFAULT_TMDB_KEY !== "YOUR_TMDB_KEY_HERE")
+  config.tmdb_api_key = DEFAULT_TMDB_KEY;
+if (!config.opensubtitles_api_key && DEFAULT_OPENSUBTITLES_KEY !== "YOUR_OPENSUBTITLES_KEY_HERE")
+  config.opensubtitles_api_key = DEFAULT_OPENSUBTITLES_KEY;
 
 const db = {
   users: new Datastore({ filename: path.join(DATA_DIR, "users.db"), autoload: true }),
@@ -58,16 +70,20 @@ app.use("/api", rateLimit({ windowMs: 60*1000, max: 300 }));
 
 function generateTokens(userId) {
   return {
-    accessToken: jwt.sign({ userId, type: "access" }, config.jwt_secret, { expiresIn: "15m" }),
+    accessToken: jwt.sign({ userId, type: "access" }, config.jwt_secret, { expiresIn: "24h" }),
     refreshToken: jwt.sign({ userId, type: "refresh" }, config.jwt_secret, { expiresIn: "30d" })
   };
 }
 
 function requireAuth(req, res, next) {
+  // Accept token from header OR query parameter (needed for video streaming)
+  let token = null;
   const auth = req.headers.authorization;
-  if (!auth?.startsWith("Bearer ")) return res.status(401).json({ error: "Ej autentiserad" });
+  if (auth?.startsWith("Bearer ")) token = auth.slice(7);
+  else if (req.query.token) token = req.query.token;
+  if (!token) return res.status(401).json({ error: "Ej autentiserad" });
   try {
-    const payload = jwt.verify(auth.slice(7), config.jwt_secret);
+    const payload = jwt.verify(token, config.jwt_secret);
     if (payload.type !== "access") throw new Error();
     dbFindOne(db.users, { _id: payload.userId, is_active: true }).then(user => {
       if (!user) return res.status(401).json({ error: "Användare hittades inte" });
@@ -173,6 +189,38 @@ app.patch("/api/users/:id/password", requireAuth, async (req, res) => {
 
 app.get("/api/libraries", requireAuth, (req, res) => res.json(config.libraries || []));
 
+// ── VERSION & UPDATES ─────────────────────────────────────────────────────────
+app.get("/api/version", (req, res) => {
+  res.json({ version: STREAMVAULT_VERSION, repo: GITHUB_REPO });
+});
+
+app.get("/api/updates/check", requireAuth, async (req, res) => {
+  try {
+    const data = await new Promise((resolve, reject) => {
+      https.get({
+        hostname: "api.github.com",
+        path: `/repos/${GITHUB_REPO}/releases/latest`,
+        headers: { "User-Agent": "StreamVault/" + STREAMVAULT_VERSION }
+      }, r => {
+        let d = ""; r.on("data", c => d += c);
+        r.on("end", () => { try { resolve(JSON.parse(d)); } catch { reject(new Error("parse")); } });
+      }).on("error", reject);
+    });
+    const latest = (data.tag_name || "v" + STREAMVAULT_VERSION).replace(/^v/, "");
+    const hasUpdate = latest !== STREAMVAULT_VERSION;
+    res.json({
+      current: STREAMVAULT_VERSION,
+      latest,
+      hasUpdate,
+      releaseNotes: data.body || "",
+      downloadUrl: data.assets?.[0]?.browser_download_url || null,
+      htmlUrl: data.html_url || null
+    });
+  } catch {
+    res.json({ current: STREAMVAULT_VERSION, latest: STREAMVAULT_VERSION, hasUpdate: false });
+  }
+});
+
 app.post("/api/libraries", requireAdmin, (req, res) => {
   const { name, type, path: libPath } = req.body;
   if (!name || !type || !libPath) return res.status(400).json({ error: "Saknar fält" });
@@ -180,6 +228,7 @@ app.post("/api/libraries", requireAdmin, (req, res) => {
   const lib = { id: uuidv4(), name, type, path: libPath };
   config.libraries.push(lib);
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
+  startFileWatchers(); // Watch new library
   res.json(lib);
 });
 
@@ -187,6 +236,7 @@ app.delete("/api/libraries/:id", requireAdmin, async (req, res) => {
   config.libraries = config.libraries.filter(l => l.id !== req.params.id);
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
   await dbRemove(db.media, { library_id: req.params.id }, { multi: true });
+  startFileWatchers(); // Update watchers
   res.json({ ok: true });
 });
 
@@ -194,11 +244,20 @@ const VIDEO_EXT = new Set([".mp4",".mkv",".avi",".mov",".wmv",".m4v",".ts",".web
 const AUDIO_EXT = new Set([".mp3",".flac",".aac",".ogg",".wav",".m4a",".opus",".wma"]);
 
 function cleanTitle(name) {
-  let n = path.parse(name).name.replace(/[\.\-\_]/g," ");
-  n = n.replace(/\b(1080p|2160p|4k|uhd|720p|480p|bluray|bdrip|webrip|web-dl|hdtv|x264|x265|hevc|avc|aac|dts|ac3|h264|h265|remux|hdr|dolby|atmos|truehd|proper|repack)\b/gi,"");
+  let n = path.parse(name).name;
+  // Replace separators with spaces
+  n = n.replace(/[\.\-\_]/g," ");
+  // Remove common release tags
+  n = n.replace(/\b(1080p|2160p|4k|uhd|720p|480p|bluray|blu ray|bdrip|webrip|web dl|web|hdtv|x264|x265|hevc|avc|aac|dts|ac3|h264|h265|remux|hdr|hdr10|dolby|atmos|truehd|proper|repack|extended|theatrical|directors cut|unrated|remastered|imax|3d|dvdrip|dvdscr)\b/gi,"");
+  // Extract year
   const ym = n.match(/\b(19|20)\d{2}\b/);
   const year = ym ? parseInt(ym[0]) : null;
-  n = n.replace(/\b(19|20)\d{2}\b.*$/,"").replace(/\s+/g," ").trim();
+  // Remove year and everything after
+  n = n.replace(/\b(19|20)\d{2}\b.*$/,"");
+  // Remove trailing standalone numbers (e.g. "Beverly Hills Cop 1" -> "Beverly Hills Cop")
+  n = n.replace(/\s+\d+\s*$/,"");
+  // Clean spaces
+  n = n.replace(/\s+/g," ").trim();
   return { cleanName: n, year };
 }
 
@@ -314,7 +373,16 @@ app.get("/api/media", requireAuth, async (req, res) => {
     if (library_id) query.library_id=library_id;
     if (search) query.title=new RegExp(search,"i");
     const items = await dbFind(db.media,query);
-    res.json({items:items.sort((a,b)=>(a.title||"").localeCompare(b.title||"")).slice(0,parseInt(limit)).map(safe),total:items.length});
+    const sorted = items.sort((a,b)=>(a.title||"").localeCompare(b.title||"")).slice(0,parseInt(limit)).map(safe);
+    // Attach progress (position/completed) for each item
+    const history = await dbFind(db.history, { user_id: req.user._id });
+    const progressMap = {};
+    for (const h of history) progressMap[h.media_id] = h;
+    const withProgress = sorted.map(item => {
+      const p = progressMap[item.id];
+      return p ? { ...item, position: p.position, duration: p.duration, completed: p.completed } : item;
+    });
+    res.json({items: withProgress, total: items.length});
   } catch(e){res.status(500).json({error:e.message});}
 });
 
@@ -390,23 +458,807 @@ app.delete("/api/favorites/:id", requireAuth, async (req, res) => {
   res.json({ok:true});
 });
 
-const MIME={".mp4":"video/mp4",".mkv":"video/x-matroska",".avi":"video/x-msvideo",".mov":"video/quicktime",".wmv":"video/x-ms-wmv",".m4v":"video/mp4",".ts":"video/mp2t",".webm":"video/webm",".flv":"video/x-flv",".mp3":"audio/mpeg",".flac":"audio/flac",".aac":"audio/aac",".ogg":"audio/ogg",".wav":"audio/wav",".m4a":"audio/mp4",".opus":"audio/opus",".wma":"audio/x-ms-wma"};
 
+// ── STREAMING & HLS TRANSCODING ───────────────────────────────────────────────
+const HLS_CACHE = path.join(DATA_DIR, "hls");
+const DASH_CACHE = path.join(DATA_DIR, "dash");
+
+// Clean all transcode caches on startup to prevent disk filling up
+function cleanDirSync(dirPath) {
+  try {
+    if (!fs.existsSync(dirPath)) return;
+    const entries = fs.readdirSync(dirPath);
+    for (const e of entries) {
+      const full = path.join(dirPath, e);
+      try {
+        const stat = fs.statSync(full);
+        if (stat.isDirectory()) { cleanDirSync(full); fs.rmdirSync(full); }
+        else fs.unlinkSync(full);
+      } catch {}
+    }
+  } catch {}
+}
+
+try {
+  if (fs.existsSync(DASH_CACHE)) {
+    cleanDirSync(DASH_CACHE);
+    console.log('[STARTUP] DASH cache cleaned');
+  }
+} catch {}
+
+try {
+  if (fs.existsSync(HLS_CACHE)) {
+    cleanDirSync(HLS_CACHE);
+    console.log('[STARTUP] HLS cache cleaned');
+  }
+} catch {}
+fs.mkdirSync(HLS_CACHE, { recursive: true });
+fs.mkdirSync(DASH_CACHE, { recursive: true });
+
+const { spawn } = require("child_process");
+const activeTranscodes = new Map(); // itemId -> { proc, startTime, segCount }
+
+const MIME = {
+  ".mp4":"video/mp4", ".mkv":"video/x-matroska", ".avi":"video/x-msvideo",
+  ".mov":"video/quicktime", ".wmv":"video/x-ms-wmv", ".m4v":"video/mp4",
+  ".ts":"video/mp2t", ".webm":"video/webm", ".flv":"video/x-flv",
+  ".mp3":"audio/mpeg", ".flac":"audio/flac", ".aac":"audio/aac",
+  ".ogg":"audio/ogg", ".wav":"audio/wav", ".m4a":"audio/mp4",
+  ".opus":"audio/opus", ".wma":"audio/x-ms-wma"
+};
+
+// Formats Chrome/Firefox can play natively without transcoding
+const NATIVE_FORMATS = new Set([".mp4", ".m4v", ".webm", ".mp3", ".aac", ".wav", ".ogg", ".m4a"]);
+// MKV works in Chrome but not Edge
+const CHROME_FORMATS = new Set([".mkv"]);
+
+function canDirectPlay(ext, userAgent) {
+  if (NATIVE_FORMATS.has(ext)) return true;
+  if (CHROME_FORMATS.has(ext)) {
+    const ua = (userAgent || "").toLowerCase();
+    return ua.includes("chrome") && !ua.includes("edg");
+  }
+  return false;
+}
+
+function getFfmpegPath() {
+  const candidates = [
+    path.join(__dirname, "..", "ffmpeg", "bin", "ffmpeg.exe"),
+    path.join(__dirname, "..", "ffmpeg", "bin", "ffmpeg"),
+    "ffmpeg"
+  ];
+  for (const p of candidates) {
+    try { if (fs.existsSync(p)) return p; } catch {}
+  }
+  return "ffmpeg";
+}
+
+function getFfprobePath() {
+  const candidates = [
+    path.join(__dirname, "..", "ffmpeg", "bin", "ffprobe.exe"),
+    path.join(__dirname, "..", "ffmpeg", "bin", "ffprobe"),
+    "ffprobe"
+  ];
+  for (const p of candidates) {
+    try { if (fs.existsSync(p)) return p; } catch {}
+  }
+  return "ffprobe";
+}
+
+// Get duration + video metadata via ffprobe, cache in DB
+async function getDuration(item) {
+  const needsMetadata = !item.width || !item.codec;
+  if (item.duration && !needsMetadata) return item.duration;
+  try {
+    const ffprobe = getFfprobePath();
+    const { execFileSync } = require("child_process");
+    const out = execFileSync(ffprobe, [
+      "-v", "quiet",
+      "-show_entries", "format=duration:stream=width,height,codec_name,pix_fmt",
+      "-of", "json",
+      item.file_path
+    ], { timeout: 15000, windowsHide: true }).toString().trim();
+    const data = JSON.parse(out);
+    const dur = Math.floor(parseFloat(data?.format?.duration || "0"));
+    const videoStream = (data?.streams || []).find(s => s.width && s.height);
+    const updates = {};
+    if (dur > 0) updates.duration = dur;
+    if (videoStream) {
+      updates.width     = videoStream.width;
+      updates.height    = videoStream.height;
+      updates.codec     = videoStream.codec_name || "";
+      updates.bit_depth = (videoStream.pix_fmt || "").includes("10") ? 10 : 8;
+    }
+    if (Object.keys(updates).length > 0) {
+      await dbUpdate(db.media, { _id: item._id }, { $set: updates });
+      Object.assign(item, updates);
+    }
+    return item.duration || dur;
+  } catch(e) {
+    console.log("[FFPROBE] Error:", e.message);
+  }
+  return item.duration || 0;
+}
+
+// ── DIRECT STREAM (for native formats) ─────────────────────────────────────────
 app.get("/api/stream/:id", requireAuth, async (req, res) => {
-  const item = await dbFindOne(db.media,{_id:req.params.id});
-  if (!item?.file_path||!fs.existsSync(item.file_path)) return res.status(404).json({error:"Fil hittades inte"});
-  const stat=fs.statSync(item.file_path);
-  const contentType=MIME[path.extname(item.file_path).toLowerCase()]||"application/octet-stream";
-  const range=req.headers.range;
+  const item = await dbFindOne(db.media, { _id: req.params.id });
+  if (!item?.file_path || !fs.existsSync(item.file_path))
+    return res.status(404).json({ error: "Fil hittades inte" });
+
+  const ext = path.extname(item.file_path).toLowerCase();
+  const stat = fs.statSync(item.file_path);
+  const contentType = MIME[ext] || "video/mp4";
+  const range = req.headers.range;
+
   if (range) {
-    const [s,e]=range.replace(/bytes=/,"").split("-");
-    const start=parseInt(s,10), end=e?parseInt(e,10):stat.size-1;
-    res.writeHead(206,{"Content-Range":`bytes ${start}-${end}/${stat.size}`,"Accept-Ranges":"bytes","Content-Length":end-start+1,"Content-Type":contentType});
-    fs.createReadStream(item.file_path,{start,end}).pipe(res);
+    const [s, e] = range.replace(/bytes=/, "").split("-");
+    const start = parseInt(s, 10);
+    const end = e ? parseInt(e, 10) : stat.size - 1;
+    res.writeHead(206, {
+      "Content-Range": `bytes ${start}-${end}/${stat.size}`,
+      "Accept-Ranges": "bytes",
+      "Content-Length": end - start + 1,
+      "Content-Type": contentType
+    });
+    fs.createReadStream(item.file_path, { start, end }).pipe(res);
   } else {
-    res.writeHead(200,{"Content-Length":stat.size,"Content-Type":contentType,"Accept-Ranges":"bytes"});
+    res.writeHead(200, {
+      "Content-Length": stat.size,
+      "Content-Type": contentType,
+      "Accept-Ranges": "bytes"
+    });
     fs.createReadStream(item.file_path).pipe(res);
   }
+});
+
+// ── HLS TRANSCODING ─────────────────────────────────────────────────────────────
+// Returns info about what playback method to use
+app.get("/api/playback/:id", requireAuth, async (req, res) => {
+  const item = await dbFindOne(db.media, { _id: req.params.id });
+  if (!item?.file_path || !fs.existsSync(item.file_path))
+    return res.status(404).json({ error: "Fil hittades inte" });
+
+  const ext = path.extname(item.file_path).toLowerCase();
+  const ua = req.headers["user-agent"] || "";
+  const duration = await getDuration(item);
+  const token = req.query.token || "";
+
+  // Check if file uses H.265/HEVC codec (needs transcoding in all browsers)
+  let needsTranscode = !canDirectPlay(ext, ua);
+  if (!needsTranscode && (ext === ".mkv" || ext === ".mp4")) {
+    // Check codec via item metadata or ffprobe
+    if (item.codec && (item.codec.includes("hevc") || item.codec.includes("h265") || item.codec.includes("265"))) {
+      needsTranscode = true;
+      console.log(`[PLAYBACK] ${item.title}: H.265 detected, forcing HLS`);
+    }
+  }
+
+  console.log(`[PLAYBACK] ${item.title} (${ext}): method=${needsTranscode ? "dash" : "direct"} ua=${ua.includes("edg") ? "Edge" : "Chrome"}`);
+
+  res.json({
+    method: needsTranscode ? "dash" : "direct",
+    url: needsTranscode
+      ? `/api/dash/${item._id}/manifest.mpd?token=${token}`
+      : `/api/stream/${item._id}?token=${token}`,
+    duration,
+    title: item.title
+  });
+});
+
+async function startHlsTranscode(item, startSec = 0) {
+  const itemId = item._id;
+  const hlsDir = path.join(HLS_CACHE, itemId);
+  fs.mkdirSync(hlsDir, { recursive: true });
+
+  // Kill existing transcode and wait for it to die
+  if (activeTranscodes.has(itemId)) {
+    try { activeTranscodes.get(itemId).proc.kill("SIGKILL"); } catch {}
+    activeTranscodes.delete(itemId);
+    await new Promise(r => setTimeout(r, 1500)); // Wait longer for Windows to release file locks
+  }
+
+  // Clear old segments - retry up to 3 times to handle Windows file locks
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const files = fs.readdirSync(hlsDir).filter(f => f.endsWith(".ts") || f.endsWith(".m3u8"));
+      for (const f of files) {
+        try { fs.unlinkSync(path.join(hlsDir, f)); } catch {}
+      }
+      break; // Success
+    } catch {
+      await new Promise(r => setTimeout(r, 500));
+    }
+  }
+
+  const ffmpeg = getFfmpegPath();
+  const startNum = Math.floor(startSec / 4); // 4-second segments
+
+  const { encoder, extraArgs } = cachedEncoder;
+
+  // Detect 4K HDR (10-bit HEVC at high resolution) - needs special pipeline
+  const is4kHdr = (item.width || 0) >= 3000 && (item.bit_depth || 8) === 10 &&
+                  (item.codec || "").toLowerCase().includes("hevc");
+
+  let hwaccelArgs = [];
+  let videoFilterArgs = [];
+
+  if (is4kHdr) {
+    console.log(`[HLS] 4K HDR detected (${item.width}x${item.height} 10-bit HEVC) - using d3d11va + scale`);
+    hwaccelArgs = ["-hwaccel", "d3d11va"];
+    const targetW = 1920;
+    const targetH = item.width && item.height
+      ? Math.round((item.height / item.width) * targetW / 2) * 2
+      : 800;
+    videoFilterArgs = ["-vf", `scale=${targetW}:${targetH},format=yuv420p`];
+  } else {
+    videoFilterArgs = ["-vf", "format=yuv420p"];
+  }
+
+  console.log(`[HLS] Using encoder: ${encoder}`);
+
+  const args = [
+    "-hide_banner", "-loglevel", "warning",
+    ...hwaccelArgs,
+    ...(startSec > 0 ? ["-ss", startSec.toString()] : []),
+    "-fflags", "+genpts+igndts+discardcorrupt",
+    "-err_detect", "ignore_err",
+    "-i", item.file_path,
+    "-avoid_negative_ts", "make_zero",
+    ...videoFilterArgs,
+    "-c:v", encoder, ...extraArgs,
+    "-c:a", "aac", "-ac", "2", "-b:a", "128k",
+    "-async", "1",
+    "-hls_time", "4",
+    "-hls_list_size", "0",
+    "-hls_segment_type", "mpegts",
+    "-hls_flags", "independent_segments",
+    "-hls_segment_filename", path.join(hlsDir, "seg%05d.ts").replace(/\\/g, "/"),
+    "-start_number", startNum.toString(),
+    "-f", "hls",
+    path.join(hlsDir, "playlist.m3u8").replace(/\\/g, "/")
+  ];
+
+  console.log(`[HLS] FFmpeg path: ${ffmpeg}`);
+  console.log(`[HLS] Args: ${args.slice(0,6).join(' ')}...`);
+  const proc = spawn(ffmpeg, args, { windowsHide: false });
+  activeTranscodes.set(itemId, { proc, startSec, startNum });
+
+  let stderrBuf = "";
+  proc.stderr.on("data", d => {
+    const msg = d.toString().trim();
+    stderrBuf += msg + "\n";
+    if (msg) console.log(`[HLS ERR] ${msg}`);
+  });
+
+  proc.on("error", err => {
+    console.error(`[HLS] Spawn error: ${err.message}`);
+    activeTranscodes.delete(itemId);
+  });
+
+  proc.on("exit", (code, signal) => {
+    activeTranscodes.delete(itemId);
+    console.log(`[HLS] Done: ${item.title} (code=${code} signal=${signal})`);
+    if (stderrBuf) console.log(`[HLS] Stderr: ${stderrBuf.substring(0,500)}`);
+  });
+
+  return proc;
+}
+
+
+// ── DASH TRANSCODE ───────────────────────────────────────────────────────────
+const activeDashTranscodes = new Map();
+const seekLocks = new Map(); // Prevent concurrent seeks for same item
+
+async function cleanDashDir(dirPath) {
+  // Retry cleanup a few times - Windows may hold file locks briefly after SIGKILL
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      if (!fs.existsSync(dirPath)) return;
+      const files = fs.readdirSync(dirPath);
+      for (const f of files) {
+        try { fs.unlinkSync(path.join(dirPath, f)); } catch {}
+      }
+      fs.rmdirSync(dirPath);
+      return; // success
+    } catch {
+      await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+    }
+  }
+  console.log('[DASH] Could not clean dir:', dirPath);
+}
+
+// Clean ALL old session dirs for an item except the current one
+async function cleanOldSessions(itemId, currentDashDir) {
+  const itemBaseDir = path.join(DASH_CACHE, itemId);
+  try {
+    if (!fs.existsSync(itemBaseDir)) return;
+    const sessions = fs.readdirSync(itemBaseDir);
+    for (const s of sessions) {
+      const sessionDir = path.join(itemBaseDir, s);
+      if (sessionDir !== currentDashDir) {
+        await cleanDashDir(sessionDir);
+      }
+    }
+  } catch {}
+}
+
+async function startDashTranscode(item, seekSec = 0) {
+  const itemId = item._id;
+  // Unique session dir per transcode - no file lock contention between sessions
+  const sessionId = uuidv4().substring(0, 8);
+  const itemBaseDir = path.join(DASH_CACHE, itemId);
+  const dashDir = path.join(itemBaseDir, sessionId);
+  fs.mkdirSync(dashDir, { recursive: true });
+
+  // Kill existing and clean its dir asynchronously - NO WAIT (like Plex's 5ms)
+  if (activeDashTranscodes.has(itemId)) {
+    const old = activeDashTranscodes.get(itemId);
+    const oldDir = old.dashDir;
+    try { old.proc.kill("SIGKILL"); } catch {}
+    activeDashTranscodes.delete(itemId);
+    // Clean old dir in background with retries
+    setTimeout(() => cleanDashDir(oldDir), 1000);
+  }
+
+  const ffmpeg = getFfmpegPath();
+  const { encoder, extraArgs } = cachedEncoder;
+
+  // 4K HDR detection
+  const is4kHdr = (item.width || 0) >= 3000 && (item.bit_depth || 8) === 10 &&
+                  (item.codec || "").toLowerCase().includes("hevc");
+
+  let hwaccelArgs = [];
+  let videoFilterArgs = [];
+  if (is4kHdr) {
+    console.log(`[DASH] 4K HDR detected (${item.width}x${item.height} 10-bit HEVC) - using d3d11va + scale`);
+    hwaccelArgs = ["-hwaccel", "d3d11va"];
+    const targetW = 1920;
+    const targetH = item.width && item.height
+      ? Math.round((item.height / item.width) * targetW / 2) * 2
+      : 800;
+    videoFilterArgs = ["-vf", `scale=${targetW}:${targetH},format=yuv420p`];
+  } else {
+    videoFilterArgs = ["-vf", "format=yuv420p"];
+  }
+
+  console.log(`[DASH] Using encoder: ${encoder}`);
+
+  const mpdPath = "manifest.mpd"; // relative - cwd set to dashDir
+
+  // For DASH, AMF works without extra args - just encoder + bitrate, no -quality flag
+  // -quality before -b:v sets VBR mode which conflicts with DASH muxer
+  const dashEncoderArgs = encoder === "h264_amf" ? [] : [...extraArgs];
+
+  const args = [
+    "-hide_banner", "-loglevel", "warning",
+    ...hwaccelArgs,
+    // No -re: encode at full speed like Plex, segment server handles timing
+    "-fflags", "+genpts+igndts+discardcorrupt",
+    "-err_detect", "ignore_err",
+    ...(seekSec > 0 ? ["-ss", seekSec.toString()] : []),
+    "-i", item.file_path,
+    "-avoid_negative_ts", "make_zero",
+    ...videoFilterArgs,
+    "-c:v", encoder, ...dashEncoderArgs,
+    "-b:v", "4000k",
+    "-c:a", "aac", "-ac", "2", "-b:a", "128k",
+    "-async", "1",
+    "-af", "aresample=async=1000",
+    "-force_key_frames", "expr:gte(t,n_forced*2)",
+    "-f", "dash",
+    "-seg_duration", "4",
+    "-use_template", "1",
+    "-use_timeline", "1",
+    "-window_size", "0",   // Keep all segments (needed for seek back)
+    "-adaptation_sets", "id=0,streams=v id=1,streams=a",
+    mpdPath
+  ];
+
+  console.log(`[DASH] FFmpeg path: ${ffmpeg}`);
+  console.log(`[DASH] Starting transcode: ${item.title}`);
+  console.log(`[DASH] Full args: ${args.join(' ')}`);
+  const proc = spawn(ffmpeg, args, { windowsHide: false, cwd: dashDir });
+  activeDashTranscodes.set(itemId, { proc, dashDir, startTime: Date.now(), startSec: seekSec, duration: await getDuration(item) });
+
+  let stderrBuf = "";
+  proc.stderr.on("data", d => {
+    const msg = d.toString().trim();
+    stderrBuf += msg + "\n";
+    if (msg) console.log(`[DASH ERR] ${msg}`);
+  });
+
+  proc.on("error", err => {
+    console.error(`[DASH] Spawn error: ${err.message}`);
+    activeDashTranscodes.delete(itemId);
+  });
+
+  proc.on("exit", (code, signal) => {
+    console.log(`[DASH] Done: ${item.title} (code=${code} signal=${signal})`);
+    if (stderrBuf) console.log(`[DASH] Stderr: ${stderrBuf.substring(0, 500)}`);
+    // Only remove from map if THIS process is still the active one
+    // (a newer process may have already replaced it)
+    const tcRef = activeDashTranscodes.get(itemId);
+    if (tcRef && tcRef.proc === proc) {
+      tcRef.done = true;
+      activeDashTranscodes.delete(itemId);
+    }
+  });
+
+  return proc;
+}
+
+// Start DASH transcode endpoint
+app.post("/api/dash/:id/start", requireAuth, async (req, res) => {
+  const item = await dbFindOne(db.media, { _id: req.params.id });
+  if (!item?.file_path || !fs.existsSync(item.file_path))
+    return res.status(404).json({ error: "Fil hittades inte" });
+
+  const duration = await getDuration(item);
+  const token = req.query.token || "";
+
+  const startSec = parseInt(req.body?.startSec || "0");
+
+  // Kill existing transcode if starting from different position
+  const existing = activeDashTranscodes.get(item._id);
+  if (existing) {
+    if (Math.abs((existing.startSec || 0) - startSec) > 5) {
+      startDashTranscode(item, startSec); // handles kill + new unique dir internally
+    }
+    // else reuse existing session
+  } else {
+    startDashTranscode(item, startSec);
+  }
+
+  // Small wait for session to register
+  await new Promise(r => setTimeout(r, 50));
+  const activeSession = activeDashTranscodes.get(item._id);
+  const dashDir = activeSession ? activeSession.dashDir : path.join(DASH_CACHE, item._id, 'default');
+
+  // Wait for first media segment
+  const firstSeg = path.join(dashDir, "chunk-stream0-00001.m4s");
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
+    if (fs.existsSync(firstSeg) && fs.statSync(firstSeg).size > 1000) break;
+    await new Promise(r => setTimeout(r, 50));
+  }
+
+  if (!fs.existsSync(firstSeg)) {
+    return res.status(500).json({ error: "Transkodning misslyckades – MPD skapades inte" });
+  }
+
+  // Get session ID for manifest URL
+  const tc = activeDashTranscodes.get(item._id);
+  const sessionPath = tc ? path.relative(path.join(DASH_CACHE, item._id), tc.dashDir) : '';
+  console.log(`[DASH] MPD ready for: ${item.title}`);
+  res.json({
+    ok: true,
+    manifest: `/api/dash/${item._id}/${sessionPath}/manifest.mpd?token=${token}`,
+    duration
+  });
+});
+
+// Seek DASH transcode - restart FFmpeg from new position
+app.post("/api/dash/:id/seek", requireAuth, async (req, res) => {
+  const item = await dbFindOne(db.media, { _id: req.params.id });
+  if (!item?.file_path || !fs.existsSync(item.file_path))
+    return res.status(404).json({ error: "Fil hittades inte" });
+
+  // Server-side lock: reject concurrent seeks for same item
+  if (seekLocks.get(item._id)) {
+    return res.status(429).json({ error: "Seek redan pågår" });
+  }
+  seekLocks.set(item._id, true);
+
+  const seekSec = parseInt(req.body?.startSec || "0");
+  const duration = await getDuration(item);
+  const token = req.query.token || "";
+
+  // startDashTranscode handles kill + new unique dir + immediate start (no wait)
+  startDashTranscode(item, seekSec);
+
+  // Small wait for new session to register in activeDashTranscodes
+  await new Promise(r => setTimeout(r, 100));
+  const seekSession = activeDashTranscodes.get(item._id);
+  const dashDir = seekSession ? seekSession.dashDir : path.join(DASH_CACHE, item._id, 'default');
+  const firstSeg = path.join(dashDir, "chunk-stream0-00001.m4s");
+
+  // Wait for first segment after seek - fast without -re
+  const mpdFile = path.join(dashDir, "manifest.mpd");
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
+    if (fs.existsSync(firstSeg) && fs.statSync(firstSeg).size > 1000) break;
+    const tc = activeDashTranscodes.get(item._id);
+    if (!tc && fs.existsSync(mpdFile)) break;
+    await new Promise(r => setTimeout(r, 100));
+  }
+
+  if (!fs.existsSync(firstSeg) && !fs.existsSync(mpdFile)) {
+    seekLocks.delete(item._id);
+    return res.status(500).json({ error: "Seek misslyckades" });
+  }
+
+  seekLocks.delete(item._id);
+  console.log(`[DASH] Seek ready: ${item.title} from ${seekSec}s`);
+  const seekTc = activeDashTranscodes.get(item._id);
+  const seekSessionPath = seekTc ? path.relative(path.join(DASH_CACHE, item._id), seekTc.dashDir) : '';
+  res.json({
+    ok: true,
+    manifest: `/api/dash/${item._id}/${seekSessionPath}/manifest.mpd?token=${token}`,
+    duration
+  });
+});
+
+// Stop DASH transcode
+app.post("/api/dash/:id/stop", requireAuth, (req, res) => {
+  const t = activeDashTranscodes.get(req.params.id);
+  if (t) {
+    try { t.proc.kill("SIGKILL"); } catch {}
+    activeDashTranscodes.delete(req.params.id);
+  }
+  res.json({ ok: true });
+});
+
+// Serve DASH segments - Plex-style incomplete segment streaming
+// X-Plex-Incomplete-Segments: stream segment to client WHILE FFmpeg writes it
+// Helper: wait until a file exists AND is stable (not being written)
+async function waitForSegment(filePath, itemId, timeoutMs = 30000) {
+  const deadline = Date.now() + timeoutMs;
+
+  // Step 1: Wait for file to appear - poll aggressively
+  while (!fs.existsSync(filePath)) {
+    if (Date.now() > deadline) return false;
+    const tc = activeDashTranscodes.get(itemId);
+    if (!tc && !fs.existsSync(filePath)) return false;
+    await new Promise(r => setTimeout(r, 25));
+  }
+
+  // Step 2: Wait for file to be stable (done writing)
+  // Use 50ms gap instead of 100ms for faster response
+  let stable = false;
+  let attempts = 0;
+  while (!stable && Date.now() < deadline) {
+    try {
+      const size1 = fs.statSync(filePath).size;
+      if (size1 < 100) { await new Promise(r => setTimeout(r, 25)); attempts++; continue; }
+      await new Promise(r => setTimeout(r, 50));
+      const size2 = fs.statSync(filePath).size;
+      if (size1 === size2 && size2 > 100) stable = true;
+    } catch { await new Promise(r => setTimeout(r, 25)); }
+    attempts++;
+    if (attempts > 300) break;
+  }
+  return stable;
+}
+
+// Handle both /api/dash/:id/:file and /api/dash/:id/:sessionId/:file
+app.get("/api/dash/:id/:sessionId/:file", async (req, res) => {
+  const dashDir = path.join(DASH_CACHE, req.params.id, req.params.sessionId);
+  const filePath = path.join(dashDir, req.params.file);
+  const fileName = req.params.file;
+  const itemId = req.params.id;
+  return serveDashFile(dashDir, filePath, fileName, itemId, req, res);
+});
+
+app.get("/api/dash/:id/:file", async (req, res) => {
+  // Legacy: also check active session dir
+  const activeSession = activeDashTranscodes.get(req.params.id);
+  const dashDir = activeSession ? activeSession.dashDir : path.join(DASH_CACHE, req.params.id);
+  const filePath = path.join(dashDir, req.params.file);
+  const fileName = req.params.file;
+  const itemId = req.params.id;
+  return serveDashFile(dashDir, filePath, fileName, itemId, req, res);
+});
+
+async function serveDashFile(dashDir, filePath, fileName, itemId, req, res) {
+
+  const baseDir = path.join(DASH_CACHE, itemId);
+  if (!filePath.startsWith(baseDir)) return res.status(403).end();
+
+  const ext = path.extname(fileName);
+  const mimeTypes = {
+    '.mpd': 'application/dash+xml',
+    '.m4s': 'video/mp4',
+    '.mp4': 'video/mp4'
+  };
+  res.setHeader('Content-Type', mimeTypes[ext] || 'application/octet-stream');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Cache-Control', 'no-cache, no-store');
+
+  // MPD: convert to static with full duration - eliminates dash.js 3s time-sync
+  if (ext === '.mpd') {
+    let waited = 0;
+    while (!fs.existsSync(filePath) && waited < 15000) {
+      await new Promise(r => setTimeout(r, 100));
+      waited += 100;
+    }
+    if (!fs.existsSync(filePath)) return res.status(404).end();
+
+    try {
+      const tc = activeDashTranscodes.get(itemId);
+      const duration = tc ? tc.duration : 0;
+      let mpd = fs.readFileSync(filePath, 'utf8');
+
+      // Serve MPD as-is - dynamic type works correctly with dash.js
+
+      res.setHeader('Content-Type', 'application/dash+xml');
+      res.setHeader('Content-Length', Buffer.byteLength(mpd));
+      return res.end(mpd);
+    } catch {
+      return fs.createReadStream(filePath).pipe(res);
+    }
+  }
+
+  // Init segments: wait for stable file
+  if (fileName.startsWith('init-')) {
+    const ready = await waitForSegment(filePath, itemId, 10000);
+    if (!ready) return res.status(404).end();
+    try {
+      const stat = fs.statSync(filePath);
+      res.setHeader('Content-Length', stat.size);
+    } catch {}
+    return fs.createReadStream(filePath).pipe(res);
+  }
+
+  // Media segments (chunk-streamN-XXXXX.m4s):
+  // Wait for segment to be fully written before responding
+  // This is the Plex approach - client never gets a partial segment
+  const ready = await waitForSegment(filePath, itemId, 30000);
+  if (!ready) {
+    console.log(`[DASH] Segment timeout: ${fileName}`);
+    return res.status(404).end();
+  }
+
+  try {
+    const stat = fs.statSync(filePath);
+    res.setHeader('Content-Length', stat.size);
+  } catch {}
+
+  const stream = fs.createReadStream(filePath);
+  stream.on('error', (err) => {
+    console.error('[DASH] Segment read error:', err.message);
+    if (!res.headersSent) res.status(404).end();
+    else res.end();
+  });
+  stream.pipe(res);
+}
+
+
+// Start/seek HLS transcode
+app.post("/api/hls/:id/start", requireAuth, async (req, res) => {
+  const item = await dbFindOne(db.media, { _id: req.params.id });
+  if (!item?.file_path || !fs.existsSync(item.file_path))
+    return res.status(404).json({ error: "Fil hittades inte" });
+
+  const startSec = parseInt(req.body?.startSec || req.query.startSec || "0");
+  
+  // Check if already transcoding from same position – don't restart
+  const existing = activeTranscodes.get(item._id);
+  if (existing && Math.abs(existing.startSec - startSec) < 5) {
+    console.log(`[HLS] Already transcoding ${item.title} from ~${startSec}s, reusing`);
+    const duration = await getDuration(item);
+    const token = req.query.token || "";
+    return res.json({
+      ok: true,
+      playlist: `/api/hls/${item._id}/master.m3u8?token=${token}`,
+      duration,
+      startSec
+    });
+  }
+
+  console.log(`[HLS] Starting transcode: ${item.title} from ${startSec}s`);
+  startHlsTranscode(item, startSec);
+
+  // Wait for first segment (max 20 seconds)
+  const hlsDir = path.join(HLS_CACHE, item._id);
+  const startNum = Math.floor(startSec / 4);
+  const firstSeg = path.join(hlsDir, `seg${String(startNum).padStart(5,'0')}.ts`);
+
+  console.log(`[HLS] Waiting for first segment: ${firstSeg}`);
+  let waited = 0;
+  let segReady = false;
+  while (waited < 20000) {
+    try {
+      if (fs.existsSync(firstSeg) && fs.statSync(firstSeg).size > 10000) {
+        segReady = true;
+        break;
+      }
+    } catch {}
+    await new Promise(r => setTimeout(r, 300));
+    waited += 300;
+  }
+
+  if (!segReady) {
+    console.error(`[HLS] First segment never appeared: ${firstSeg}`);
+    // Clean up failed transcode
+    const tc = activeTranscodes.get(item._id);
+    if (tc) { try { tc.proc.kill("SIGKILL"); } catch {} activeTranscodes.delete(item._id); }
+    return res.status(500).json({ error: "Transkodning misslyckades – kontrollera att FFmpeg är installerat" });
+  }
+  
+  console.log(`[HLS] First segment ready after ${waited}ms`);
+
+  const duration = await getDuration(item);
+  const token = req.query.token || "";
+
+  res.json({
+    ok: true,
+    playlist: `/api/hls/${item._id}/master.m3u8?token=${token}`,
+    duration,
+    startSec
+  });
+});
+
+// Master playlist (tells client about available streams)
+app.get("/api/hls/:id/master.m3u8", requireAuth, async (req, res) => {
+  const token = req.query.token || "";
+  const item = await dbFindOne(db.media, { _id: req.params.id });
+  const duration = item ? (item.duration || 0) : 0;
+  res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
+  res.setHeader("Cache-Control", "no-cache");
+  if (duration > 0) res.setHeader("X-Content-Duration", duration.toString());
+  res.send([
+    "#EXTM3U",
+    "#EXT-X-VERSION:3",
+    `#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1920x1080`,
+    `/api/hls/${req.params.id}/playlist.m3u8?token=${encodeURIComponent(token)}`
+  ].join("\n"));
+});
+
+// Playlist - dynamically built so video.currentTime always starts at 0
+// This is the Jellyfin approach: EXT-X-MEDIA-SEQUENCE = startSegment
+app.get("/api/hls/:id/playlist.m3u8", requireAuth, async (req, res) => {
+  const hlsDir = path.join(HLS_CACHE, req.params.id);
+  const playlist = path.join(hlsDir, "playlist.m3u8");
+  if (!fs.existsSync(playlist)) return res.status(404).end();
+
+  res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
+  res.setHeader("Cache-Control", "no-cache");
+
+  const token = req.query.token || "";
+  const tc = activeTranscodes.get(req.params.id);
+  const startNum = tc ? (tc.startNum || 0) : 0;
+
+  let m3u8 = fs.readFileSync(playlist, "utf8");
+  
+  // Set MEDIA-SEQUENCE to startNum so video.currentTime starts at 0
+  m3u8 = m3u8.replace(/#EXT-X-MEDIA-SEQUENCE:\d+/, `#EXT-X-MEDIA-SEQUENCE:${startNum}`);
+  
+  // Rewrite segment URLs to include token
+  m3u8 = m3u8.replace(/^(seg\d+\.ts)$/gm,
+    `/api/hls/${req.params.id}/$1?token=${encodeURIComponent(token)}`);
+  res.send(m3u8);
+});
+
+// Segments
+app.get("/api/hls/:id/:seg", requireAuth, async (req, res) => {
+  const segName = req.params.seg.split("?")[0];
+  if (!segName.endsWith(".ts")) return res.status(404).end();
+
+  const segFile = path.join(HLS_CACHE, req.params.id, segName);
+
+  // Wait up to 10 seconds for segment to appear
+  let waited = 0;
+  while (!fs.existsSync(segFile) && waited < 10000) {
+    await new Promise(r => setTimeout(r, 200));
+    waited += 200;
+  }
+
+  if (!fs.existsSync(segFile)) return res.status(404).end();
+
+  res.setHeader("Content-Type", "video/MP2T");
+  res.setHeader("Cache-Control", "public, max-age=3600");
+  fs.createReadStream(segFile).pipe(res);
+});
+
+// Stop transcode
+app.post("/api/hls/:id/stop", requireAuth, (req, res) => {
+  const tc = activeTranscodes.get(req.params.id);
+  if (tc) {
+    try { tc.proc.kill("SIGKILL"); } catch {}
+    activeTranscodes.delete(req.params.id);
+  }
+  res.json({ ok: true });
 });
 
 app.get("/api/watch-providers/:tmdb_id", requireAuth, async (req, res) => {
@@ -445,32 +1297,73 @@ app.patch("/api/config", requireAdmin, (req, res) => {
 app.get("/api/update/check", requireAdmin, (req, res) => res.json({current:VERSION,latest:VERSION,hasUpdate:false}));
 app.get("/api/version", (req, res) => res.json({version:VERSION}));
 
-const PUBLIC=path.join(__dirname,"..","public");
-if (fs.existsSync(PUBLIC)) {
-  app.use(express.static(PUBLIC));
-  app.get("*",(req,res)=>res.sendFile(path.join(PUBLIC,"index.html")));
-}
 
-const PORT=config.port||7000;
-const server=http.createServer(app);
-server.listen(PORT,()=>{
-  console.log(`\n StreamVault v${VERSION} - http://localhost:${PORT}\n`);
-  setTimeout(()=>scanLibraries().catch(console.error),2000);
+
+// ── MANUAL METADATA SEARCH ────────────────────────────────────────────────────
+app.get("/api/search-meta", requireAuth, async (req, res) => {
+  const { query, type = "movie" } = req.query;
+  if (!query) return res.status(400).json({ error: "Ange sökterm" });
+  if (!config.tmdb_api_key) return res.json({ results: [] });
+  try {
+    const endpoint = type === "tv"
+      ? `/search/tv?query=${encodeURIComponent(query)}`
+      : `/search/movie?query=${encodeURIComponent(query)}`;
+    const data = await tmdbFetch(endpoint);
+    const results = (data?.results || []).slice(0, 10).map(r => ({
+      tmdb_id: r.id,
+      title: r.title || r.name,
+      year: (r.release_date || r.first_air_date || "").slice(0, 4),
+      overview: r.overview || "",
+      poster_url: r.poster_path ? `https://image.tmdb.org/t/p/w200${r.poster_path}` : null,
+      backdrop_url: r.backdrop_path ? `https://image.tmdb.org/t/p/w1280${r.backdrop_path}` : null,
+      rating: r.vote_average || null
+    }));
+    res.json({ results });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
-process.on("SIGTERM",()=>{server.close();process.exit(0);});
-process.on("SIGINT",()=>{server.close();process.exit(0);});
+
+app.post("/api/media/:id/fix-meta", requireAdmin, async (req, res) => {
+  const { tmdb_id, title, year, overview, poster_url, backdrop_url, rating } = req.body;
+  if (!tmdb_id) return res.status(400).json({ error: "Saknar tmdb_id" });
+  try {
+    await dbUpdate(db.media, { _id: req.params.id }, {
+      $set: { tmdb_id, title, year: year ? parseInt(year) : undefined, overview, poster_url, backdrop_url, rating }
+    });
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+
+// ── RESCAN ALL (clear + rescan) ────────────────────────────────────────────────
+app.post("/api/scan/full-rescan", requireAdmin, async (req, res) => {
+  res.json({ message: "Rensar databas och skannar om allt..." });
+  try {
+    // Clear all media
+    await dbRemove(db.media, {}, { multi: true });
+    await dbRemove(db.history, {}, { multi: true });
+    metaCache.clear();
+    console.log("Database cleared, starting full rescan...");
+    await scanLibraries();
+  } catch(e) { console.error("Full rescan error:", e); }
+});
+
+// ── AUTO SCAN STATUS ───────────────────────────────────────────────────────────
+app.get("/api/scan/auto-status", requireAuth, (req, res) => {
+  res.json({ 
+    scanning: isScanning,
+    watchersActive: watchers.length,
+    watchingLibraries: (config.libraries || []).map(l => l.name),
+    nextScan: nextAutoScan ? new Date(nextAutoScan).toISOString() : null
+  });
+});
+
 
 // ── FOLDER BROWSER API ─────────────────────────────────────────────────────────
-const os = require("os");
-
 app.get("/api/browse", requireAuth, (req, res) => {
   const reqPath = req.query.path || "";
-
   try {
-    // Root level – show drives on Windows, / on Linux
     if (!reqPath) {
       if (process.platform === "win32") {
-        // Get Windows drives
         const { execSync } = require("child_process");
         try {
           const output = execSync("wmic logicaldisk get name", { encoding: "utf8", windowsHide: true });
@@ -483,52 +1376,125 @@ app.get("/api/browse", requireAuth, (req, res) => {
           return res.json({ current: "", items: [{ name: "C:", path: "C:\\", type: "drive" }], parent: null });
         }
       } else {
-        // Linux/Mac – start at /
         const items = fs.readdirSync("/", { withFileTypes: true })
           .filter(e => e.isDirectory())
           .map(e => ({ name: e.name, path: "/" + e.name, type: "folder" }));
         return res.json({ current: "/", items, parent: null });
       }
     }
-
-    // Validate path exists
-    if (!fs.existsSync(reqPath)) {
-      return res.status(400).json({ error: "Sökvägen finns inte" });
-    }
-
+    if (!fs.existsSync(reqPath)) return res.status(400).json({ error: "Sökvägen finns inte" });
     const stat = fs.statSync(reqPath);
-    if (!stat.isDirectory()) {
-      return res.status(400).json({ error: "Inte en mapp" });
-    }
-
-    // Get parent path
+    if (!stat.isDirectory()) return res.status(400).json({ error: "Inte en mapp" });
     const parentPath = path.dirname(reqPath);
     const parent = parentPath === reqPath ? null : parentPath;
-
-    // List directory contents – only folders
     const entries = fs.readdirSync(reqPath, { withFileTypes: true });
     const items = entries
       .filter(e => {
         if (!e.isDirectory()) return false;
-        // Skip hidden/system folders on Windows
         if (process.platform === "win32") {
-          const skip = ["$Recycle.Bin", "System Volume Information", "$WINDOWS.~BT", "$WinREAgent", "Recovery", "Config.Msi"];
-          if (skip.includes(e.name)) return false;
-          if (e.name.startsWith("$")) return false;
+          const skip = ["$Recycle.Bin","System Volume Information","$WINDOWS.~BT","$WinREAgent","Recovery","Config.Msi"];
+          if (skip.includes(e.name) || e.name.startsWith("$")) return false;
         }
-        // Skip hidden folders (starting with .)
         if (e.name.startsWith(".")) return false;
         return true;
       })
-      .map(e => ({
-        name: e.name,
-        path: path.join(reqPath, e.name),
-        type: "folder"
-      }))
+      .map(e => ({ name: e.name, path: path.join(reqPath, e.name), type: "folder" }))
       .sort((a, b) => a.name.localeCompare(b.name));
-
     res.json({ current: reqPath, items, parent });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
+
+
+// ── FILESYSTEM WATCHER ────────────────────────────────────────────────────────
+const watchers = [];
+let watchDebounceTimer = null;
+let nextAutoScan = null;
+
+function startFileWatchers() {
+  // Stop existing watchers
+  watchers.forEach(w => { try { w.close(); } catch {} });
+  watchers.length = 0;
+
+  for (const lib of (config.libraries || [])) {
+    if (!fs.existsSync(lib.path)) continue;
+    try {
+      const watcher = fs.watch(lib.path, { recursive: true }, (eventType, filename) => {
+        if (!filename) return;
+        const ext = path.extname(filename).toLowerCase();
+        const isMedia = [".mp4",".mkv",".avi",".mov",".wmv",".m4v",".ts",".webm",
+                         ".mp3",".flac",".aac",".ogg",".wav",".m4a",".opus"].includes(ext);
+        if (!isMedia) return;
+
+        // Debounce – wait 10 seconds after last change before scanning
+        // This prevents scanning mid-copy when large files are being transferred
+        if (watchDebounceTimer) clearTimeout(watchDebounceTimer);
+        nextAutoScan = Date.now() + 10000;
+        watchDebounceTimer = setTimeout(async () => {
+          if (!isScanning) {
+            console.log(`File watcher: detected change in ${lib.name}, scanning...`);
+            await scanLibraries().catch(console.error);
+          }
+        }, 10000);
+      });
+      watchers.push(watcher);
+      console.log(`👁  Watching: ${lib.path}`);
+    } catch(e) {
+      console.warn(`Could not watch ${lib.path}: ${e.message}`);
+    }
+  }
+}
+
+function scheduleAutoScan() {
+  // Kept for compatibility but no-op now – filesystem watcher handles it
+}
+
+
+// Detect best video encoder once at startup - test each encoder actually works
+let cachedEncoder = { encoder: "libx264", extraArgs: ["-preset", "ultrafast", "-crf", "23"] };
+try {
+  const { execFileSync } = require("child_process");
+  const encoderList = execFileSync(getFfmpegPath(), ["-hide_banner", "-encoders"], 
+    { timeout: 5000, windowsHide: true }).toString();
+  
+  // Test candidates in order of preference
+  const candidates = [];
+  if (encoderList.includes("h264_nvenc")) candidates.push({ encoder: "h264_nvenc", extraArgs: ["-preset", "p4", "-tune", "ll"] });
+  if (encoderList.includes("h264_amf")) candidates.push({ encoder: "h264_amf", extraArgs: ["-quality", "speed"] });
+  if (encoderList.includes("h264_qsv")) candidates.push({ encoder: "h264_qsv", extraArgs: ["-preset", "veryfast"] });
+
+  // Test each candidate by encoding a small test
+  for (const candidate of candidates) {
+    try {
+      execFileSync(getFfmpegPath(), [
+        "-hide_banner", "-loglevel", "error",
+        "-f", "lavfi", "-i", "nullsrc=s=64x64:d=1",
+        "-c:v", candidate.encoder, ...candidate.extraArgs,
+        "-f", "null", "-"
+      ], { timeout: 8000, windowsHide: true });
+      cachedEncoder = candidate;
+      break; // Use first working encoder
+    } catch {
+      console.log(`⚠️  ${candidate.encoder} not available, trying next...`);
+    }
+  }
+  console.log(`🎬 Video encoder: ${cachedEncoder.encoder}`);
+} catch(e) {
+  console.log("⚠️  Could not detect GPU encoder, using CPU (libx264)");
+}
+
+const PUBLIC=path.join(__dirname,"..","public");
+if (fs.existsSync(PUBLIC)) {
+  app.use(express.static(PUBLIC));
+  app.get("*",(req,res)=>res.sendFile(path.join(PUBLIC,"index.html")));
+}
+
+const PORT=config.port||7000;
+const server=http.createServer(app);
+server.listen(PORT,()=>{
+  console.log(`\n StreamVault v${VERSION} - http://localhost:${PORT}\n`);
+  setTimeout(()=>scanLibraries().catch(console.error),2000);
+  setTimeout(()=>startFileWatchers(), 3000);
+});
+
+process.on("SIGTERM",()=>{server.close();process.exit(0);});
+process.on("SIGINT",()=>{server.close();process.exit(0);});

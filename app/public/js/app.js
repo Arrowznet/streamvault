@@ -59,36 +59,42 @@ function showApp() {
 // ── UPDATE CHECK ──────────────────────────────────────────────────────────────
 async function checkForUpdates() {
   try {
-    const data = await API.get("/update/check");
+    const data = await API.get("/updates/check");
     if (data.hasUpdate) {
-      showUpdateBanner(data.latest, data.releaseUrl);
+      showUpdateBanner(data.latest, data.releaseNotes, data.htmlUrl);
     }
   } catch {}
 }
 
-function showUpdateBanner(version, url) {
+function showUpdateBanner(version, releaseNotes, url) {
+  const existing = document.getElementById("update-banner");
+  if (existing) existing.remove();
   const banner = document.createElement("div");
   banner.id = "update-banner";
   banner.style.cssText = `
     position:fixed;bottom:80px;right:24px;z-index:300;
-    background:#0d3d24;border:1px solid #2ecc71;border-radius:10px;
-    padding:14px 18px;font-size:13px;color:#2ecc71;
-    display:flex;align-items:center;gap:14px;
-    box-shadow:0 4px 20px rgba(0,0,0,0.4);max-width:320px;
+    background:#0d3d24;border:1px solid #2ecc71;border-radius:12px;
+    padding:16px 20px;font-size:13px;color:#2ecc71;
+    display:flex;flex-direction:column;gap:10px;
+    box-shadow:0 4px 24px rgba(0,0,0,0.5);max-width:320px;
   `;
-  banner.innerHTML = `
-    <span style="font-size:20px">🎉</span>
-    <div style="flex:1">
-      <div style="font-weight:600;margin-bottom:2px">StreamVault ${version} tillgänglig!</div>
-      <div style="opacity:0.8;font-size:12px">Ny version finns att ladda ner</div>
+  banner.innerHTML = \`
+    <div style="display:flex;align-items:center;gap:10px">
+      <span style="font-size:22px">🎉</span>
+      <div>
+        <div style="font-weight:700;font-size:14px">StreamVault \${version} tillgänglig!</div>
+        <div style="opacity:0.7;font-size:12px;margin-top:2px">En ny version finns att hämta</div>
+      </div>
+      <button onclick="document.getElementById('update-banner').remove()"
+        style="margin-left:auto;background:none;border:none;color:#2ecc71;font-size:18px;cursor:pointer;opacity:0.7">✕</button>
     </div>
-    <button onclick="window.open('${url}')" style="background:#2ecc71;border:none;color:#0a0a0a;font-size:12px;font-weight:600;padding:6px 12px;border-radius:6px;cursor:pointer">Uppdatera</button>
-    <button onclick="this.parentElement.remove()" style="background:none;border:none;color:#2ecc71;cursor:pointer;font-size:16px">✕</button>
-  `;
+    \${releaseNotes ? \`<div style="font-size:12px;opacity:0.8;border-top:1px solid rgba(46,204,113,0.3);padding-top:8px;max-height:80px;overflow-y:auto">\${releaseNotes.substring(0,200)}\${releaseNotes.length>200?"...":""}</div>\` : ""}
+    \${url ? \`<a href="\${url}" target="_blank" style="background:#2ecc71;color:#000;border:none;border-radius:6px;padding:8px 16px;font-weight:600;font-size:13px;cursor:pointer;text-decoration:none;text-align:center">Hämta uppdatering</a>\` : ""}
+  \`;
   document.body.appendChild(banner);
 }
 
-// ── NAV ───────────────────────────────────────────────────────────────────────
+
 function switchSection(name) {
   document.querySelectorAll(".section").forEach(s => s.classList.remove("active"));
   document.querySelectorAll(".ntab").forEach(b => b.classList.remove("active"));
@@ -290,8 +296,12 @@ function buildCard(item, wide = false) {
     ? `<img class="mcard-poster" src="${item.poster_url}" alt="" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">`
     : "";
   const ph = `<div class="mcard-poster-ph" ${item.poster_url ? 'style="display:none"' : ""}><span>${item.type === "tvshow" ? "📺" : item.type === "music" ? "🎵" : "🎬"}</span><span>${esc((item.title || "").slice(0, 14))}</span></div>`;
+  const watchedBadge = item.completed ? `<div class="mcard-watched-badge" title="Sedd">✓</div>` : "";
+  const progressBar = (!item.completed && item.position > 10 && item.duration)
+    ? `<div class="mcard-progress"><div class="mcard-progress-fill" style="width:${Math.min(100, Math.round(item.position/item.duration*100))}%"></div></div>`
+    : "";
   return `<div class="mcard${wide ? " mcard-wide" : ""}" onclick='openDetail("${item.id}")'>
-    <div style="position:relative">${poster}${ph}<div class="mcard-overlay"><span class="mcard-play">▶</span></div></div>
+    <div style="position:relative">${poster}${ph}<div class="mcard-overlay"><span class="mcard-play">▶</span></div>${watchedBadge}${progressBar}</div>
     <div class="mcard-info">
       <div class="mcard-title">${esc(item.title)}</div>
       <div class="mcard-meta">${item.rating ? `<span class="mcard-rating">⭐ ${parseFloat(item.rating).toFixed(1)}</span> ` : ""}${item.year || ""}</div>
@@ -337,6 +347,11 @@ async function openDetail(id) {
         <div class="detail-actions">
           ${item.type !== "tvshow" ? `<button class="btn-play" onclick='playItem("${item.id}","${esc(item.title)}"); closeDetail()'>${playLabel}</button>` : ""}
           <button class="btn-fav" onclick="toggleFav('${item.id}',this)">♡ Favorit</button>
+          <button class="btn-fav" onclick='openFixMeta("${item.id}","${esc(item.title)}","${item.type === "tvshow" ? "tv" : "movie"}")'>🔍 Fixa info</button>
+          ${progress?.completed
+            ? `<button class="btn-fav" id="watched-btn-${item.id}" onclick="markUnwatched('${item.id}')">↺ Markera som osedd</button>`
+            : `<button class="btn-fav" id="watched-btn-${item.id}" onclick="markWatched('${item.id}', ${Math.floor(progress?.duration||0)})">✓ Markera som sedd</button>`
+          }
         </div>
         ${wtwHtml}${episodesHtml}
       </div>
@@ -362,6 +377,37 @@ function closeDetail() {
   ov.style.display = "none";
   ov.innerHTML = "";
 }
+
+async function markWatched(id, duration) {
+  try {
+    await API.post("/media/" + id + "/progress", { position: duration || 0, duration: duration || 0, completed: 1 });
+    const btn = document.getElementById("watched-btn-" + id);
+    if (btn) {
+      btn.textContent = "↺ Markera som osedd";
+      btn.onclick = () => markUnwatched(id);
+    }
+    toast("Markerad som sedd ✓", "success");
+    loadHome(); // Refresh cards
+  } catch { toast("Kunde inte spara", "error"); }
+}
+
+async function markUnwatched(id) {
+  try {
+    await API.post("/media/" + id + "/progress", { position: 0, duration: 0, completed: 0 });
+    const btn = document.getElementById("watched-btn-" + id);
+    if (btn) {
+      btn.textContent = "✓ Markera som sedd";
+      btn.onclick = () => markWatched(id, 0);
+    }
+    // Update play button label to remove % indicator
+    const playBtn = document.querySelector(".btn-play");
+    if (playBtn && playBtn.textContent.includes("Fortsätt")) {
+      playBtn.textContent = "▶ Spela";
+    }
+    toast("Markerad som osedd ↺", "success");
+    loadHome(); // Refresh cards
+  } catch { toast("Kunde inte spara", "error"); }
+}
 document.getElementById("detail-overlay")?.addEventListener("click", e => {
   if (e.target === document.getElementById("detail-overlay")) closeDetail();
 });
@@ -376,31 +422,228 @@ async function toggleFav(id, btn) {
 }
 
 // ── PLAYBACK ──────────────────────────────────────────────────────────────────
-function playItem(id, title) {
+let currentHls = null;
+let currentItemId = null;
+
+function loadHlsJs() {
+  return new Promise((resolve) => {
+    if (window.Hls) return resolve();
+    const s = document.createElement("script");
+    s.src = "https://cdn.jsdelivr.net/npm/hls.js@1.5.7/dist/hls.min.js";
+    s.onload = resolve;
+    document.head.appendChild(s);
+  });
+}
+
+async function playItem(id, title) {
   const bar = document.getElementById("player-bar");
   const video = document.getElementById("main-video");
-  video.src = "/api/stream/" + id + "?token=" + API._token;
-  video.play();
+  const token = localStorage.getItem("sv_token") || API._token || "";
+
+  // Stop previous transcode
+  if (currentItemId) {
+    if (currentHls) { currentHls.destroy(); currentHls = null; }
+    if (window._dashPlayer) { try { window._dashPlayer.reset(); } catch {} window._dashPlayer = null; }
+    API.post("/dash/" + currentItemId + "/stop").catch(() => {});
+  }
+
   bar.style.display = "flex";
   document.getElementById("pb-title").textContent = title;
-  document.getElementById("pb-sub").textContent = "";
+  document.getElementById("pb-sub").textContent = "Förbereder...";
   document.body.style.paddingBottom = "320px";
   nowPlayingId = id;
-  video.ontimeupdate = () => {
-    if (video.duration > 30) {
-      API.post("/media/" + id + "/progress", {
-        position: Math.floor(video.currentTime),
-        duration: Math.floor(video.duration),
-        completed: video.currentTime / video.duration > 0.9 ? 1 : 0
-      }).catch(() => {});
+  currentItemId = id;
+
+  try {
+    // Ask server: direct play or HLS? Also fetch saved progress
+    const [info, progress] = await Promise.all([
+      API.get("/playback/" + id + "?token=" + encodeURIComponent(token)),
+      API.get("/media/" + id + "/progress").catch(() => ({ position: 0 }))
+    ]);
+    document.getElementById("pb-sub").textContent = "";
+
+    // Resume from saved position
+    // Accept if position > 10s AND (no duration stored OR position < 95% of duration)
+    const hasDur = progress?.duration > 0;
+    const notDone = !hasDur || (progress.position / progress.duration) < 0.95;
+    const resumeSec = (progress?.position > 10 && notDone) ? Math.floor(progress.position) : 0;
+    console.log("[RESUME] position:", progress?.position, "duration:", progress?.duration, "resumeSec:", resumeSec);
+
+    if (info.method === "direct") {
+      video.src = info.url;
+      video.play().catch(() => {});
+      video.onloadedmetadata = () => {
+        initPlayerControls(info.duration || video.duration);
+        if (resumeSec > 0) {
+          video.currentTime = resumeSec;
+          window._seekOffset = resumeSec;
+          window._currentPlayPos = resumeSec;
+        }
+      };
+    } else {
+      // ── DASH (Plex-style) ────────────────────────────────────────────────
+      // Plex uses DASH with offset=0 per session + incomplete segment streaming
+      // video.currentTime always starts at 0 for each new session = no offset math
+      document.getElementById("pb-sub").textContent = "Transcoding...";
+
+      if (window._dashPlayer) { try { window._dashPlayer.reset(); } catch {} window._dashPlayer = null; }
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
+
+      const freshToken = API._token || token;
+      const startData = await API.post("/dash/" + id + "/start?token=" + encodeURIComponent(freshToken), { startSec: resumeSec });
+      window._dashStartSec = resumeSec;
+      document.getElementById("pb-sub").textContent = "";
+
+      await new Promise((resolve, reject) => {
+        if (window.dashjs) return resolve();
+        const s = document.createElement("script");
+        s.src = "https://cdn.dashjs.org/v4.7.4/dash.all.min.js";
+        s.onload = resolve; s.onerror = reject;
+        document.head.appendChild(s);
+      });
+
+      function createDashPlayer(manifest, startSec) {
+        if (window._dashPlayer) { try { window._dashPlayer.reset(); } catch {} window._dashPlayer = null; }
+        video.pause();
+        video.removeAttribute("src");
+        video.load();
+        window._dashStartSec = startSec;
+        window._dashFirstCT = null;
+        window._dashSessionStart = Date.now();
+        // Capture video.currentTime at first playback tick to use as offset baseline
+        const _captureFirstCT = () => {
+          if (window._dashFirstCT === null && video.currentTime > 0) {
+            window._dashFirstCT = video.currentTime;
+            console.log("[DASH] firstCT captured:", window._dashFirstCT, "startSec:", startSec);
+            if (window._seekTimingT0) console.log("[SEEK-TIMING] t=" + (Date.now()-window._seekTimingT0) + "ms first frame playing");
+            video.removeEventListener("timeupdate", _captureFirstCT);
+          }
+        };
+        video.addEventListener("timeupdate", _captureFirstCT);
+        console.log("[DASH] session start, startSec:", startSec);
+        const player = dashjs.MediaPlayer().create();
+        player.initialize(video, manifest, true);
+        player.updateSettings({
+          streaming: {
+            buffer: {
+              bufferTimeAtTopQuality: 16,   // Only buffer 16s ahead (4 segments)
+              bufferToKeep: 8,              // Keep 8s behind
+              initialBufferLevel: 4,        // Start playing after 4s buffered
+              stallThreshold: 0.5
+            },
+            gaps: { jumpGaps: true, jumpLargeGaps: true },
+            abr: { autoSwitchBitrate: { video: false } },
+            // Long timeout so waitForSegment has time to respond
+            fragmentRequestProgressTimeout: 60000,
+            retryAttempts: {
+              MPD: 3,
+              InitializationSegment: 3,
+              MediaSegment: 10,   // More retries for media segments
+              other: 3
+            },
+            retryIntervals: {
+              MPD: 500,
+              InitializationSegment: 1000,
+              MediaSegment: 3000,  // Wait 3s between retries
+              other: 1000
+            }
+          }
+        });
+        player.on(dashjs.MediaPlayer.events.ERROR, (e) => { console.error("[DASH] Error:", e); });
+        // Wait for MANIFEST_PARSED then sample currentTime to find true start value
+        // Edge caches old currentTime; dash.js resets it after manifest loads
+        // Position tracked via wall clock timer, not video.currentTime
+        window._dashPlayer = player;
+        return player;
+      }
+
+      createDashPlayer(startData.manifest, resumeSec);
+      initPlayerControls(startData.duration);
+
+      let _seekInProgress = false;
+      async function doSeek(seekSec) {
+        if (_seekInProgress) {
+          console.log("[DASH] Seek already in progress, ignoring:", seekSec);
+          return;
+        }
+        _seekInProgress = true;
+        window._seekDragging = false;
+        // Pause immediately so old content stops playing while we wait for server
+        video.pause();
+        document.getElementById("pb-sub").textContent = "⏳ Hoppar...";
+        const _t0 = Date.now();
+        window._seekTimingT0 = _t0;
+        console.log("[SEEK-TIMING] t=0 seek started, sec:", seekSec);
+        try {
+          let freshToken = API._token || token;
+          const seekData = await API.post("/dash/" + id + "/seek?token=" + encodeURIComponent(freshToken), { startSec: seekSec });
+          console.log("[SEEK-TIMING] t=" + (Date.now()-_t0) + "ms server responded");
+          document.getElementById("pb-sub").textContent = "";
+          createDashPlayer(seekData.manifest, seekSec);
+          console.log("[SEEK-TIMING] t=" + (Date.now()-_t0) + "ms dashPlayer created");  // createDashPlayer calls video.play()
+          if (seekData.duration) initPlayerControls(seekData.duration);
+        } catch(e) {
+          if (e.status === 401 || (e.message && e.message.includes("401"))) {
+            try {
+              const refreshData = await API.post("/auth/refresh", { refreshToken: API._refresh });
+              if (refreshData?.accessToken) {
+                API.setTokens(refreshData.accessToken, refreshData.refreshToken);
+                const freshToken2 = API._token;
+                const seekData2 = await API.post("/dash/" + id + "/seek?token=" + encodeURIComponent(freshToken2), { startSec: seekSec });
+                document.getElementById("pb-sub").textContent = "";
+                createDashPlayer(seekData2.manifest, seekSec);
+                if (seekData2.duration) initPlayerControls(seekData2.duration);
+                return;
+              }
+            } catch(e2) {
+              console.error("[DASH] Token refresh failed:", e2);
+            }
+          }
+          document.getElementById("pb-sub").textContent = "Seek error";
+          console.error("[DASH] Seek error:", e);
+        } finally {
+          _seekInProgress = false;
+        }
+      }
+      window._hlsSeekHandler = doSeek;
     }
-  };
+
+    // Progress: dashStartSec + video.currentTime = absolute position
+    // video.currentTime always starts at 0 per session (Plex offset=0 approach)
+    let _lastProgressSave = 0;
+    video.addEventListener("timeupdate", () => {
+      const now = Date.now();
+      if (now - _lastProgressSave < 5000) return;
+      _lastProgressSave = now;
+      const dur = playerDuration || info.duration || (isNaN(video.duration) ? 0 : video.duration);
+      if (dur > 30) {
+        const firstCT = window._dashFirstCT || 0;
+        const ct = video.currentTime;
+        const pos = ct > 0 ? (window._dashStartSec || 0) + Math.max(0, ct - firstCT)
+                           : (window._dashStartSec || 0) + (Date.now() - (window._dashSessionStart || Date.now())) / 1000;
+        if (pos < 5) return;
+        console.log("[POS] ct:", Math.floor(ct), "firstCT:", Math.floor(firstCT), "startSec:", window._dashStartSec, "pos:", Math.floor(pos));
+        API.post("/media/" + id + "/progress", {
+          position: Math.floor(pos),
+          duration: Math.floor(dur),
+          completed: pos / dur > 0.9 ? 1 : 0
+        }).catch(() => {});
+      }
+    });
+
+  } catch(e) {
+    console.error("Playback error:", e);
+    document.getElementById("pb-sub").textContent = "Fel: " + e.message;
+  }
 }
 
 function playMusic(id, title, artist) {
   const bar = document.getElementById("player-bar");
   const video = document.getElementById("main-video");
-  video.src = "/api/stream/" + id + "?token=" + API._token;
+  const token = localStorage.getItem("sv_token") || API._token || "";
+  video.src = "/api/stream/" + id + "?token=" + encodeURIComponent(token);
   video.play();
   bar.style.display = "flex";
   document.getElementById("pb-title").textContent = title;
@@ -410,13 +653,235 @@ function playMusic(id, title, artist) {
   loadMusicPage();
 }
 
+
+// ── CUSTOM PLAYER CONTROLS ─────────────────────────────────────────────────
+let playerDuration = 0;
+
+function getAbsolutePosition() {
+  const video = document.getElementById("main-video");
+  const ct = video ? video.currentTime : 0;
+  const startSec = window._dashStartSec || 0;
+  // _dashFirstCT is video.currentTime at the moment playback started this session
+  // Subtract it so position is relative to session start, not segment numbering
+  const firstCT = window._dashFirstCT || 0;
+  if (ct && ct > 0 && !isNaN(ct) && isFinite(ct)) {
+    return startSec + Math.max(0, ct - firstCT);
+  }
+  // Fallback: wall clock
+  const elapsed = (Date.now() - (window._dashSessionStart || Date.now())) / 1000;
+  return startSec + elapsed;
+}
+
+function updateProgressBar() {
+  const video = document.getElementById("main-video");
+  const fill = document.getElementById("ctrl-progress-fill");
+  const seek = document.getElementById("ctrl-seek");
+  const time = document.getElementById("ctrl-time");
+  const dur = playerDuration || (isNaN(video.duration) ? 0 : video.duration);
+  if (!dur) return;
+  const pos = getAbsolutePosition();
+  window._currentPlayPos = pos;
+  const pct = Math.min(100, (pos / dur) * 100);
+  if (fill) fill.style.width = pct + "%";
+  if (seek && !window._seekDragging) seek.value = Math.round(Math.min(1000, (pos / dur) * 1000));
+  if (time && !window._seekDragging) time.textContent = formatTime(pos) + " / " + formatTime(dur);
+}
+
+function formatTime(sec) {
+  if (!sec || isNaN(sec)) return "0:00";
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = Math.floor(sec % 60);
+  if (h > 0) return h + ":" + String(m).padStart(2,"0") + ":" + String(s).padStart(2,"0");
+  return m + ":" + String(s).padStart(2,"0");
+}
+
+function initPlayerControls(duration) {
+  const video = document.getElementById("main-video");
+  playerDuration = duration || 0;
+  console.log("[DURATION] playerDuration set to:", playerDuration, "seconds =", Math.floor(playerDuration/60), "min");
+
+  video.ontimeupdate = () => {
+    updateProgressBar();
+  };
+
+  // Seek via custom slider
+  const seek = document.getElementById("ctrl-seek");
+  if (seek) {
+    // Show preview time while dragging without seeking
+    seek.oninput = () => {
+      window._seekDragging = true;
+      const dur = playerDuration || (isNaN(video.duration) ? 0 : video.duration);
+      if (dur) {
+        const previewTime = (seek.value / 1000) * dur;
+        const time = document.getElementById("ctrl-time");
+        if (time) time.textContent = formatTime(previewTime) + " / " + formatTime(dur);
+        const fill = document.getElementById("ctrl-progress-fill");
+        if (fill) fill.style.width = (seek.value / 10) + "%";
+      }
+    };
+
+    // Single unified seek handler - called ONCE on release
+    const doSeekFromSlider = (e) => {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      window._seekDragging = false;
+      const dur = playerDuration || (isNaN(video.duration) ? 0 : video.duration);
+      if (!dur) return;
+      const newTime = Math.floor((seek.value / 1000) * dur);
+      console.log("[SEEK] seeking to:", newTime, "s");
+      if (window._hlsSeekHandler) {
+        window._hlsSeekHandler(newTime);
+      }
+    };
+
+    // Use ONLY mouseup - prevents mouseup+touchend double-fire on desktop
+    // touchend handles mobile separately
+    seek.addEventListener("mouseup", doSeekFromSlider, { once: false });
+    seek.addEventListener("touchend", (e) => {
+      // Only fire if not already handled by mouseup (mobile-only)
+      if (e.sourceCapabilities && e.sourceCapabilities.firesTouchEvents) {
+        doSeekFromSlider(e);
+      } else if (!e.sourceCapabilities) {
+        doSeekFromSlider(e);
+      }
+    });
+
+    // Hover: show time tooltip on progress bar
+    const bg = document.getElementById("ctrl-progress-bg");
+    const hoverTime = document.getElementById("ctrl-hover-time");
+    if (bg && hoverTime) {
+      bg.addEventListener("mousemove", (e) => {
+        const dur = playerDuration || 0;
+        if (!dur) return;
+        const rect = bg.getBoundingClientRect();
+        const pct = Math.max(0, Math.min((e.clientX - rect.left) / rect.width, 1));
+        const timeSec = pct * dur;
+        hoverTime.textContent = formatTime(timeSec);
+        hoverTime.style.left = (pct * 100) + "%";
+        hoverTime.style.display = "block";
+      });
+      bg.addEventListener("mouseleave", () => {
+        hoverTime.style.display = "none";
+      });
+    }
+  }
+
+  // Play/pause button
+  video.onplay = () => { const b = document.getElementById("ctrl-play"); if (b) b.textContent = "⏸"; };
+  video.onpause = () => { const b = document.getElementById("ctrl-play"); if (b) b.textContent = "▶"; };
+}
+
+// ── BUFFER POLLING ─────────────────────────────────────────────────────────
+let _bufferPollTimer = null;
+
+function startBufferPolling(itemId) {
+  if (_bufferPollTimer) clearInterval(_bufferPollTimer);
+  _bufferPollTimer = setInterval(async () => {
+    try {
+      const dur = playerDuration;
+      if (!dur) return;
+      const data = await API.get("/dash/" + itemId + "/progress");
+      if (data && data.bufferedSec !== undefined) {
+        const bufPct = Math.min((data.bufferedSec / dur) * 100, 100);
+        const fill = document.getElementById("ctrl-buffer-fill");
+        if (fill) fill.style.width = bufPct + "%";
+      }
+    } catch(e) {}
+  }, 2000);
+}
+
+function stopBufferPolling() {
+  if (_bufferPollTimer) { clearInterval(_bufferPollTimer); _bufferPollTimer = null; }
+  const fill = document.getElementById("ctrl-buffer-fill");
+  if (fill) fill.style.width = "0%";
+}
+
+function togglePlay() {
+  const video = document.getElementById("main-video");
+  if (video.paused) video.play().catch(() => {}); else video.pause();
+}
+
+function skipTime(sec) {
+  const video = document.getElementById("main-video");
+  const dur = playerDuration || (isNaN(video.duration) ? 0 : video.duration);
+  const absPos = getAbsolutePosition();
+  const newTime = Math.max(0, Math.min(absPos + sec, dur - 1));
+  console.log("[SKIP] sec:", sec, "absPos:", Math.floor(absPos), "newTime:", Math.floor(newTime));
+  if (window._hlsSeekHandler) {
+    window._hlsSeekHandler(Math.floor(newTime));
+  }
+}
+
+function toggleMute() {
+  const video = document.getElementById("main-video");
+  video.muted = !video.muted;
+  const btn = document.querySelector(".ctrl-vol .ctrl-btn");
+  if (btn) btn.textContent = video.muted ? "🔇" : "🔊";
+}
+
+function setVolume(val) {
+  const video = document.getElementById("main-video");
+  video.volume = val / 100;
+}
+
+let _fsHideTimer = null;
+
+function showFsControls() {
+  const controls = document.getElementById("custom-controls");
+  const bar = document.getElementById("player-bar");
+  if (!document.fullscreenElement) return;
+  controls.style.opacity = "1";
+  bar.style.cursor = "default";
+  clearTimeout(_fsHideTimer);
+  _fsHideTimer = setTimeout(() => {
+    controls.style.opacity = "0";
+    bar.style.cursor = "none";
+  }, 3000);
+}
+
+function toggleFullscreen() {
+  const bar = document.getElementById("player-bar");
+  if (!document.fullscreenElement) {
+    bar.requestFullscreen().catch(() => {});
+    bar.addEventListener("mousemove", showFsControls);
+    bar.addEventListener("click", showFsControls);
+    showFsControls();
+  } else {
+    document.exitFullscreen();
+    clearTimeout(_fsHideTimer);
+    const controls = document.getElementById("custom-controls");
+    controls.style.opacity = "1";
+    bar.style.cursor = "default";
+    bar.removeEventListener("mousemove", showFsControls);
+    bar.removeEventListener("click", showFsControls);
+  }
+}
+
+document.addEventListener("fullscreenchange", () => {
+  if (!document.fullscreenElement) {
+    clearTimeout(_fsHideTimer);
+    const controls = document.getElementById("custom-controls");
+    if (controls) controls.style.opacity = "1";
+    const bar = document.getElementById("player-bar");
+    if (bar) { bar.style.cursor = "default"; bar.removeEventListener("mousemove", showFsControls); }
+  }
+});
+
 function closePlayer() {
   const video = document.getElementById("main-video");
   video?.pause();
   if (video) video.src = "";
   document.getElementById("player-bar").style.display = "none";
   document.body.style.paddingBottom = "";
+  // Stop FFmpeg transcode on server
+  if (currentItemId) {
+    if (window._dashPlayer) { try { window._dashPlayer.reset(); } catch {} window._dashPlayer = null; }
+    API.post("/dash/" + currentItemId + "/stop").catch(() => {});
+  }
   nowPlayingId = null;
+  currentItemId = null;
+  stopBufferPolling();
 }
 
 // ── SEARCH ────────────────────────────────────────────────────────────────────
@@ -472,6 +937,10 @@ async function loadSettings() {
   const sec = document.getElementById("sec-settings");
   sec.innerHTML = `<div class="spinner-wrap"><div class="spinner"></div></div>`;
   try {
+    // Start updating next scan label
+    setTimeout(updateNextScanLabel, 500);
+    setInterval(updateNextScanLabel, 30000);
+
     const [cfg, users, libs, scanStatus, updateInfo] = await Promise.all([
       API.get("/config"), API.get("/users"), API.get("/libraries"),
       API.get("/scan/status"), API.get("/update/check").catch(() => null)
@@ -507,7 +976,11 @@ async function loadSettings() {
             <div style="font-size:12px;color:var(--muted)">Låtar</div>
           </div>
         </div>
-        <button class="s-btn primary" onclick="rescan()">↻ Skanna om biblioteket</button>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="s-btn primary" onclick="rescan()">↻ Skanna efter nya filer</button>
+          <button class="s-btn" onclick="fullRescan()" style="border-color:#e74c3c;color:#e74c3c;">🗑 Rensa och skanna om allt</button>
+        </div>
+        <div style="font-size:12px;color:var(--muted);margin-top:8px;">👁 Filbevakning aktiv · <span id="next-scan-label">Beräknar...</span></div>
       </div>
 
       <div class="settings-section">
@@ -587,9 +1060,41 @@ async function loadSettings() {
 }
 
 async function rescan() {
-  toast("Skannar om biblioteket...", "info");
-  try { await API.post("/scan", {}); toast("Skanning startad!", "success"); }
+  toast("⏳ Skannar efter nya filer...", "info");
+  try { 
+    await API.post("/scan", {}); 
+    toast("✓ Skanning startad!", "success");
+    setTimeout(() => loadSettings(), 3000);
+  }
   catch (e) { toast(e.message, "error"); }
+}
+
+async function fullRescan() {
+  if (!confirm("Detta raderar all filminformation från databasen och skannar om allt från noll.\n\nDina faktiska filer på disk rörs inte.\n\nFortsätt?")) return;
+  toast("⏳ Rensar databas och skannar om allt...", "info");
+  try {
+    await API.post("/scan/full-rescan", {});
+    toast("✓ Full skanning startad!", "success");
+    setTimeout(() => { loadSettings(); switchSection("movies"); }, 3000);
+  }
+  catch (e) { toast(e.message, "error"); }
+}
+
+async function updateNextScanLabel() {
+  try {
+    const data = await API.get("/scan/auto-status");
+    const el = document.getElementById("next-scan-label");
+    if (!el) return;
+    if (data.scanning) {
+      el.textContent = "Skannar just nu...";
+    } else if (data.watchersActive > 0) {
+      el.textContent = `Bevakar ${data.watchersActive} bibliotek – nya filer hittas direkt`;
+    } else if ((data.watchingLibraries || []).length > 0) {
+      el.textContent = "Startar bevakning...";
+    } else {
+      el.textContent = "Lägg till ett bibliotek för att aktivera bevakning";
+    }
+  } catch {}
 }
 
 async function addUser() {
@@ -659,11 +1164,14 @@ let fbCallback = null;
 let fbSelected = null;
 
 async function openFolderBrowser(callback) {
+  // Remove any existing browser
+  document.getElementById("fb-overlay")?.remove();
   fbCallback = callback;
   fbSelected = null;
 
   const overlay = document.createElement("div");
   overlay.className = "fb-overlay";
+  overlay.style.cssText = "position:fixed!important;top:0!important;left:0!important;right:0!important;bottom:0!important;z-index:9999!important;background:rgba(0,0,0,0.85)!important;display:flex!important;align-items:center!important;justify-content:center!important;padding:20px!important;";
   overlay.id = "fb-overlay";
   overlay.innerHTML = `
     <div class="fb-modal">
@@ -761,4 +1269,152 @@ function confirmFolderSelection() {
   if (!fbSelected || !fbCallback) return;
   fbCallback(fbSelected);
   closeFolderBrowser();
+}
+
+// ── FIX METADATA ──────────────────────────────────────────────────────────────
+function cleanTitleForSearch(title) {
+  let n = title;
+  // Remove separators
+  n = n.replace(/[\.\-\_]/g, " ");
+  // Remove release tags
+  n = n.replace(/\b(1080p|2160p|4k|uhd|720p|480p|bluray|bdrip|webrip|web-dl|hdtv|x264|x265|hevc|avc|aac|dts|ac3|h264|h265|remux|hdr|dolby|atmos|truehd|proper|repack|extended|unrated|remastered|imax|dvdrip)\b/gi, "");
+  // Remove year and after
+  n = n.replace(/\b(19|20)\d{2}\b.*$/, "");
+  // Remove trailing numbers
+  n = n.replace(/\s+\d+\s*$/, "");
+  // Clean spaces
+  n = n.replace(/\s+/g, " ").trim();
+  return n;
+}
+
+async function openFixMeta(mediaId, currentTitle, type) {
+  // Remove existing
+  document.getElementById("fix-meta-overlay")?.remove();
+  // Clean title for better search results
+  currentTitle = cleanTitleForSearch(currentTitle);
+
+  const overlay = document.createElement("div");
+  overlay.id = "fix-meta-overlay";
+  overlay.style.cssText = "position:fixed!important;top:0!important;left:0!important;right:0!important;bottom:0!important;z-index:10000!important;background:rgba(0,0,0,0.9)!important;display:flex!important;align-items:center!important;justify-content:center!important;padding:20px!important;";
+  overlay.innerHTML = `
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:14px;width:100%;max-width:600px;max-height:85vh;display:flex;flex-direction:column;overflow:hidden;">
+      <div style="padding:18px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px;">
+        <span style="font-size:18px">🔍</span>
+        <div style="flex:1">
+          <div style="font-size:15px;font-weight:600">Fixa filminformation</div>
+          <div style="font-size:12px;color:var(--muted)">${esc(currentTitle)}</div>
+        </div>
+        <button onclick="document.getElementById('fix-meta-overlay').remove()" style="background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer;">✕</button>
+      </div>
+      <div style="padding:16px 20px;border-bottom:1px solid var(--border);">
+        <div style="display:flex;gap:8px;">
+          <input id="fix-search-input" style="flex:1;background:var(--card2);border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:14px;padding:10px 14px;border-radius:8px;outline:none;" 
+            type="text" placeholder="Sök efter rätt film..." value="${esc(currentTitle)}"/>
+          <button onclick="runFixSearch('${mediaId}','${type}')" style="background:var(--accent);border:none;color:white;font-family:inherit;font-size:14px;font-weight:500;padding:10px 18px;border-radius:8px;cursor:pointer;">Sök</button>
+        </div>
+      </div>
+      <div id="fix-search-results" style="flex:1;overflow-y:auto;padding:12px;">
+        <div style="text-align:center;color:var(--muted);padding:32px;font-size:13px;">Skriv en sökning ovan och tryck Sök</div>
+      </div>
+    </div>`;
+
+  document.body.appendChild(overlay);
+  document.getElementById("fix-search-input").addEventListener("keydown", e => {
+    if (e.key === "Enter") runFixSearch(mediaId, type);
+  });
+}
+
+async function runFixSearch(mediaId, type) {
+  const query = document.getElementById("fix-search-input").value.trim();
+  const results = document.getElementById("fix-search-results");
+  if (!query) return;
+  results.innerHTML = `<div style="text-align:center;padding:32px;color:var(--muted)">⏳ Söker...</div>`;
+  try {
+    // Build multiple search variants
+    const variants = new Set();
+
+    // Step 1: Aggressively clean the title
+    let cleaned = query;
+    // Remove release tags (very comprehensive list)
+    cleaned = cleaned.replace(/\b(1080p|2160p|4k|uhd|uhd|720p|480p|576p|bluray|blu ray|bdrip|bd rip|webrip|web rip|web dl|webdl|hdtv|x264|x265|h264|h265|hevc|avc|xvid|divx|aac|dts|ac3|mp3|remux|hdr|hdr10|dolby|atmos|truehd|proper|repack|extended|theatrical|directors cut|unrated|remastered|imax|3d|dvdrip|dvd rip|dvdscr|dvd|scr|cam|ts|r5|retail|limited|internal|readnfo|nfofix|real|dubbed|subbed|multi|nordic|swedish|norwegian|danish|finnish)\b/gi, "");
+    // Remove trailing numbers
+    cleaned = cleaned.replace(/\s+\d+\s*$/, "");
+    // Remove year and everything after
+    cleaned = cleaned.replace(/\b(19|20)\d{2}\b.*$/, "");
+    // Clean extra spaces
+    cleaned = cleaned.replace(/\s+/g, " ").trim();
+
+    // Add cleaned version
+    if (cleaned) variants.add(cleaned);
+    // Add original query too
+    if (query !== cleaned) variants.add(query);
+
+    // Step 2: Progressive word reduction (4 words, 3 words, 2 words)
+    const words = cleaned.split(" ").filter(w => w.length > 0);
+    if (words.length > 4) variants.add(words.slice(0, 4).join(" "));
+    if (words.length > 3) variants.add(words.slice(0, 3).join(" "));
+    if (words.length > 2) variants.add(words.slice(0, 2).join(" "));
+
+    // Search all variants in parallel
+    const searches = await Promise.all([...variants].map(v =>
+      API.get(`/search-meta?query=${encodeURIComponent(v)}&type=${type}`).catch(() => ({ results: [] }))
+    ));
+
+    // Merge and deduplicate by tmdb_id
+    const seen = new Set();
+    const merged = [];
+    for (const search of searches) {
+      for (const r of (search.results || [])) {
+        if (!seen.has(r.tmdb_id)) {
+          seen.add(r.tmdb_id);
+          merged.push(r);
+        }
+      }
+    }
+
+    if (!merged.length) {
+      results.innerHTML = `<div style="text-align:center;padding:32px;color:var(--muted);font-size:13px;">Inga träffar för "${esc(query)}"</div>`;
+      return;
+    }
+    results.innerHTML = merged.map(r => `
+      <div style="display:flex;gap:12px;padding:10px;border-radius:8px;cursor:pointer;transition:background 0.15s;" 
+           onmouseover="this.style.background='var(--card2)'" onmouseout="this.style.background=''"
+           onclick='applyFixMeta("${mediaId}", this.dataset.meta)' data-meta='${JSON.stringify(r).replace(/'/g, "&#39;")}'>
+        ${r.poster_url 
+          ? `<img src="${r.poster_url}" style="width:50px;height:75px;object-fit:cover;border-radius:5px;flex-shrink:0;" onerror="this.style.display='none'"/>`
+          : `<div style="width:50px;height:75px;background:var(--card);border-radius:5px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:20px;">🎬</div>`
+        }
+        <div style="flex:1;overflow:hidden;">
+          <div style="font-size:14px;font-weight:500;margin-bottom:3px;">${esc(r.title)}</div>
+          <div style="font-size:12px;color:var(--muted);margin-bottom:4px;">${r.year || "Okänt år"}${r.rating ? ` · ⭐ ${parseFloat(r.rating).toFixed(1)}` : ""}</div>
+          <div style="font-size:12px;color:var(--muted);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;">${esc(r.overview || "")}</div>
+        </div>
+        <div style="color:var(--accent);font-size:20px;align-self:center;">›</div>
+      </div>`).join("");
+  } catch(e) {
+    results.innerHTML = `<div style="text-align:center;padding:32px;color:var(--danger);font-size:13px;">Fel: ${e.message}</div>`;
+  }
+}
+
+async function applyFixMeta(mediaId, metaJson) {
+  try {
+    const meta = typeof metaJson === 'string' ? JSON.parse(metaJson) : metaJson;
+    await API.post(`/media/${mediaId}/fix-meta`, meta);
+    document.getElementById("fix-meta-overlay")?.remove();
+    toast("✓ Filminformation uppdaterad!", "success");
+
+    // Close detail, reload current section, then reopen detail
+    closeDetail();
+    // Reload current section to reflect changes
+    const activeSection = document.querySelector(".ntab.active");
+    if (activeSection) {
+      const sectionName = ["home","movies","tvshows","music","search"][
+        [...document.querySelectorAll(".ntab")].indexOf(activeSection)
+      ];
+      if (sectionName) setTimeout(() => switchSection(sectionName), 100);
+    }
+    setTimeout(() => openDetail(mediaId), 600);
+  } catch(e) {
+    toast("Fel: " + e.message, "error");
+  }
 }
