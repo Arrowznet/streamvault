@@ -31,10 +31,9 @@ function loadConfig() {
 }
 let config = loadConfig();
 
-// ── DEFAULT API KEYS ──────────────────────────────────────────────────────────
-// Fill in your own keys here - users can override in Settings
-const DEFAULT_TMDB_KEY     = "439613bac1cb0c87f7de88ebac8c1384";
-const DEFAULT_OPENSUBTITLES_KEY = "SSxWHxl1XOgPQjSe4D9hzZxKIkj9vQDW";
+// Default API keys - users can override in Settings
+const DEFAULT_TMDB_KEY = "YOUR_TMDB_KEY_HERE";
+const DEFAULT_OPENSUBTITLES_KEY = "YOUR_OPENSUBTITLES_KEY_HERE";
 if (!config.tmdb_api_key && DEFAULT_TMDB_KEY !== "YOUR_TMDB_KEY_HERE")
   config.tmdb_api_key = DEFAULT_TMDB_KEY;
 if (!config.opensubtitles_api_key && DEFAULT_OPENSUBTITLES_KEY !== "YOUR_OPENSUBTITLES_KEY_HERE")
@@ -189,7 +188,6 @@ app.patch("/api/users/:id/password", requireAuth, async (req, res) => {
 
 app.get("/api/libraries", requireAuth, (req, res) => res.json(config.libraries || []));
 
-// ── VERSION & UPDATES ─────────────────────────────────────────────────────────
 app.get("/api/version", (req, res) => {
   res.json({ version: STREAMVAULT_VERSION, repo: GITHUB_REPO });
 });
@@ -199,7 +197,7 @@ app.get("/api/updates/check", requireAuth, async (req, res) => {
     const data = await new Promise((resolve, reject) => {
       https.get({
         hostname: "api.github.com",
-        path: `/repos/${GITHUB_REPO}/releases/latest`,
+        path: "/repos/" + GITHUB_REPO + "/releases/latest",
         headers: { "User-Agent": "StreamVault/" + STREAMVAULT_VERSION }
       }, r => {
         let d = ""; r.on("data", c => d += c);
@@ -208,14 +206,7 @@ app.get("/api/updates/check", requireAuth, async (req, res) => {
     });
     const latest = (data.tag_name || "v" + STREAMVAULT_VERSION).replace(/^v/, "");
     const hasUpdate = latest !== STREAMVAULT_VERSION;
-    res.json({
-      current: STREAMVAULT_VERSION,
-      latest,
-      hasUpdate,
-      releaseNotes: data.body || "",
-      downloadUrl: data.assets?.[0]?.browser_download_url || null,
-      htmlUrl: data.html_url || null
-    });
+    res.json({ current: STREAMVAULT_VERSION, latest, hasUpdate, releaseNotes: data.body || "", htmlUrl: data.html_url || null });
   } catch {
     res.json({ current: STREAMVAULT_VERSION, latest: STREAMVAULT_VERSION, hasUpdate: false });
   }
@@ -462,36 +453,6 @@ app.delete("/api/favorites/:id", requireAuth, async (req, res) => {
 // ── STREAMING & HLS TRANSCODING ───────────────────────────────────────────────
 const HLS_CACHE = path.join(DATA_DIR, "hls");
 const DASH_CACHE = path.join(DATA_DIR, "dash");
-
-// Clean all transcode caches on startup to prevent disk filling up
-function cleanDirSync(dirPath) {
-  try {
-    if (!fs.existsSync(dirPath)) return;
-    const entries = fs.readdirSync(dirPath);
-    for (const e of entries) {
-      const full = path.join(dirPath, e);
-      try {
-        const stat = fs.statSync(full);
-        if (stat.isDirectory()) { cleanDirSync(full); fs.rmdirSync(full); }
-        else fs.unlinkSync(full);
-      } catch {}
-    }
-  } catch {}
-}
-
-try {
-  if (fs.existsSync(DASH_CACHE)) {
-    cleanDirSync(DASH_CACHE);
-    console.log('[STARTUP] DASH cache cleaned');
-  }
-} catch {}
-
-try {
-  if (fs.existsSync(HLS_CACHE)) {
-    cleanDirSync(HLS_CACHE);
-    console.log('[STARTUP] HLS cache cleaned');
-  }
-} catch {}
 fs.mkdirSync(HLS_CACHE, { recursive: true });
 fs.mkdirSync(DASH_CACHE, { recursive: true });
 
@@ -750,56 +711,25 @@ async function startHlsTranscode(item, startSec = 0) {
 const activeDashTranscodes = new Map();
 const seekLocks = new Map(); // Prevent concurrent seeks for same item
 
-async function cleanDashDir(dirPath) {
-  // Retry cleanup a few times - Windows may hold file locks briefly after SIGKILL
-  for (let attempt = 0; attempt < 5; attempt++) {
-    try {
-      if (!fs.existsSync(dirPath)) return;
-      const files = fs.readdirSync(dirPath);
-      for (const f of files) {
-        try { fs.unlinkSync(path.join(dirPath, f)); } catch {}
-      }
-      fs.rmdirSync(dirPath);
-      return; // success
-    } catch {
-      await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
-    }
-  }
-  console.log('[DASH] Could not clean dir:', dirPath);
-}
-
-// Clean ALL old session dirs for an item except the current one
-async function cleanOldSessions(itemId, currentDashDir) {
-  const itemBaseDir = path.join(DASH_CACHE, itemId);
-  try {
-    if (!fs.existsSync(itemBaseDir)) return;
-    const sessions = fs.readdirSync(itemBaseDir);
-    for (const s of sessions) {
-      const sessionDir = path.join(itemBaseDir, s);
-      if (sessionDir !== currentDashDir) {
-        await cleanDashDir(sessionDir);
-      }
-    }
-  } catch {}
-}
-
 async function startDashTranscode(item, seekSec = 0) {
   const itemId = item._id;
-  // Unique session dir per transcode - no file lock contention between sessions
-  const sessionId = uuidv4().substring(0, 8);
-  const itemBaseDir = path.join(DASH_CACHE, itemId);
-  const dashDir = path.join(itemBaseDir, sessionId);
+  const dashDir = path.join(DASH_CACHE, itemId);
   fs.mkdirSync(dashDir, { recursive: true });
 
-  // Kill existing and clean its dir asynchronously - NO WAIT (like Plex's 5ms)
+  // Kill existing if running
   if (activeDashTranscodes.has(itemId)) {
-    const old = activeDashTranscodes.get(itemId);
-    const oldDir = old.dashDir;
-    try { old.proc.kill("SIGKILL"); } catch {}
+    try { activeDashTranscodes.get(itemId).proc.kill("SIGKILL"); } catch {}
     activeDashTranscodes.delete(itemId);
-    // Clean old dir in background with retries
-    setTimeout(() => cleanDashDir(oldDir), 1000);
+    await new Promise(r => setTimeout(r, 3000)); // Wait for Windows file locks to release
   }
+
+  // Clear old segments
+  try {
+    const files = fs.readdirSync(dashDir);
+    for (const f of files) {
+      try { fs.unlinkSync(path.join(dashDir, f)); } catch {}
+    }
+  } catch {}
 
   const ffmpeg = getFfmpegPath();
   const { encoder, extraArgs } = cachedEncoder;
@@ -833,7 +763,7 @@ async function startDashTranscode(item, seekSec = 0) {
   const args = [
     "-hide_banner", "-loglevel", "warning",
     ...hwaccelArgs,
-    // No -re: encode at full speed like Plex, segment server handles timing
+    "-re",
     "-fflags", "+genpts+igndts+discardcorrupt",
     "-err_detect", "ignore_err",
     ...(seekSec > 0 ? ["-ss", seekSec.toString()] : []),
@@ -850,7 +780,7 @@ async function startDashTranscode(item, seekSec = 0) {
     "-seg_duration", "4",
     "-use_template", "1",
     "-use_timeline", "1",
-    "-window_size", "0",   // Keep all segments (needed for seek back)
+    "-window_size", "0",
     "-adaptation_sets", "id=0,streams=v id=1,streams=a",
     mpdPath
   ];
@@ -859,7 +789,7 @@ async function startDashTranscode(item, seekSec = 0) {
   console.log(`[DASH] Starting transcode: ${item.title}`);
   console.log(`[DASH] Full args: ${args.join(' ')}`);
   const proc = spawn(ffmpeg, args, { windowsHide: false, cwd: dashDir });
-  activeDashTranscodes.set(itemId, { proc, dashDir, startTime: Date.now(), startSec: seekSec, duration: await getDuration(item) });
+  activeDashTranscodes.set(itemId, { proc, startTime: Date.now(), startSec: seekSec, duration: await getDuration(item) });
 
   let stderrBuf = "";
   proc.stderr.on("data", d => {
@@ -896,6 +826,8 @@ app.post("/api/dash/:id/start", requireAuth, async (req, res) => {
 
   const duration = await getDuration(item);
   const token = req.query.token || "";
+  const dashDir = path.join(DASH_CACHE, item._id);
+  const mpdPath = path.join(dashDir, "manifest.mpd");
 
   const startSec = parseInt(req.body?.startSec || "0");
 
@@ -903,37 +835,37 @@ app.post("/api/dash/:id/start", requireAuth, async (req, res) => {
   const existing = activeDashTranscodes.get(item._id);
   if (existing) {
     if (Math.abs((existing.startSec || 0) - startSec) > 5) {
-      startDashTranscode(item, startSec); // handles kill + new unique dir internally
+      const oldProc = existing.proc;
+      activeDashTranscodes.delete(item._id);
+      try { oldProc.kill("SIGKILL"); } catch {}
+      // Wait for old process to fully release file locks on Windows
+      await new Promise(r => setTimeout(r, 3000));
+      startDashTranscode(item, startSec);
     }
-    // else reuse existing session
+    // else reuse existing
   } else {
     startDashTranscode(item, startSec);
   }
 
-  // Small wait for session to register
-  await new Promise(r => setTimeout(r, 50));
-  const activeSession = activeDashTranscodes.get(item._id);
-  const dashDir = activeSession ? activeSession.dashDir : path.join(DASH_CACHE, item._id, 'default');
-
-  // Wait for first media segment
+  // Wait for first media segment (means FFmpeg is running and writing data)
   const firstSeg = path.join(dashDir, "chunk-stream0-00001.m4s");
-  const deadline = Date.now() + 15000;
+  const deadline = Date.now() + 30000;
   while (Date.now() < deadline) {
     if (fs.existsSync(firstSeg) && fs.statSync(firstSeg).size > 1000) break;
-    await new Promise(r => setTimeout(r, 50));
+    await new Promise(r => setTimeout(r, 300));
   }
 
   if (!fs.existsSync(firstSeg)) {
     return res.status(500).json({ error: "Transkodning misslyckades – MPD skapades inte" });
   }
 
-  // Get session ID for manifest URL
-  const tc = activeDashTranscodes.get(item._id);
-  const sessionPath = tc ? path.relative(path.join(DASH_CACHE, item._id), tc.dashDir) : '';
+  // Small extra wait for MPD to be written
+  await new Promise(r => setTimeout(r, 500));
+
   console.log(`[DASH] MPD ready for: ${item.title}`);
   res.json({
     ok: true,
-    manifest: `/api/dash/${item._id}/${sessionPath}/manifest.mpd?token=${token}`,
+    manifest: `/api/dash/${item._id}/manifest.mpd?token=${token}`,
     duration
   });
 });
@@ -953,24 +885,22 @@ app.post("/api/dash/:id/seek", requireAuth, async (req, res) => {
   const seekSec = parseInt(req.body?.startSec || "0");
   const duration = await getDuration(item);
   const token = req.query.token || "";
-
-  // startDashTranscode handles kill + new unique dir + immediate start (no wait)
-  startDashTranscode(item, seekSec);
-
-  // Small wait for new session to register in activeDashTranscodes
-  await new Promise(r => setTimeout(r, 100));
-  const seekSession = activeDashTranscodes.get(item._id);
-  const dashDir = seekSession ? seekSession.dashDir : path.join(DASH_CACHE, item._id, 'default');
+  const dashDir = path.join(DASH_CACHE, item._id);
   const firstSeg = path.join(dashDir, "chunk-stream0-00001.m4s");
 
-  // Wait for first segment after seek - fast without -re
+  // startDashTranscode handles kill + 2s wait + clear internally
+  await startDashTranscode(item, seekSec);
+
+  // Wait for MPD + first segment (or init segment as fallback)
+  const initSeg = path.join(dashDir, "init-stream0.mp4");
   const mpdFile = path.join(dashDir, "manifest.mpd");
-  const deadline = Date.now() + 15000;
+  const deadline = Date.now() + 45000;
   while (Date.now() < deadline) {
     if (fs.existsSync(firstSeg) && fs.statSync(firstSeg).size > 1000) break;
+    // If FFmpeg already finished (short remaining duration), check MPD exists
     const tc = activeDashTranscodes.get(item._id);
     if (!tc && fs.existsSync(mpdFile)) break;
-    await new Promise(r => setTimeout(r, 100));
+    await new Promise(r => setTimeout(r, 300));
   }
 
   if (!fs.existsSync(firstSeg) && !fs.existsSync(mpdFile)) {
@@ -978,13 +908,13 @@ app.post("/api/dash/:id/seek", requireAuth, async (req, res) => {
     return res.status(500).json({ error: "Seek misslyckades" });
   }
 
+  await new Promise(r => setTimeout(r, 300));
+
   seekLocks.delete(item._id);
   console.log(`[DASH] Seek ready: ${item.title} from ${seekSec}s`);
-  const seekTc = activeDashTranscodes.get(item._id);
-  const seekSessionPath = seekTc ? path.relative(path.join(DASH_CACHE, item._id), seekTc.dashDir) : '';
   res.json({
     ok: true,
-    manifest: `/api/dash/${item._id}/${seekSessionPath}/manifest.mpd?token=${token}`,
+    manifest: `/api/dash/${item._id}/manifest.mpd?token=${token}`,
     duration
   });
 });
@@ -1001,59 +931,12 @@ app.post("/api/dash/:id/stop", requireAuth, (req, res) => {
 
 // Serve DASH segments - Plex-style incomplete segment streaming
 // X-Plex-Incomplete-Segments: stream segment to client WHILE FFmpeg writes it
-// Helper: wait until a file exists AND is stable (not being written)
-async function waitForSegment(filePath, itemId, timeoutMs = 30000) {
-  const deadline = Date.now() + timeoutMs;
-
-  // Step 1: Wait for file to appear - poll aggressively
-  while (!fs.existsSync(filePath)) {
-    if (Date.now() > deadline) return false;
-    const tc = activeDashTranscodes.get(itemId);
-    if (!tc && !fs.existsSync(filePath)) return false;
-    await new Promise(r => setTimeout(r, 25));
-  }
-
-  // Step 2: Wait for file to be stable (done writing)
-  // Use 50ms gap instead of 100ms for faster response
-  let stable = false;
-  let attempts = 0;
-  while (!stable && Date.now() < deadline) {
-    try {
-      const size1 = fs.statSync(filePath).size;
-      if (size1 < 100) { await new Promise(r => setTimeout(r, 25)); attempts++; continue; }
-      await new Promise(r => setTimeout(r, 50));
-      const size2 = fs.statSync(filePath).size;
-      if (size1 === size2 && size2 > 100) stable = true;
-    } catch { await new Promise(r => setTimeout(r, 25)); }
-    attempts++;
-    if (attempts > 300) break;
-  }
-  return stable;
-}
-
-// Handle both /api/dash/:id/:file and /api/dash/:id/:sessionId/:file
-app.get("/api/dash/:id/:sessionId/:file", async (req, res) => {
-  const dashDir = path.join(DASH_CACHE, req.params.id, req.params.sessionId);
-  const filePath = path.join(dashDir, req.params.file);
-  const fileName = req.params.file;
-  const itemId = req.params.id;
-  return serveDashFile(dashDir, filePath, fileName, itemId, req, res);
-});
-
 app.get("/api/dash/:id/:file", async (req, res) => {
-  // Legacy: also check active session dir
-  const activeSession = activeDashTranscodes.get(req.params.id);
-  const dashDir = activeSession ? activeSession.dashDir : path.join(DASH_CACHE, req.params.id);
+  const dashDir = path.join(DASH_CACHE, req.params.id);
   const filePath = path.join(dashDir, req.params.file);
   const fileName = req.params.file;
-  const itemId = req.params.id;
-  return serveDashFile(dashDir, filePath, fileName, itemId, req, res);
-});
 
-async function serveDashFile(dashDir, filePath, fileName, itemId, req, res) {
-
-  const baseDir = path.join(DASH_CACHE, itemId);
-  if (!filePath.startsWith(baseDir)) return res.status(403).end();
+  if (!filePath.startsWith(dashDir)) return res.status(403).end();
 
   const ext = path.extname(fileName);
   const mimeTypes = {
@@ -1063,9 +946,9 @@ async function serveDashFile(dashDir, filePath, fileName, itemId, req, res) {
   };
   res.setHeader('Content-Type', mimeTypes[ext] || 'application/octet-stream');
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Cache-Control', 'no-cache, no-store');
+  res.setHeader('Cache-Control', 'no-cache');
 
-  // MPD: convert to static with full duration - eliminates dash.js 3s time-sync
+  // For MPD: serve as-is (dynamic type kept so dash.js keeps polling for new segments)
   if (ext === '.mpd') {
     let waited = 0;
     while (!fs.existsSync(filePath) && waited < 15000) {
@@ -1073,42 +956,50 @@ async function serveDashFile(dashDir, filePath, fileName, itemId, req, res) {
       waited += 100;
     }
     if (!fs.existsSync(filePath)) return res.status(404).end();
-
-    try {
-      const tc = activeDashTranscodes.get(itemId);
-      const duration = tc ? tc.duration : 0;
-      let mpd = fs.readFileSync(filePath, 'utf8');
-
-      // Serve MPD as-is - dynamic type works correctly with dash.js
-
-      res.setHeader('Content-Type', 'application/dash+xml');
-      res.setHeader('Content-Length', Buffer.byteLength(mpd));
-      return res.end(mpd);
-    } catch {
-      return fs.createReadStream(filePath).pipe(res);
-    }
-  }
-
-  // Init segments: wait for stable file
-  if (fileName.startsWith('init-')) {
-    const ready = await waitForSegment(filePath, itemId, 10000);
-    if (!ready) return res.status(404).end();
-    try {
-      const stat = fs.statSync(filePath);
-      res.setHeader('Content-Length', stat.size);
-    } catch {}
     return fs.createReadStream(filePath).pipe(res);
   }
 
-  // Media segments (chunk-streamN-XXXXX.m4s):
-  // Wait for segment to be fully written before responding
-  // This is the Plex approach - client never gets a partial segment
-  const ready = await waitForSegment(filePath, itemId, 30000);
-  if (!ready) {
-    console.log(`[DASH] Segment timeout: ${fileName}`);
-    return res.status(404).end();
+  // For init segments: wait up to 10s
+  if (fileName.startsWith('init-')) {
+    let waited = 0;
+    while (!fs.existsSync(filePath) && waited < 10000) {
+      await new Promise(r => setTimeout(r, 100));
+      waited += 100;
+    }
+    if (!fs.existsSync(filePath)) return res.status(404).end();
+    return fs.createReadStream(filePath).pipe(res);
   }
 
+  // For media segments: wait until the NEXT segment exists (means this one is complete)
+  // This avoids dash.js timeout on non-computable download size
+  let waited = 0;
+  while (!fs.existsSync(filePath) && waited < 30000) {
+    await new Promise(r => setTimeout(r, 200));
+    waited += 200;
+  }
+  if (!fs.existsSync(filePath)) return res.status(404).end();
+
+  // Wait for segment to be fully written by checking if next segment started
+  const match = fileName.match(/chunk-stream(\d+)-(\d+)\.m4s/);
+  if (match) {
+    const streamIdx = match[1];
+    const segNum = parseInt(match[2]);
+    const nextNum = String(segNum + 1).padStart(match[2].length, '0');
+    const nextPath = path.join(dashDir, `chunk-stream${streamIdx}-${nextNum}.m4s`);
+    let waitedForNext = 0;
+    while (!fs.existsSync(nextPath) && waitedForNext < 20000) {
+      const tc = activeDashTranscodes.get(req.params.id);
+      if (!tc) {
+        // FFmpeg finished - wait a bit more in case it just wrote the last segment
+        await new Promise(r => setTimeout(r, 500));
+        break;
+      }
+      await new Promise(r => setTimeout(r, 100));
+      waitedForNext += 100;
+    }
+  }
+
+  // Set Content-Length so dash.js knows the size (avoids "non-computable download size")
   try {
     const stat = fs.statSync(filePath);
     res.setHeader('Content-Length', stat.size);
@@ -1121,7 +1012,7 @@ async function serveDashFile(dashDir, filePath, fileName, itemId, req, res) {
     else res.end();
   });
   stream.pipe(res);
-}
+});
 
 
 // Start/seek HLS transcode
