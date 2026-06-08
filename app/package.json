@@ -4,8 +4,7 @@
   "description": "StreamVault - Self-hosted media server",
   "main": "server/index.js",
   "scripts": {
-    "start": "node server/index.js",
-    "install-deps": "npm install express cors bcryptjs jsonwebtoken nedb express-rate-limit"
+    "start": "node server/index.js"
   },
   "author": "Arrowznet",
   "license": "MIT",
@@ -15,6 +14,8 @@
     "express": "^4.18.2",
     "express-rate-limit": "^7.1.5",
     "jsonwebtoken": "^9.0.2",
-    "nedb": "^1.8.0"
+    "nedb": "^1.8.0",
+    "uuid": "^9.0.0",
+    "chokidar": "^3.5.3"
   }
 }
