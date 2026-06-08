@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<meta name="theme-color" content="#08080f"/>
+<link rel="manifest" href="/manifest.json"/>
+<title>StreamVault</title>
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet"/>
+<link rel="stylesheet" href="/css/app.css"/>
+<style>
+.setup-screen {
+  position:fixed;inset:0;background:var(--bg);
+  display:flex;align-items:center;justify-content:center;
+}
+.setup-box {
+  background:var(--surface);border:1px solid var(--border);
+  border-radius:16px;padding:40px 44px;width:420px;text-align:center;
+}
+.setup-logo {
+  font-family:'Bebas Neue',sans-serif;font-size:40px;letter-spacing:3px;margin-bottom:4px;
+}
+.setup-logo span{color:var(--accent)}
+.setup-sub{font-size:14px;color:var(--muted);margin-bottom:8px}
+.setup-desc{font-size:13px;color:var(--muted);margin-bottom:28px;line-height:1.6;
+  background:rgba(232,87,42,0.08);border:1px solid rgba(232,87,42,0.2);
+  border-radius:8px;padding:12px;
+}
+.setup-form{display:flex;flex-direction:column;gap:12px}
+.setup-input{
+  background:var(--card2);border:1px solid var(--border);
+  color:var(--text);font-family:'DM Sans',sans-serif;font-size:14px;
+  padding:12px 14px;border-radius:8px;outline:none;transition:border-color 0.2s;
+  -webkit-user-select:text;user-select:text;
+}
+.setup-input:focus{border-color:var(--accent)}
+.setup-error{font-size:13px;color:var(--danger);min-height:20px}
+.setup-btn{
+  background:var(--accent);border:none;color:white;
+  font-family:'DM Sans',sans-serif;font-size:15px;font-weight:600;
+  padding:13px;border-radius:8px;cursor:pointer;transition:background 0.2s;
+}
+.setup-btn:hover{background:#ff6535}
+.setup-btn:disabled{opacity:0.5;cursor:not-allowed}
+</style>
+</head>
+<body>
+<div id="app">
+
+  <!-- Setup screen - visas för nya installationer -->
+  <div id="setup-screen" class="setup-screen" style="display:none">
+    <div class="setup-box">
+      <div class="setup-logo">Stream<span>Vault</span></div>
+      <div class="setup-sub">Välkommen!</div>
+      <div class="setup-desc">
+        🎉 StreamVault är installerat! Skapa ditt adminkonto för att komma igång.
+      </div>
+      <div class="setup-form">
+        <input class="setup-input" type="text" id="s-user" placeholder="Välj användarnamn" autocomplete="off"/>
+        <input class="setup-input" type="password" id="s-pass" placeholder="Välj lösenord (minst 6 tecken)"/>
+        <input class="setup-input" type="password" id="s-pass2" placeholder="Upprepa lösenord"/>
+        <div class="setup-error" id="s-error"></div>
+        <button class="setup-btn" id="s-btn" onclick="createAdmin()">Skapa adminkonto →</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Login screen -->
+  <div id="login-screen" class="login-screen" style="display:none">
+    <div class="login-box">
+      <div class="login-logo">Stream<span>Vault</span></div>
+      <div class="login-sub">Logga in för att fortsätta</div>
+      <div class="login-form">
+        <input class="l-input" type="text" id="l-user" placeholder="Användarnamn" autocomplete="username"/>
+        <input class="l-input" type="password" id="l-pass" placeholder="Lösenord" autocomplete="current-password"/>
+        <div class="l-error" id="l-error"></div>
+        <button class="l-btn" onclick="login()">Logga in</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main app -->
+  <div id="main-app" style="display:none">
+    <!-- Plex-style sidebar -->
+    <aside id="sidebar">
+      <div class="sb-logo">Stream<span>Vault</span></div>
+      <nav class="sb-nav">
+        <div class="sb-item active" id="sb-home" onclick="switchSection('home')">
+          <span class="sb-icon">🏠</span><span class="sb-label">Hem</span>
+        </div>
+        <div class="sb-item" id="sb-search" onclick="switchSection('search')">
+          <span class="sb-icon">🔍</span><span class="sb-label">Sök</span>
+        </div>
+        <div class="sb-sep">BIBLIOTEK</div>
+        <div id="sb-libraries"></div>
+        <div class="sb-sep">ÖVRIGT</div>
+        <div class="sb-item" id="sb-settings" onclick="switchSection('settings')">
+          <span class="sb-icon">⚙️</span><span class="sb-label">Inställningar</span>
+        </div>
+      </nav>
+      <div class="sb-user" onclick="toggleUserMenu()">
+        <div class="user-avatar" id="userAvatar">?</div>
+        <span id="userName">–</span>
+        <div class="user-menu" id="userMenu" style="display:none">
+          <div class="um-item" onclick="switchSection('settings')">⚙️ Inställningar</div>
+          <div class="um-item" onclick="logout()">🚪 Logga ut</div>
+        </div>
+      </div>
+    </aside>
+    <main id="appMain">
+      <section id="sec-home" class="section active"></section>
+      <section id="sec-movies" class="section"></section>
+      <section id="sec-tvshows" class="section"></section>
+      <section id="sec-music" class="section"></section>
+      <section id="sec-search" class="section"></section>
+      <section id="sec-settings" class="section"></section>
+      <section id="sec-library" class="section"></section>
+    </main>
+  </div>
+
+  <div id="detail-overlay" class="detail-overlay" style="display:none"></div>
+
+  <div id="player-bar" style="display:none">
+    <video id="main-video"></video>
+    <div class="custom-controls" id="custom-controls">
+      <div class="ctrl-progress-wrap" id="ctrl-progress-wrap">
+        <div class="ctrl-progress-bg" id="ctrl-progress-bg">
+          <div class="ctrl-buffer-fill" id="ctrl-buffer-fill"></div>
+          <div class="ctrl-progress-fill" id="ctrl-progress-fill"></div>
+          <input type="range" class="ctrl-seek" id="ctrl-seek" min="0" max="1000" value="0" step="1">
+          <div class="ctrl-hover-time" id="ctrl-hover-time"></div>
+        </div>
+        <span class="ctrl-time" id="ctrl-time">0:00 / 0:00</span>
+      </div>
+      <div class="ctrl-row">
+        <button class="ctrl-btn" id="ctrl-play" onclick="togglePlay()">▶</button>
+        <button class="ctrl-btn" onclick="skipTime(-30)">-30s</button>
+        <button class="ctrl-btn" onclick="skipTime(30)">+30s</button>
+        <div class="ctrl-vol">
+          <button class="ctrl-btn" onclick="toggleMute()">🔊</button>
+          <input type="range" id="ctrl-volume" min="0" max="100" value="100" oninput="setVolume(this.value)">
+        </div>
+        <button class="ctrl-btn" onclick="toggleFullscreen()">⛶</button>
+        <button class="ctrl-btn ctrl-close" onclick="closePlayer()">✕</button>
+        <div class="pb-info">
+          <div class="pb-title" id="pb-title">–</div>
+          <div class="pb-sub" id="pb-sub"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+</div>
+
+<script src="/js/api.js"></script>
+<script src="/js/i18n.js"></script>
+<script>
+// ── STARTUP – kolla om setup krävs ────────────────────────────────────────────
+window.addEventListener("DOMContentLoaded", async () => {
+  try {
+    const res = await fetch("/api/setup-required");
+    const data = await res.json();
+    if (data.required) {
+      // Ny installation – visa setup-formulär
+      document.getElementById("setup-screen").style.display = "flex";
+      return;
+    }
+  } catch {}
+
+  // Inte ny installation – kolla om inloggad
+  const token = localStorage.getItem("sv_token");
+  if (token) {
+    const user = JSON.parse(localStorage.getItem("sv_user") || "null");
+    if (user) { currentUser = user; showApp(); return; }
+  }
+  // Visa inloggning
+  document.getElementById("login-screen").style.display = "flex";
+});
+
+// ── SKAPA ADMINKONTO ──────────────────────────────────────────────────────────
+async function createAdmin() {
+  const username = document.getElementById("s-user").value.trim();
+  const password = document.getElementById("s-pass").value;
+  const password2 = document.getElementById("s-pass2").value;
+  const errEl = document.getElementById("s-error");
+  const btn = document.getElementById("s-btn");
+  errEl.textContent = "";
+
+  if (!username) { errEl.textContent = "Ange ett användarnamn."; return; }
+  if (password.length < 6) { errEl.textContent = "Lösenordet måste vara minst 6 tecken."; return; }
+  if (password !== password2) { errEl.textContent = "Lösenorden matchar inte."; return; }
+
+  btn.disabled = true;
+  btn.textContent = "Skapar konto...";
+
+  try {
+    const res = await fetch("/api/auth/setup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password })
+    });
+    const data = await res.json();
+    if (!res.ok) { errEl.textContent = data.error || "Något gick fel."; btn.disabled = false; btn.textContent = "Skapa adminkonto →"; return; }
+
+    // Inloggad direkt!
+    API.setTokens(data.accessToken, data.refreshToken);
+    currentUser = data.user;
+    localStorage.setItem("sv_user", JSON.stringify(data.user));
+    document.getElementById("setup-screen").style.display = "none";
+    showApp();
+  } catch(e) {
+    errEl.textContent = "Kunde inte ansluta till servern.";
+    btn.disabled = false;
+    btn.textContent = "Skapa adminkonto →";
+  }
+}
+</script>
+<script src="/js/app.js"></script>
+</body>
+</html>
