@@ -60,6 +60,129 @@ function showApp() {
 async function checkForUpdates() {
   try {
     var data = await API.get("/updates/check");
+    if (data.hasUpdate) showUpdateBanner(data.latest, data.releaseNotes, data.htmlUrl, data.downloadUrl);
+  } catch {}
+}
+
+function showUpdateBanner(version, releaseNotes, url, downloadUrl) {
+  var existing = document.getElementById("update-banner");
+  if (existing) existing.remove();
+  var banner = document.createElement("div");
+  banner.id = "update-banner";
+  banner.style.cssText = "position:fixed;bottom:80px;right:24px;z-index:300;background:#0d3d24;border:1px solid #2ecc71;border-radius:12px;padding:16px 20px;font-size:13px;color:#2ecc71;display:flex;flex-direction:column;gap:12px;box-shadow:0 4px 24px rgba(0,0,0,0.5);max-width:340px;";
+  
+  var header = document.createElement("div");
+  header.style.cssText = "display:flex;align-items:center;gap:10px";
+  header.innerHTML = "<span style='font-size:22px'>🎉</span><div style='flex:1'><b style='font-size:14px'>StreamVault " + version + " available!</b><div style='opacity:0.7;font-size:12px;margin-top:2px'>A new version is ready to install</div></div>";
+  var closeBtn = document.createElement("button");
+  closeBtn.textContent = "✕";
+  closeBtn.style.cssText = "background:none;border:none;color:#2ecc71;font-size:18px;cursor:pointer;opacity:0.7;padding:0";
+  closeBtn.onclick = function() { banner.remove(); };
+  header.appendChild(closeBtn);
+  banner.appendChild(header);
+
+  if (releaseNotes) {
+    var notes = document.createElement("div");
+    notes.style.cssText = "font-size:12px;opacity:0.8;border-top:1px solid rgba(46,204,113,0.3);padding-top:10px;max-height:80px;overflow-y:auto";
+    notes.textContent = releaseNotes.substring(0, 300) + (releaseNotes.length > 300 ? "..." : "");
+    banner.appendChild(notes);
+  }
+
+  var btnRow = document.createElement("div");
+  btnRow.style.cssText = "display:flex;gap:8px";
+
+  if (downloadUrl) {
+    var installBtn = document.createElement("button");
+    installBtn.textContent = "⬇ Install now";
+    installBtn.style.cssText = "background:#2ecc71;color:#000;border:none;border-radius:6px;padding:9px 16px;font-weight:700;font-size:13px;cursor:pointer;flex:1";
+    installBtn.onclick = function() { startUpdate(version, downloadUrl, banner); };
+    btnRow.appendChild(installBtn);
+  }
+
+  if (url) {
+    var viewBtn = document.createElement("a");
+    viewBtn.href = url;
+    viewBtn.target = "_blank";
+    viewBtn.textContent = "View release";
+    viewBtn.style.cssText = "background:transparent;color:#2ecc71;border:1px solid #2ecc71;border-radius:6px;padding:9px 16px;font-size:13px;cursor:pointer;text-decoration:none;text-align:center";
+    btnRow.appendChild(viewBtn);
+  }
+
+  banner.appendChild(btnRow);
+  document.body.appendChild(banner);
+}
+
+async function startUpdate(version, downloadUrl, banner) {
+  // Replace banner content with progress UI
+  banner.innerHTML = "";
+  banner.style.minWidth = "300px";
+
+  var title = document.createElement("div");
+  title.style.cssText = "font-weight:700;font-size:14px;margin-bottom:8px";
+  title.textContent = "Installing StreamVault " + version + "...";
+  banner.appendChild(title);
+
+  var progressWrap = document.createElement("div");
+  progressWrap.style.cssText = "background:rgba(0,0,0,0.3);border-radius:6px;height:8px;overflow:hidden;margin-bottom:8px";
+  var progressBar = document.createElement("div");
+  progressBar.style.cssText = "height:100%;background:#2ecc71;border-radius:6px;transition:width 0.5s;width:0%";
+  progressWrap.appendChild(progressBar);
+  banner.appendChild(progressWrap);
+
+  var status = document.createElement("div");
+  status.style.cssText = "font-size:12px;opacity:0.8";
+  status.textContent = "Downloading...";
+  banner.appendChild(status);
+
+  // Animate progress
+  var progress = 0;
+  function setProgress(pct, msg) {
+    progress = pct;
+    progressBar.style.width = pct + "%";
+    status.textContent = msg;
+  }
+
+  try {
+    setProgress(10, "Contacting server...");
+    await new Promise(r => setTimeout(r, 500));
+    setProgress(30, "Downloading update...");
+
+    await API.post("/updates/install", { downloadUrl: downloadUrl });
+
+    setProgress(60, "Installing...");
+    await new Promise(r => setTimeout(r, 3000));
+    setProgress(80, "Restarting server...");
+    await new Promise(r => setTimeout(r, 4000));
+    setProgress(95, "Almost done...");
+
+    // Wait for server to come back
+    var attempts = 0;
+    var interval = setInterval(async function() {
+      attempts++;
+      try {
+        await API.get("/version");
+        clearInterval(interval);
+        setProgress(100, "Complete! Reloading...");
+        await new Promise(r => setTimeout(r, 1000));
+        window.location.reload();
+      } catch {
+        if (attempts > 30) {
+          clearInterval(interval);
+          status.textContent = "Server restarting... please refresh manually";
+        }
+      }
+    }, 2000);
+
+  } catch(e) {
+    status.textContent = "Error: " + e.message;
+    progressBar.style.background = "#e74c3c";
+  }
+}
+
+
+async function checkForUpdates() {
+  try {
+    var data = await API.get("/updates/check");
     if (data.hasUpdate) showUpdateBanner(data.latest, data.releaseNotes, data.htmlUrl);
   } catch {}
 }

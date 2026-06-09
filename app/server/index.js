@@ -212,6 +212,53 @@ app.get("/api/updates/check", requireAuth, async (req, res) => {
   }
 });
 
+// Download and install update
+app.post("/api/updates/install", requireAdmin, async (req, res) => {
+  const { downloadUrl } = req.body;
+  if (!downloadUrl) return res.status(400).json({ error: "No download URL" });
+
+  res.json({ ok: true, message: "Update started" });
+
+  // Run in background after response sent
+  setTimeout(async () => {
+    try {
+      const os = require("os");
+      const { execSync, spawn } = require("child_process");
+      const tmpFile = path.join(os.tmpdir(), "StreamVault-Update.exe");
+
+      console.log("[UPDATE] Downloading from:", downloadUrl);
+
+      // Download the installer
+      await new Promise((resolve, reject) => {
+        const file = fs.createWriteStream(tmpFile);
+        https.get(downloadUrl, response => {
+          // Handle redirects
+          if (response.statusCode === 302 || response.statusCode === 301) {
+            https.get(response.headers.location, r2 => {
+              r2.pipe(file);
+              file.on("finish", () => { file.close(); resolve(); });
+            }).on("error", reject);
+          } else {
+            response.pipe(file);
+            file.on("finish", () => { file.close(); resolve(); });
+          }
+        }).on("error", reject);
+      });
+
+      console.log("[UPDATE] Download complete, running installer...");
+
+      // Run installer silently - /SILENT = silent, /NORESTART = don't restart
+      spawn(tmpFile, ["/SILENT", "/NORESTART"], {
+        detached: true,
+        stdio: "ignore"
+      }).unref();
+
+    } catch(e) {
+      console.log("[UPDATE] Error:", e.message);
+    }
+  }, 500);
+});
+
 app.post("/api/libraries", requireAdmin, (req, res) => {
   const { name, type, path: libPath } = req.body;
   if (!name || !type || !libPath) return res.status(400).json({ error: "Saknar fält" });
