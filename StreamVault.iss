@@ -198,31 +198,31 @@ begin
       False
     );
 
-    SetStep(5, 8, 'Registering Windows service...', 'StreamVault starts automatically');
+    SetStep(5, 8, 'Registering startup task...', 'StreamVault starts automatically');
+
+    // Write PowerShell start script
+    SaveStringToFile(AppDir + '\start.ps1',
+      '$env:STREAMVAULT_DATA = "' + DataDir + '"' + #13#10 +
+      'Set-Location "' + AppDir + '"' + #13#10 +
+      '& "' + NodeExe + '" "' + AppDir + '\server\index.js"' + #13#10,
+      False);
+
+    // Remove old NSSM service if exists
     NssmPath := AppDir + '\tools\nssm.exe';
     Exec(NssmPath, 'stop StreamVault', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Exec(NssmPath, 'remove StreamVault confirm', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    // Install with just node.exe, set script as AppParameters
-    Exec(NssmPath,
-      'install StreamVault "' + NodeExe + '"',
+
+    // Register as scheduled task at startup (handles spaces in path correctly)
+    Exec('powershell.exe',
+      '-NoProfile -ExecutionPolicy Bypass -Command ' +
+      '"Unregister-ScheduledTask -TaskName StreamVault -Confirm:$false -ErrorAction SilentlyContinue; ' +
+      '$a = New-ScheduledTaskAction -Execute ([string](''powershell.exe'')) -Argument (''-NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File """"' + AppDir + '\start.ps1"""""''); ' +
+      '$t = New-ScheduledTaskTrigger -AtStartup; ' +
+      '$s = New-ScheduledTaskSettingsSet -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit 0; ' +
+      '$p = New-ScheduledTaskPrincipal -UserId SYSTEM -RunLevel Highest; ' +
+      'Register-ScheduledTask -TaskName StreamVault -Action $a -Trigger $t -Settings $s -Principal $p -Force; ' +
+      'Start-ScheduledTask -TaskName StreamVault"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    Exec(NssmPath, 'set StreamVault AppDirectory "' + AppDir + '"',
-      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    Exec(NssmPath, 'set StreamVault AppParameters ""' + AppDir + '\server\index.js""',
-      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    Exec(NssmPath, 'set StreamVault AppEnvironmentExtra "STREAMVAULT_DATA=' + DataDir + '"',
-      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    Exec(NssmPath, 'set StreamVault AppEnvironment "STREAMVAULT_DATA=' + DataDir + '"',
-      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    Exec(NssmPath, 'set StreamVault Description "StreamVault Media Server"',
-      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    Exec(NssmPath, 'set StreamVault Start SERVICE_AUTO_START',
-      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    Exec(NssmPath, 'set StreamVault AppStdout "' + DataDir + '\streamvault.log"',
-      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    Exec(NssmPath, 'set StreamVault AppStderr "' + DataDir + '\error.log"',
-      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    Exec(NssmPath, 'start StreamVault', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
     SetStep(6, 8, 'Adding firewall rule...', 'Opening port 7000');
     Exec('netsh.exe', 'advfirewall firewall delete rule name="StreamVault"',
