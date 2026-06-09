@@ -1370,7 +1370,7 @@ try {
       // Use color=black source which is more compatible than nullsrc
       execFileSync(getFfmpegPath(), [
         "-hide_banner", "-loglevel", "error",
-        "-f", "lavfi", "-i", "color=black:size=128x128:duration=1:rate=25",
+        "-f", "lavfi", "-i", "color=black:size=320x240:duration=1:rate=25",
         "-c:v", candidate.encoder, ...(candidate.testArgs || candidate.extraArgs),
         "-frames:v", "1",
         "-f", "null", "-"
