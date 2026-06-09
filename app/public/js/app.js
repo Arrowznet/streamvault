@@ -303,6 +303,17 @@ function buildCard(item, wide = false) {
 }
 
 // ── DETAIL ────────────────────────────────────────────────────────────────────
+async function openDetailByTmdb(tmdbId) {
+  try {
+    const libs = await API.get("/libraries");
+    for (const lib of libs) {
+      const data = await API.get("/libraries/" + lib.id + "/contents");
+      const match = (data.items || []).find(i => String(i.tmdb_id) === String(tmdbId));
+      if (match) { openDetail(match.id); return; }
+    }
+  } catch(e) { console.error("openDetailByTmdb:", e); }
+}
+
 async function openDetail(id) {
   const ov = document.getElementById("detail-overlay");
   ov.style.display = "flex";
@@ -355,9 +366,11 @@ async function openDetail(id) {
         if (!el) return;
         const flat = new Set((data.flatrate || []).map(p => p.provider_name));
         const providers = [...new Set([...(data.flatrate || []), ...(data.rent || [])].map(p => p.provider_name))];
-        el.innerHTML = providers.length
+        // Always show "I ditt bibliotek" first since user opened this from their library
+        const libraryPill = `<span class="wtw-pill stream" style="background:#1a3a2a;border-color:#2ecc71;color:#2ecc71">✓ I ditt bibliotek</span>`;
+        el.innerHTML = libraryPill + (providers.length
           ? providers.map(n => `<span class="wtw-pill ${flat.has(n) ? "stream" : "rent"}">${esc(n)}</span>`).join("")
-          : `<span style="font-size:13px;color:var(--muted)">Inte tillgänglig på streamingtjänster</span>`;
+          : "");
       }).catch(() => {});
     }
   } catch (e) {
@@ -897,11 +910,16 @@ async function handleSearch() {
       }
       if (online.results?.length) {
         html += `<div class="search-results-title" style="margin-top:28px">Var kan du se det?</div>`;
-        html += `<div style="display:flex;gap:12px;flex-wrap:wrap">${online.results.slice(0, 8).map(r =>
-          `<div class="mcard">
+        // Check which online results we also have in library
+        const localTmdbIds = new Set((local.items || []).map(i => String(i.tmdb_id)).filter(Boolean));
+        html += `<div class="media-grid">${online.results.slice(0, 8).map(r => {
+          const inLib = localTmdbIds.has(String(r.tmdb_id));
+          return `<div class="mcard" style="cursor:${inLib ? 'pointer' : 'default'}" ${inLib ? `onclick='openDetailByTmdb("${r.tmdb_id}")'` : ''}>
             ${r.poster ? `<img class="mcard-poster" src="${r.poster}" loading="lazy">` : `<div class="mcard-poster-ph"><span>🎬</span></div>`}
+            ${inLib ? `<div style="position:absolute;top:6px;right:6px;background:var(--accent);color:white;font-size:10px;font-weight:700;padding:3px 7px;border-radius:10px">✓ Bibliotek</div>` : ""}
             <div class="mcard-info"><div class="mcard-title">${esc(r.title)}</div><div class="mcard-meta">${r.year || ""}</div></div>
-          </div>`).join("")}</div>`;
+          </div>`;
+        }).join("")}</div>`;
       }
       res.innerHTML = html || `<div class="empty"><div class="empty-icon">🔍</div><h3>Inga träffar för "${esc(q)}"</h3></div>`;
     } catch { res.innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><h3>Sökning misslyckades</h3></div>`; }
@@ -1023,11 +1041,11 @@ async function loadSettings() {
         <div class="settings-section-title">API-nycklar</div>
         <div class="setting-row">
           <div><div class="setting-label">TMDB API-nyckel</div><div class="setting-desc">Filmaffischer och beskrivningar</div></div>
-          <input class="s-input" id="s-tmdb" value="${esc(cfg.tmdb_api_key || "")}" placeholder="Ej angiven"/>
+          <input class="s-input" type="password" id="s-tmdb" value="${esc(cfg.tmdb_api_key || "")}" placeholder="Ej angiven" autocomplete="off"/>
         </div>
         <div class="setting-row">
           <div><div class="setting-label">OpenSubtitles API-nyckel</div><div class="setting-desc">Automatiska undertexter</div></div>
-          <input class="s-input" id="s-opensub" value="${esc(cfg.opensubtitles_api_key || "")}" placeholder="Ej angiven"/>
+          <input class="s-input" type="password" id="s-opensub" value="${esc(cfg.opensubtitles_api_key || "")}" placeholder="Ej angiven" autocomplete="off"/>
         </div>
         <div style="margin-top:12px"><button class="s-btn primary" onclick="saveApiKeys()">Spara nycklar</button></div>
       </div>

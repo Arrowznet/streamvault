@@ -1340,35 +1340,51 @@ function scheduleAutoScan() {
 }
 
 
-// Detect best video encoder once at startup - test each encoder actually works
+// Detect best video encoder once at startup
 let cachedEncoder = { encoder: "libx264", extraArgs: ["-preset", "ultrafast", "-crf", "23"] };
 try {
   const { execFileSync } = require("child_process");
-  const encoderList = execFileSync(getFfmpegPath(), ["-hide_banner", "-encoders"], 
+  const encoderList = execFileSync(getFfmpegPath(), ["-hide_banner", "-encoders"],
     { timeout: 5000, windowsHide: true }).toString();
-  
-  // Test candidates in order of preference
-  const candidates = [];
-  if (encoderList.includes("h264_nvenc")) candidates.push({ encoder: "h264_nvenc", extraArgs: ["-preset", "p4", "-tune", "ll"] });
-  if (encoderList.includes("h264_amf")) candidates.push({ encoder: "h264_amf", extraArgs: ["-quality", "speed"] });
-  if (encoderList.includes("h264_qsv")) candidates.push({ encoder: "h264_qsv", extraArgs: ["-preset", "veryfast"] });
 
-  // Test each candidate by encoding a small test
+  const candidates = [];
+  if (encoderList.includes("h264_nvenc")) candidates.push({
+    encoder: "h264_nvenc",
+    // Use more compatible test args - no -tune ll which can fail on some cards
+    extraArgs: ["-preset", "p4"],
+    testArgs: ["-preset", "p4", "-profile:v", "high"]
+  });
+  if (encoderList.includes("h264_amf")) candidates.push({
+    encoder: "h264_amf",
+    extraArgs: [],
+    testArgs: []
+  });
+  if (encoderList.includes("h264_qsv")) candidates.push({
+    encoder: "h264_qsv",
+    extraArgs: ["-preset", "veryfast"],
+    testArgs: ["-preset", "veryfast"]
+  });
+
   for (const candidate of candidates) {
     try {
+      // Use color=black source which is more compatible than nullsrc
       execFileSync(getFfmpegPath(), [
         "-hide_banner", "-loglevel", "error",
-        "-f", "lavfi", "-i", "nullsrc=s=64x64:d=1",
-        "-c:v", candidate.encoder, ...candidate.extraArgs,
+        "-f", "lavfi", "-i", "color=black:size=128x128:duration=1:rate=25",
+        "-c:v", candidate.encoder, ...(candidate.testArgs || candidate.extraArgs),
+        "-frames:v", "1",
         "-f", "null", "-"
-      ], { timeout: 8000, windowsHide: true });
-      cachedEncoder = candidate;
-      break; // Use first working encoder
+      ], { timeout: 10000, windowsHide: true });
+      cachedEncoder = { encoder: candidate.encoder, extraArgs: candidate.extraArgs };
+      console.log(`🎬 Video encoder: ${candidate.encoder}`);
+      break;
     } catch {
       console.log(`⚠️  ${candidate.encoder} not available, trying next...`);
     }
   }
-  console.log(`🎬 Video encoder: ${cachedEncoder.encoder}`);
+  if (cachedEncoder.encoder === "libx264") {
+    console.log(`🎬 Video encoder: libx264 (CPU)`);
+  }
 } catch(e) {
   console.log("⚠️  Could not detect GPU encoder, using CPU (libx264)");
 }
