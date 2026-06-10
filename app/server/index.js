@@ -18,7 +18,7 @@ const DATA_DIR = process.env.STREAMVAULT_DATA
   : path.join(__dirname, "..", "data");
 
 const CONFIG_PATH = path.join(DATA_DIR, "config.json");
-const VERSION = "1.0.0";
+const VERSION = "1.0.1";
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
 function loadConfig() {
