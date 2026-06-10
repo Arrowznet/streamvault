@@ -1,4 +1,4 @@
-const STREAMVAULT_VERSION = "1.0.1";
+const STREAMVAULT_VERSION = "1.0.2";
 const GITHUB_REPO = "Arrowznet/streamvault";
 
 const express = require("express");
@@ -18,7 +18,7 @@ const DATA_DIR = process.env.STREAMVAULT_DATA
   : path.join(__dirname, "..", "data");
 
 const CONFIG_PATH = path.join(DATA_DIR, "config.json");
-const VERSION = "1.0.1";
+const VERSION = "1.0.2";
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
 function loadConfig() {
@@ -31,13 +31,12 @@ function loadConfig() {
 }
 let config = loadConfig();
 
-// Default API keys - users can override in Settings
-const DEFAULT_TMDB_KEY = "439613bac1cb0c87f7de88ebac8c1384";
-const DEFAULT_OPENSUBTITLES_KEY = "SSxWHxl1XOgPQjSe4D9hzZxKIkj9vQDW";
-if (!config.tmdb_api_key && DEFAULT_TMDB_KEY !== "YOUR_TMDB_KEY_HERE")
-  config.tmdb_api_key = DEFAULT_TMDB_KEY;
-if (!config.opensubtitles_api_key && DEFAULT_OPENSUBTITLES_KEY !== "YOUR_OPENSUBTITLES_KEY_HERE")
-  config.opensubtitles_api_key = DEFAULT_OPENSUBTITLES_KEY;
+// Load default API keys from keys.js if it exists (never committed to git)
+try {
+  const keys = require("./keys.js");
+  if (!config.tmdb_api_key && keys.TMDB_KEY) config.tmdb_api_key = keys.TMDB_KEY;
+  if (!config.opensubtitles_api_key && keys.OPENSUBTITLES_KEY) config.opensubtitles_api_key = keys.OPENSUBTITLES_KEY;
+} catch {} // keys.js is optional
 
 const db = {
   users: new Datastore({ filename: path.join(DATA_DIR, "users.db"), autoload: true }),
@@ -101,6 +100,13 @@ function requireAdmin(req, res, next) {
 app.get("/api/setup-required", async (req, res) => {
   const admin = await dbFindOne(db.users, { role: "admin" });
   res.json({ required: !admin });
+});
+
+// Redirect /setup to / if admin already exists
+app.get("/setup", async (req, res) => {
+  const admin = await dbFindOne(db.users, { role: "admin" });
+  if (admin) return res.redirect("/");
+  res.sendFile(path.join(PUBLIC, "setup", "setup.html"));
 });
 
 app.post("/api/auth/setup", async (req, res) => {
@@ -1233,6 +1239,7 @@ app.patch("/api/config", requireAdmin, (req, res) => {
 });
 
 app.get("/api/update/check", requireAdmin, (req, res) => res.json({current:VERSION,latest:VERSION,hasUpdate:false}));
+app.get("/api/version", (req, res) => res.json({version:VERSION}));
 
 
 
