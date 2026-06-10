@@ -1233,7 +1233,6 @@ app.patch("/api/config", requireAdmin, (req, res) => {
 });
 
 app.get("/api/update/check", requireAdmin, (req, res) => res.json({current:VERSION,latest:VERSION,hasUpdate:false}));
-app.get("/api/version", (req, res) => res.json({version:VERSION}));
 
 
 
