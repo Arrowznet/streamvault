@@ -1,4 +1,4 @@
-const STREAMVAULT_VERSION = "1.0.0";
+const STREAMVAULT_VERSION = "1.0.1";
 const GITHUB_REPO = "Arrowznet/streamvault";
 
 const express = require("express");
