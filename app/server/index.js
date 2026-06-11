@@ -1,4 +1,4 @@
-const STREAMVAULT_VERSION = "1.0.3";
+const STREAMVAULT_VERSION = require("../package.json").version;
 const GITHUB_REPO = "Arrowznet/streamvault";
 
 const express = require("express");
@@ -18,7 +18,6 @@ const DATA_DIR = process.env.STREAMVAULT_DATA
   : path.join(__dirname, "..", "data");
 
 const CONFIG_PATH = path.join(DATA_DIR, "config.json");
-const VERSION = "1.0.3";
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
 function loadConfig() {
