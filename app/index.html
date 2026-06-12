@@ -81,32 +81,25 @@
 
   <!-- Main app -->
   <div id="main-app" style="display:none">
-    <!-- Plex-style sidebar -->
-    <aside id="sidebar">
-      <div class="sb-logo">Stream<span>Vault</span></div>
-      <nav class="sb-nav">
-        <div class="sb-item active" id="sb-home" onclick="switchSection('home')">
-          <span class="sb-icon">🏠</span><span class="sb-label">Hem</span>
+    <nav id="topnav">
+      <div class="nav-logo" onclick="switchSection('home')" style="cursor:pointer">🎬 Stream<span>Vault</span></div>
+      <div class="nav-tabs" id="navTabs">
+        <button class="ntab active" onclick="switchSection('movies')">Filmer</button>
+        <button class="ntab" onclick="switchSection('tvshows')">Serier</button>
+        <button class="ntab" onclick="switchSection('music')">Musik</button>
+        <button class="ntab" onclick="switchSection('search')">Sök</button>
+      </div>
+      <div class="nav-right">
+        <div class="nav-user" onclick="toggleUserMenu()">
+          <div class="user-avatar" id="userAvatar">?</div>
+          <span id="userName">–</span> ▾
         </div>
-        <div class="sb-item" id="sb-search" onclick="switchSection('search')">
-          <span class="sb-icon">🔍</span><span class="sb-label">Sök</span>
-        </div>
-        <div class="sb-sep">BIBLIOTEK</div>
-        <div id="sb-libraries"></div>
-        <div class="sb-sep">ÖVRIGT</div>
-        <div class="sb-item" id="sb-settings" onclick="switchSection('settings')">
-          <span class="sb-icon">⚙️</span><span class="sb-label">Inställningar</span>
-        </div>
-      </nav>
-      <div class="sb-user" onclick="toggleUserMenu()">
-        <div class="user-avatar" id="userAvatar">?</div>
-        <span id="userName">–</span>
         <div class="user-menu" id="userMenu" style="display:none">
           <div class="um-item" onclick="switchSection('settings')">⚙️ Inställningar</div>
           <div class="um-item" onclick="logout()">🚪 Logga ut</div>
         </div>
       </div>
-    </aside>
+    </nav>
     <main id="appMain">
       <section id="sec-home" class="section active"></section>
       <section id="sec-movies" class="section"></section>
@@ -114,7 +107,6 @@
       <section id="sec-music" class="section"></section>
       <section id="sec-search" class="section"></section>
       <section id="sec-settings" class="section"></section>
-      <section id="sec-library" class="section"></section>
     </main>
   </div>
 
@@ -155,30 +147,26 @@
 
 <script src="/js/api.js"></script>
 <script src="/js/i18n.js"></script>
+<script src="/js/app.js"></script>
 <script>
-// ── STARTUP – kolla om setup krävs ────────────────────────────────────────────
 window.addEventListener("DOMContentLoaded", async () => {
   try {
     const res = await fetch("/api/setup-required");
     const data = await res.json();
     if (data.required) {
-      // Ny installation – visa setup-formulär
       document.getElementById("setup-screen").style.display = "flex";
       return;
     }
   } catch {}
 
-  // Inte ny installation – kolla om inloggad
   const token = localStorage.getItem("sv_token");
   if (token) {
     const user = JSON.parse(localStorage.getItem("sv_user") || "null");
     if (user) { currentUser = user; showApp(); return; }
   }
-  // Visa inloggning
   document.getElementById("login-screen").style.display = "flex";
 });
 
-// ── SKAPA ADMINKONTO ──────────────────────────────────────────────────────────
 async function createAdmin() {
   const username = document.getElementById("s-user").value.trim();
   const password = document.getElementById("s-pass").value;
@@ -203,7 +191,6 @@ async function createAdmin() {
     const data = await res.json();
     if (!res.ok) { errEl.textContent = data.error || "Något gick fel."; btn.disabled = false; btn.textContent = "Skapa adminkonto →"; return; }
 
-    // Inloggad direkt!
     API.setTokens(data.accessToken, data.refreshToken);
     currentUser = data.user;
     localStorage.setItem("sv_user", JSON.stringify(data.user));
@@ -216,6 +203,6 @@ async function createAdmin() {
   }
 }
 </script>
-<script src="/js/app.js"></script>
+
 </body>
 </html>

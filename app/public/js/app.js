@@ -187,7 +187,7 @@ function switchSection(name) {
   document.querySelectorAll(".section").forEach(s => s.classList.remove("active"));
   document.querySelectorAll(".ntab").forEach(b => b.classList.remove("active"));
   document.getElementById("sec-" + name).classList.add("active");
-  const tabs = ["home","movies","tvshows","music","search"];
+  const tabs = ["movies","tvshows","music","search"];
   const idx = tabs.indexOf(name);
   if (idx >= 0) document.querySelectorAll(".ntab")[idx]?.classList.add("active");
   if (name === "home") loadHome();
