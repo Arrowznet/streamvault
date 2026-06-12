@@ -41,8 +41,8 @@ Name: "{commonappdata}\StreamVault"
 Name: "{commonappdata}\StreamVault\data"
 
 [Files]
-Source: "app\server\*"; DestDir: "{app}\server"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "app\public\*"; DestDir: "{app}\public"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "app\server\*"; DestDir: "{app}\server"; Flags: recursesubdirs createallsubdirs
+Source: "app\public\*"; DestDir: "{app}\public"; Flags: recursesubdirs createallsubdirs
 Source: "app\package.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "app\setup\setup.html"; DestDir: "{app}\setup"; Flags: ignoreversion
 Source: "deps\node-v20.14.0-x64.msi"; DestDir: "{tmp}"; Flags: deleteafterinstall

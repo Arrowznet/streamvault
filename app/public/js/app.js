@@ -81,12 +81,7 @@ function showUpdateBanner(version, releaseNotes, url, downloadUrl) {
   header.appendChild(closeBtn);
   banner.appendChild(header);
 
-  if (releaseNotes) {
-    var notes = document.createElement("div");
-    notes.style.cssText = "font-size:12px;opacity:0.8;border-top:1px solid rgba(46,204,113,0.3);padding-top:10px;max-height:80px;overflow-y:auto";
-    notes.textContent = releaseNotes.substring(0, 300) + (releaseNotes.length > 300 ? "..." : "");
-    banner.appendChild(notes);
-  }
+
 
   var btnRow = document.createElement("div");
   btnRow.style.cssText = "display:flex;gap:8px";
