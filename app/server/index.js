@@ -234,21 +234,32 @@ app.post("/api/updates/install", requireAdmin, async (req, res) => {
 
       console.log("[UPDATE] Downloading from:", downloadUrl);
 
-      // Download the installer
+      // Download the installer - follow up to 5 redirects
       await new Promise((resolve, reject) => {
-        const file = fs.createWriteStream(tmpFile);
-        https.get(downloadUrl, response => {
-          // Handle redirects
-          if (response.statusCode === 302 || response.statusCode === 301) {
-            https.get(response.headers.location, r2 => {
-              r2.pipe(file);
-              file.on("finish", () => { file.close(); resolve(); });
-            }).on("error", reject);
-          } else {
+        function download(url, redirectCount) {
+          if (redirectCount > 5) return reject(new Error("Too many redirects"));
+          const parsedUrl = new URL(url);
+          const options = {
+            hostname: parsedUrl.hostname,
+            path: parsedUrl.pathname + parsedUrl.search,
+            headers: { "User-Agent": "StreamVault/" + STREAMVAULT_VERSION }
+          };
+          https.get(options, response => {
+            if (response.statusCode === 301 || response.statusCode === 302 || response.statusCode === 303) {
+              response.resume();
+              return download(response.headers.location, redirectCount + 1);
+            }
+            if (response.statusCode !== 200) {
+              response.resume();
+              return reject(new Error("HTTP " + response.statusCode));
+            }
+            const file = fs.createWriteStream(tmpFile);
             response.pipe(file);
             file.on("finish", () => { file.close(); resolve(); });
-          }
-        }).on("error", reject);
+            file.on("error", reject);
+          }).on("error", reject);
+        }
+        download(downloadUrl, 0);
       });
 
       console.log("[UPDATE] Download complete, running installer...");
