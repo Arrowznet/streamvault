@@ -181,30 +181,8 @@ async function startUpdate(version, downloadUrl, banner) {
 
 
 
-function showUpdateBanner(version, releaseNotes, url) {
-  var existing = document.getElementById("update-banner");
-  if (existing) existing.remove();
-  var banner = document.createElement("div");
-  banner.id = "update-banner";
-  banner.style.cssText = "position:fixed;bottom:80px;right:24px;z-index:300;background:#0d3d24;border:1px solid #2ecc71;border-radius:12px;padding:16px 20px;font-size:13px;color:#2ecc71;display:flex;flex-direction:column;gap:10px;box-shadow:0 4px 24px rgba(0,0,0,0.5);max-width:320px;";
-  var inner = document.createElement("div");
-  inner.style.cssText = "display:flex;align-items:center;gap:10px";
-  inner.innerHTML = "<span>🎉</span><div><b>StreamVault " + version + " tillgänglig!</b><div style='opacity:0.7;font-size:12px'>En ny version finns att hämta</div></div>";
-  var closeBtn = document.createElement("button");
-  closeBtn.textContent = "✕";
-  closeBtn.style.cssText = "margin-left:auto;background:none;border:none;color:#2ecc71;font-size:18px;cursor:pointer";
-  closeBtn.onclick = function() { banner.remove(); };
-  inner.appendChild(closeBtn);
-  banner.appendChild(inner);
-  if (url) {
-    var link = document.createElement("a");
-    link.href = url; link.target = "_blank";
-    link.textContent = "Hämta uppdatering";
-    link.style.cssText = "background:#2ecc71;color:#000;padding:8px 16px;border-radius:6px;text-decoration:none;font-weight:600;font-size:13px;text-align:center";
-    banner.appendChild(link);
-  }
-  document.body.appendChild(banner);
-}
+
+
 function switchSection(name) {
   document.querySelectorAll(".section").forEach(s => s.classList.remove("active"));
   document.querySelectorAll(".ntab").forEach(b => b.classList.remove("active"));
@@ -1065,15 +1043,7 @@ async function loadSettings() {
     sec.innerHTML = `<div class="settings-wrap">
       <div class="settings-title">Inställningar</div>
 
-      ${updateInfo?.hasUpdate ? `
-      <div style="background:#0d3d24;border:1px solid #2ecc71;border-radius:10px;padding:16px 20px;margin-bottom:28px;display:flex;align-items:center;gap:16px">
-        <span style="font-size:24px">🎉</span>
-        <div style="flex:1">
-          <div style="font-size:14px;font-weight:600;color:#2ecc71">StreamVault ${updateInfo.latest} är tillgänglig!</div>
-          <div style="font-size:12px;color:#2ecc71;opacity:0.8;margin-top:2px">Du kör version ${updateInfo.current}</div>
-        </div>
-        <button class="s-btn" onclick="window.open('${updateInfo.releaseUrl}')" style="border-color:#2ecc71;color:#2ecc71">Ladda ner</button>
-      </div>` : ""}
+
 
       <div class="settings-section">
         <div class="settings-section-title">Biblioteksstatus</div>

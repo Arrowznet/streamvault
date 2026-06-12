@@ -147,8 +147,9 @@ begin
     // Stop existing StreamVault server before installing
     SetStep(0, 8, 'Stopping StreamVault...', 'Stopping existing server...');
     Exec('schtasks.exe', '/End /TN "StreamVault"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Sleep(1000);
     Exec('taskkill.exe', '/F /IM node.exe /T', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    Sleep(2000);
+    Sleep(4000);
 
     SetStep(0, 8, 'Installing Node.js 20 LTS...', 'This may take 1-2 minutes...');
     Exec('msiexec.exe',
