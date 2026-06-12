@@ -42,7 +42,7 @@ Name: "{commonappdata}\StreamVault\data"
 
 [Files]
 Source: "app\server\*"; DestDir: "{app}\server"; Flags: recursesubdirs createallsubdirs
-Source: "app\public\*"; DestDir: "{app}\public"; Flags: recursesubdirs createallsubdirs; BeforeInstall: DeletePublicFolder
+Source: "app\public\*"; DestDir: "{app}\public"; Flags: recursesubdirs createallsubdirs
 Source: "app\package.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "app\setup\setup.html"; DestDir: "{app}\setup"; Flags: ignoreversion
 Source: "deps\node-v20.14.0-x64.msi"; DestDir: "{tmp}"; Flags: deleteafterinstall
@@ -120,11 +120,6 @@ begin
     '  "libraries": []' + #13#10 +
     '}';
   SaveStringToFile(DataPath, Json, False);
-end;
-
-procedure DeletePublicFolder();
-begin
-  DelTree(ExpandConstant('{app}\public'), True, True, True);
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
