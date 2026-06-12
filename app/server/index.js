@@ -22,7 +22,7 @@ fs.mkdirSync(DATA_DIR, { recursive: true });
 
 function loadConfig() {
   if (!fs.existsSync(CONFIG_PATH)) {
-    const defaults = { port: 7000, jwt_secret: uuidv4()+uuidv4()+uuidv4(), tmdb_api_key: "", opensubtitles_api_key: "", language: "auto", transcoding: { enabled: true, hardware_accel: "auto" }, libraries: [], version: VERSION };
+    const defaults = { port: 7000, jwt_secret: uuidv4()+uuidv4()+uuidv4(), tmdb_api_key: "", opensubtitles_api_key: "", language: "auto", transcoding: { enabled: true, hardware_accel: "auto" }, libraries: [], version: STREAMVAULT_VERSION };
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(defaults, null, 2));
     return defaults;
   }
@@ -1249,8 +1249,8 @@ app.patch("/api/config", requireAdmin, (req, res) => {
   res.json({ok:true});
 });
 
-app.get("/api/update/check", requireAdmin, (req, res) => res.json({current:VERSION,latest:VERSION,hasUpdate:false}));
-app.get("/api/version", (req, res) => res.json({version:VERSION}));
+// old update/check endpoint removed
+// old version endpoint removed
 
 
 
