@@ -1462,7 +1462,7 @@ if (fs.existsSync(PUBLIC)) {
 const PORT=config.port||7000;
 const server=http.createServer(app);
 server.listen(PORT,()=>{
-  console.log(`\n StreamVault v${VERSION} - http://localhost:${PORT}\n`);
+  console.log(`\n StreamVault v${STREAMVAULT_VERSION} - http://localhost:${PORT}\n`);
   setTimeout(()=>scanLibraries().catch(console.error),2000);
   setTimeout(()=>startFileWatchers(), 3000);
 });
