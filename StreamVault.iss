@@ -212,16 +212,13 @@ begin
     Exec(NssmPath, 'stop StreamVault', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Exec(NssmPath, 'remove StreamVault confirm', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
-    // Register as scheduled task at startup (handles spaces in path correctly)
-    Exec('powershell.exe',
-      '-NoProfile -ExecutionPolicy Bypass -Command ' +
-      '"Unregister-ScheduledTask -TaskName StreamVault -Confirm:$false -ErrorAction SilentlyContinue; ' +
-      '$a = New-ScheduledTaskAction -Execute ([string](''powershell.exe'')) -Argument (''-NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File """"' + AppDir + '\start.ps1"""""''); ' +
-      '$t = New-ScheduledTaskTrigger -AtStartup; ' +
-      '$s = New-ScheduledTaskSettingsSet -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit 0; ' +
-      '$p = New-ScheduledTaskPrincipal -UserId SYSTEM -RunLevel Highest; ' +
-      'Register-ScheduledTask -TaskName StreamVault -Action $a -Trigger $t -Settings $s -Principal $p -Force; ' +
-      'Start-ScheduledTask -TaskName StreamVault"',
+    // Register as scheduled task at startup
+    Exec('schtasks.exe',
+      '/Create /F /RU SYSTEM /RL HIGHEST /SC ONSTART /TN "StreamVault" ' +
+      '/TR "powershell.exe -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File """' + AppDir + '\start.ps1"""" ' +
+      '/DELAY 0000:15',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Exec('schtasks.exe', '/Run /TN "StreamVault"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
     SetStep(6, 8, 'Adding firewall rule...', 'Opening port 7000');

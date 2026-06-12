@@ -180,12 +180,6 @@ async function startUpdate(version, downloadUrl, banner) {
 }
 
 
-async function checkForUpdates() {
-  try {
-    var data = await API.get("/updates/check");
-    if (data.hasUpdate) showUpdateBanner(data.latest, data.releaseNotes, data.htmlUrl);
-  } catch {}
-}
 
 function showUpdateBanner(version, releaseNotes, url) {
   var existing = document.getElementById("update-banner");
@@ -1064,7 +1058,7 @@ async function loadSettings() {
 
     const [cfg, users, libs, scanStatus, updateInfo] = await Promise.all([
       API.get("/config"), API.get("/users"), API.get("/libraries"),
-      API.get("/scan/status"), API.get("/update/check").catch(() => null)
+      API.get("/scan/status"), API.get("/updates/check").catch(() => null)
     ]);
     const counts = Object.fromEntries((scanStatus.counts || []).map(c => [c.type, c.c]));
 
@@ -1173,7 +1167,7 @@ async function loadSettings() {
         <div style="margin-top:12px"><button class="s-btn primary" onclick="saveApiKeys()">Spara nycklar</button></div>
       </div>
 
-      <div style="padding:20px 0;font-size:12px;color:var(--muted)">StreamVault v${updateInfo?.current || "1.0.0"}</div>
+      <div style="padding:20px 0;font-size:12px;color:var(--muted)">StreamVault v${updateInfo?.current || "–"}</div>
     </div>`;
   } catch (e) {
     sec.innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><h3>${e.message}</h3></div>`;
