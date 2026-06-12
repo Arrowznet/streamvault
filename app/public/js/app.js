@@ -52,6 +52,23 @@ function showApp() {
   document.getElementById("main-app").style.display = "block";
   document.getElementById("userAvatar").textContent = (currentUser.username || "?")[0].toUpperCase();
   document.getElementById("userName").textContent = currentUser.username;
+
+  // Fix topnav - make logo clickable and remove Hem tab
+  var logo = document.querySelector(".nav-logo");
+  if (logo) {
+    logo.style.cursor = "pointer";
+    logo.onclick = function() { switchSection("home"); };
+  }
+  var navTabs = document.getElementById("navTabs");
+  if (navTabs) {
+    navTabs.innerHTML = [
+      '<button class="ntab active" onclick="switchSection(&quot;movies&quot;)">Filmer</button>',
+      '<button class="ntab" onclick="switchSection(&quot;tvshows&quot;)">Serier</button>',
+      '<button class="ntab" onclick="switchSection(&quot;music&quot;)">Musik</button>',
+      '<button class="ntab" onclick="switchSection(&quot;search&quot;)">Sök</button>'
+    ].join("");
+  }
+
   loadHome();
   if (currentUser.role === "admin") checkForUpdates();
 }
@@ -224,7 +241,7 @@ async function loadHome() {
     }
 
     if (continueW?.length) html += buildRow("Fortsätt titta", continueW);
-    if (recents?.length) html += buildRow("Nytt i biblioteket", recents.slice(0, 16));
+    if (recents?.length) html += buildRow("Nyligen tillagda filmer", recents.slice(0, 16));
 
     // Show each library as its own row
     for (const lib of libs) {
