@@ -1022,14 +1022,36 @@ async function openSubtitles(mediaId, title) {
   modal.appendChild(contentEl);
   
   // Search footer
-  const footer = document.createElement("div");
+  var footer = document.createElement("div");
   footer.style.cssText = "padding:12px 16px;border-top:1px solid var(--border)";
-  footer.innerHTML = "<div style='font-size:13px;color:var(--muted);margin-bottom:8px'>Sök på OpenSubtitles:</div>" +
-    "<div style='display:flex;gap:8px'>" +
-    "<input id='sub-search-input' style='flex:1;background:var(--card2);border:1px solid var(--border);color:var(--text);font-size:13px;padding:8px 12px;border-radius:8px;outline:none' placeholder='Sök undertexter...' value='" + esc(title) + "'/>" +
-    "<select id='sub-lang-select' style='background:var(--card2);border:1px solid var(--border);color:var(--text);font-size:13px;padding:8px;border-radius:8px'>" +
-    "<option value='sv'>Svenska</option><option value='en'>English</option></select>" +
-    "</div>";
+  
+  var footerLabel = document.createElement("div");
+  footerLabel.style.cssText = "font-size:13px;color:var(--muted);margin-bottom:8px";
+  footerLabel.textContent = "Sök på OpenSubtitles:";
+  footer.appendChild(footerLabel);
+  
+  var searchRow = document.createElement("div");
+  searchRow.style.cssText = "display:flex;gap:8px";
+  
+  var searchInput = document.createElement("input");
+  searchInput.id = "sub-search-input";
+  searchInput.style.cssText = "flex:1;background:var(--card2);border:1px solid var(--border);color:var(--text);font-size:13px;padding:8px 12px;border-radius:8px;outline:none";
+  searchInput.placeholder = "Sök undertexter...";
+  searchInput.value = title;
+  searchRow.appendChild(searchInput);
+  
+  var langSelect = document.createElement("select");
+  langSelect.id = "sub-lang-select";
+  langSelect.style.cssText = "background:var(--card2);border:1px solid var(--border);color:var(--text);font-size:13px;padding:8px;border-radius:8px";
+  var optSv = document.createElement("option");
+  optSv.value = "sv"; optSv.textContent = "Svenska";
+  var optEn = document.createElement("option");
+  optEn.value = "en"; optEn.textContent = "English";
+  langSelect.appendChild(optSv);
+  langSelect.appendChild(optEn);
+  searchRow.appendChild(langSelect);
+  footer.appendChild(searchRow);
+  
   var searchBtn2 = document.createElement("button");
   searchBtn2.textContent = "Sök";
   searchBtn2.style.cssText = "background:var(--accent);border:none;color:white;font-size:13px;padding:8px 14px;border-radius:8px;cursor:pointer;margin-top:8px;width:100%";
