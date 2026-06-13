@@ -1222,6 +1222,188 @@ app.get("/api/watch-providers/:tmdb_id", requireAuth, async (req, res) => {
   res.json(data?.results?.SE||data?.results?.US||{});
 });
 
+// ── SUBTITLES ─────────────────────────────────────────────────────────────────
+
+// Get available subtitles for a media item (embedded + .srt files)
+app.get("/api/media/:id/subtitles", requireAuth, async (req, res) => {
+  try {
+    const item = await dbFindOne(db.media, { _id: req.params.id });
+    if (!item) return res.status(404).json({ error: "Not found" });
+
+    const subtitles = [];
+
+    // 1. Check for .srt files in the same directory
+    const dir = path.dirname(item.file_path);
+    const baseName = path.basename(item.file_path, path.extname(item.file_path));
+    try {
+      const files = fs.readdirSync(dir);
+      for (const file of files) {
+        if (!file.endsWith(".srt")) continue;
+        const fileLower = file.toLowerCase();
+        // Match files like "movie.srt", "movie.sv.srt", "movie.en.srt", "movie.Swedish.srt"
+        if (fileLower.startsWith(baseName.toLowerCase()) || fileLower.includes("swedish") || fileLower.includes("english")) {
+          let lang = "unknown";
+          if (fileLower.includes(".sv.") || fileLower.includes("swedish") || fileLower.includes(".swe.")) lang = "sv";
+          else if (fileLower.includes(".en.") || fileLower.includes("english") || fileLower.includes(".eng.")) lang = "en";
+          subtitles.push({
+            id: "srt_" + file,
+            type: "srt",
+            lang,
+            label: lang === "sv" ? "Svenska (SRT)" : lang === "en" ? "English (SRT)" : file,
+            path: path.join(dir, file),
+            url: "/api/media/" + item._id + "/subtitle-file?file=" + encodeURIComponent(file)
+          });
+        }
+      }
+    } catch {}
+
+    // 2. Check for embedded subtitle tracks via ffprobe
+    const ffprobePath = getFfmpegPath().replace("ffmpeg.exe", "ffprobe.exe");
+    try {
+      const { execFileSync } = require("child_process");
+      const probeOut = execFileSync(ffprobePath, [
+        "-v", "quiet", "-print_format", "json", "-show_streams",
+        "-select_streams", "s", item.file_path
+      ], { timeout: 10000, windowsHide: true }).toString();
+      const probe = JSON.parse(probeOut);
+      (probe.streams || []).forEach((s, i) => {
+        const lang = s.tags?.language || s.tags?.LANGUAGE || "und";
+        const title = s.tags?.title || s.tags?.TITLE || "";
+        subtitles.push({
+          id: "embedded_" + i,
+          type: "embedded",
+          lang,
+          index: i,
+          label: title || (lang === "swe" || lang === "sv" ? "Svenska" : lang === "eng" || lang === "en" ? "English" : lang),
+          codec: s.codec_name
+        });
+      });
+    } catch {}
+
+    // Sort: Swedish first, then English, then others
+    subtitles.sort((a, b) => {
+      const priority = (l) => (l === "sv" || l === "swe") ? 0 : (l === "en" || l === "eng") ? 1 : 2;
+      return priority(a.lang) - priority(b.lang);
+    });
+
+    res.json({ subtitles });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Serve a .srt file as WebVTT for browser playback
+app.get("/api/media/:id/subtitle-file", requireAuth, async (req, res) => {
+  try {
+    const item = await dbFindOne(db.media, { _id: req.params.id });
+    if (!item) return res.status(404).json({ error: "Not found" });
+    const dir = path.dirname(item.file_path);
+    const file = req.query.file;
+    if (!file || file.includes("..")) return res.status(400).json({ error: "Invalid" });
+    const filePath = path.join(dir, file);
+    if (!fs.existsSync(filePath)) return res.status(404).json({ error: "File not found" });
+    // Convert SRT to WebVTT
+    let srt = fs.readFileSync(filePath, "utf8");
+    // Handle different encodings
+    if (srt.charCodeAt(0) === 0xFEFF) srt = srt.slice(1); // BOM
+    const vtt = "WEBVTT\n\n" + srt
+      .replace(/\r\n/g, "\n")
+      .replace(/\r/g, "\n")
+      .replace(/(\d+)\n(\d{2}:\d{2}:\d{2}),(\d{3}) --> (\d{2}:\d{2}:\d{2}),(\d{3})/g, "$2.$3 --> $4.$5");
+    res.setHeader("Content-Type", "text/vtt; charset=utf-8");
+    res.send(vtt);
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Search OpenSubtitles
+app.get("/api/subtitles/search", requireAuth, async (req, res) => {
+  try {
+    const { query, lang = "sv", imdb_id } = req.query;
+    if (!config.opensubtitles_api_key) return res.json({ subtitles: [] });
+    const params = new URLSearchParams({ languages: lang });
+    if (imdb_id) params.set("imdb_id", imdb_id);
+    else if (query) params.set("query", query);
+    const data = await new Promise((resolve, reject) => {
+      https.get({
+        hostname: "api.opensubtitles.com",
+        path: "/api/v1/subtitles?" + params.toString(),
+        headers: {
+          "Api-Key": config.opensubtitles_api_key,
+          "User-Agent": "StreamVault/" + STREAMVAULT_VERSION
+        }
+      }, r => {
+        let d = ""; r.on("data", c => d += c);
+        r.on("end", () => { try { resolve(JSON.parse(d)); } catch { reject(new Error("parse")); } });
+      }).on("error", reject);
+    });
+    const results = (data.data || []).slice(0, 10).map(s => ({
+      id: s.id,
+      lang: s.attributes?.language,
+      release: s.attributes?.release,
+      downloads: s.attributes?.download_count,
+      rating: s.attributes?.ratings,
+      file_id: s.attributes?.files?.[0]?.file_id
+    }));
+    res.json({ subtitles: results });
+  } catch(e) {
+    res.json({ subtitles: [], error: e.message });
+  }
+});
+
+// Download subtitle from OpenSubtitles
+app.post("/api/subtitles/download", requireAuth, async (req, res) => {
+  try {
+    const { file_id, media_id } = req.body;
+    if (!config.opensubtitles_api_key) return res.status(400).json({ error: "No API key" });
+    // Get download link
+    const linkData = await new Promise((resolve, reject) => {
+      const body = JSON.stringify({ file_id });
+      const options = {
+        hostname: "api.opensubtitles.com",
+        path: "/api/v1/download",
+        method: "POST",
+        headers: {
+          "Api-Key": config.opensubtitles_api_key,
+          "User-Agent": "StreamVault/" + STREAMVAULT_VERSION,
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(body)
+        }
+      };
+      const r = https.request(options, resp => {
+        let d = ""; resp.on("data", c => d += c);
+        resp.on("end", () => { try { resolve(JSON.parse(d)); } catch { reject(new Error("parse")); } });
+      });
+      r.on("error", reject);
+      r.write(body); r.end();
+    });
+    if (!linkData.link) return res.status(400).json({ error: "No download link" });
+    // Download and save next to the media file
+    const item = await dbFindOne(db.media, { _id: media_id });
+    if (!item) return res.status(404).json({ error: "Media not found" });
+    const dir = path.dirname(item.file_path);
+    const baseName = path.basename(item.file_path, path.extname(item.file_path));
+    const savePath = path.join(dir, baseName + ".sv.srt");
+    await new Promise((resolve, reject) => {
+      function download(url) {
+        const parsedUrl = new URL(url);
+        https.get({ hostname: parsedUrl.hostname, path: parsedUrl.pathname + parsedUrl.search }, r => {
+          if (r.statusCode === 301 || r.statusCode === 302) { r.resume(); return download(r.headers.location); }
+          const file = fs.createWriteStream(savePath);
+          r.pipe(file);
+          file.on("finish", () => { file.close(); resolve(); });
+        }).on("error", reject);
+      }
+      download(linkData.link);
+    });
+    res.json({ ok: true, path: savePath, url: "/api/media/" + media_id + "/subtitle-file?file=" + encodeURIComponent(path.basename(savePath)) });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
 app.get("/api/search/streaming", requireAuth, async (req, res) => {
   const {query}=req.query;
   if (!query||!config.tmdb_api_key) return res.json({results:[]});

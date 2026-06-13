@@ -459,6 +459,7 @@ async function openDetail(id) {
           ${item.type !== "tvshow" ? `<button class="btn-play" onclick='playItem("${item.id}","${esc(item.title)}"); closeDetail()'>${playLabel}</button>` : ""}
           <button class="btn-fav" onclick="toggleFav('${item.id}',this)">♡ Favorit</button>
           <button class="btn-fav" onclick='openFixMeta("${item.id}","${esc(item.title)}","${item.type === "tvshow" ? "tv" : "movie"}")'>🔍 Fixa info</button>
+          <button class="btn-fav" onclick='openSubtitles("${item.id}","${esc(item.title)}")'>🔤 Undertexter</button>
           ${progress?.completed
             ? `<button class="btn-fav" id="watched-btn-${item.id}" onclick="markUnwatched('${item.id}')">↺ Markera som osedd</button>`
             : `<button class="btn-fav" id="watched-btn-${item.id}" onclick="markWatched('${item.id}', ${Math.floor(progress?.duration||0)})">✓ Markera som sedd</button>`
@@ -581,6 +582,8 @@ async function playItem(id, title) {
     const notDone = !hasDur || (progress.position / progress.duration) < 0.95;
     const resumeSec = (progress?.position > 10 && notDone) ? Math.floor(progress.position) : 0;
     console.log("[RESUME] position:", progress?.position, "duration:", progress?.duration, "resumeSec:", resumeSec);
+    // Auto-load Swedish subtitles
+    autoLoadSubtitles(id);
 
     if (info.method === "direct") {
       video.src = info.url;
@@ -805,6 +808,19 @@ function formatTime(sec) {
 function initPlayerControls(duration) {
   const video = document.getElementById("main-video");
   playerDuration = duration || 0;
+  // Add subtitle button if not already there
+  if (!document.getElementById("ctrl-subtitles")) {
+    var fsBtn = document.querySelector(".ctrl-btn[onclick*='toggleFullscreen']");
+    if (fsBtn) {
+      var subBtn = document.createElement("button");
+      subBtn.className = "ctrl-btn";
+      subBtn.id = "ctrl-subtitles";
+      subBtn.textContent = "🔤";
+      subBtn.title = "Undertexter";
+      subBtn.onclick = toggleSubtitleMenu;
+      fsBtn.parentNode.insertBefore(subBtn, fsBtn);
+    }
+  }
   console.log("[DURATION] playerDuration set to:", playerDuration, "seconds =", Math.floor(playerDuration/60), "min");
 
   video.ontimeupdate = () => {
@@ -973,6 +989,157 @@ document.addEventListener("fullscreenchange", function() {
     if (bar) { bar.style.cursor = "default"; bar.removeEventListener("mousemove", showFsControls); }
   }
 });
+
+
+// ── SUBTITLES ─────────────────────────────────────────────────────────────────
+var _currentSubtitleTrack = null;
+
+async function openSubtitles(mediaId, title) {
+  document.getElementById("subtitle-overlay")?.remove();
+  const overlay = document.createElement("div");
+  overlay.id = "subtitle-overlay";
+  overlay.style.cssText = "position:fixed;inset:0;z-index:10001;background:rgba(0,0,0,0.85);display:flex;align-items:center;justify-content:center;padding:20px";
+  
+  const modal = document.createElement("div");
+  modal.style.cssText = "background:var(--surface);border:1px solid var(--border);border-radius:14px;width:100%;max-width:520px;max-height:80vh;display:flex;flex-direction:column;overflow:hidden";
+  
+  // Header
+  const header = document.createElement("div");
+  header.style.cssText = "padding:16px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px";
+  header.innerHTML = "<span style='font-size:18px'>🔤</span><div style='flex:1'><b style='font-size:15px'>Undertexter</b><div style='font-size:12px;color:var(--muted)'>" + esc(title) + "</div></div>";
+  var closeBtn2 = document.createElement("button");
+  closeBtn2.textContent = "✕";
+  closeBtn2.style.cssText = "background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer";
+  closeBtn2.onclick = function() { overlay.remove(); };
+  header.appendChild(closeBtn2);
+  modal.appendChild(header);
+  
+  // Content area
+  const contentEl = document.createElement("div");
+  contentEl.id = "subtitle-content";
+  contentEl.style.cssText = "flex:1;overflow-y:auto;padding:12px";
+  contentEl.innerHTML = "<div style='text-align:center;padding:20px;color:var(--muted)'>⏳ Hämtar undertexter...</div>";
+  modal.appendChild(contentEl);
+  
+  // Search footer
+  const footer = document.createElement("div");
+  footer.style.cssText = "padding:12px 16px;border-top:1px solid var(--border)";
+  footer.innerHTML = "<div style='font-size:13px;color:var(--muted);margin-bottom:8px'>Sök på OpenSubtitles:</div>" +
+    "<div style='display:flex;gap:8px'>" +
+    "<input id='sub-search-input' style='flex:1;background:var(--card2);border:1px solid var(--border);color:var(--text);font-size:13px;padding:8px 12px;border-radius:8px;outline:none' placeholder='Sök undertexter...' value='" + esc(title) + "'/>" +
+    "<select id='sub-lang-select' style='background:var(--card2);border:1px solid var(--border);color:var(--text);font-size:13px;padding:8px;border-radius:8px'>" +
+    "<option value='sv'>Svenska</option><option value='en'>English</option></select>" +
+    "</div>";
+  var searchBtn2 = document.createElement("button");
+  searchBtn2.textContent = "Sök";
+  searchBtn2.style.cssText = "background:var(--accent);border:none;color:white;font-size:13px;padding:8px 14px;border-radius:8px;cursor:pointer;margin-top:8px;width:100%";
+  searchBtn2.onclick = function() { searchSubtitles(mediaId); };
+  footer.appendChild(searchBtn2);
+  modal.appendChild(footer);
+  
+  overlay.appendChild(modal);
+  overlay.addEventListener("click", function(e) { if (e.target === overlay) overlay.remove(); });
+  document.body.appendChild(overlay);
+
+  // Load existing subtitles
+  try {
+    var data = await API.get("/media/" + mediaId + "/subtitles");
+    var subs = data.subtitles || [];
+    if (!subs.length) {
+      contentEl.innerHTML = "<div style='text-align:center;padding:20px;color:var(--muted);font-size:13px'>Inga undertexter hittade i biblioteket</div>";
+      return;
+    }
+    contentEl.innerHTML = "<div style='font-size:12px;color:var(--muted);margin-bottom:8px;padding:0 4px'>Tillgängliga undertexter:</div>";
+    subs.forEach(function(s) {
+      var row = document.createElement("div");
+      row.style.cssText = "display:flex;align-items:center;gap:10px;padding:10px;border-radius:8px";
+      var flag = s.lang === "sv" || s.lang === "swe" ? "🇸🇪" : s.lang === "en" || s.lang === "eng" ? "🇬🇧" : "🌐";
+      row.innerHTML = "<span style='font-size:18px'>" + flag + "</span><div style='flex:1'><div style='font-size:13px;font-weight:500'>" + esc(s.label) + "</div><div style='font-size:11px;color:var(--muted)'>" + (s.type === "embedded" ? "Inbakad" : "SRT-fil") + "</div></div>";
+      if (s.url) {
+        var btn = document.createElement("button");
+        btn.textContent = "Aktivera";
+        btn.style.cssText = "background:var(--accent);border:none;color:white;font-size:12px;padding:6px 12px;border-radius:6px;cursor:pointer";
+        var url = s.url, label = s.label;
+        btn.onclick = function() { activateSubtitle(url, label); };
+        row.appendChild(btn);
+      }
+      contentEl.appendChild(row);
+    });
+  } catch(e) {
+    contentEl.innerHTML = "<div style='text-align:center;padding:20px;color:var(--danger);font-size:13px'>Fel: " + e.message + "</div>";
+  }
+}
+
+async function searchSubtitles(mediaId) {
+  var query = document.getElementById("sub-search-input")?.value?.trim();
+  var lang = document.getElementById("sub-lang-select")?.value || "sv";
+  var el = document.getElementById("subtitle-content");
+  if (!el || !query) return;
+  el.innerHTML = "<div style='text-align:center;padding:20px;color:var(--muted)'>⏳ Söker...</div>";
+  try {
+    var data = await API.get("/subtitles/search?query=" + encodeURIComponent(query) + "&lang=" + lang);
+    var subs = data.subtitles || [];
+    if (!subs.length) { el.innerHTML = "<div style='text-align:center;padding:20px;color:var(--muted);font-size:13px'>Inga träffar</div>"; return; }
+    el.innerHTML = "";
+    subs.forEach(function(s) {
+      var row = document.createElement("div");
+      row.style.cssText = "display:flex;align-items:center;gap:10px;padding:10px;border-radius:8px";
+      row.innerHTML = "<div style='flex:1'><div style='font-size:13px;font-weight:500'>" + esc(s.release || "Okänd release") + "</div><div style='font-size:11px;color:var(--muted)'>" + (s.downloads || 0) + " nedladdningar</div></div>";
+      var btn = document.createElement("button");
+      btn.textContent = "⬇ Ladda ner";
+      btn.style.cssText = "background:var(--accent);border:none;color:white;font-size:12px;padding:6px 12px;border-radius:6px;cursor:pointer";
+      var fileId = s.file_id;
+      btn.onclick = function() { downloadSubtitle(fileId, mediaId); };
+      row.appendChild(btn);
+      el.appendChild(row);
+    });
+  } catch(e) {
+    el.innerHTML = "<div style='text-align:center;padding:20px;color:var(--danger);font-size:13px'>Fel: " + e.message + "</div>";
+  }
+}
+
+async function downloadSubtitle(fileId, mediaId) {
+  try {
+    toast("⏳ Laddar ner undertext...", "info");
+    var data = await API.post("/subtitles/download", { file_id: fileId, media_id: mediaId });
+    if (data.ok) {
+      toast("✓ Undertext nedladdad!", "success");
+      activateSubtitle(data.url, "Svenska");
+      document.getElementById("subtitle-overlay")?.remove();
+    }
+  } catch(e) { toast("Fel: " + e.message, "error"); }
+}
+
+function activateSubtitle(url, label) {
+  var video = document.getElementById("main-video");
+  if (!video) { toast("Starta filmen först för att aktivera undertext", "info"); return; }
+  Array.from(video.querySelectorAll("track")).forEach(function(t) { t.remove(); });
+  var track = document.createElement("track");
+  track.kind = "subtitles";
+  track.label = label || "Undertexter";
+  track.srclang = "sv";
+  track.src = url;
+  track.default = true;
+  video.appendChild(track);
+  if (video.textTracks.length > 0) video.textTracks[0].mode = "showing";
+  _currentSubtitleTrack = url;
+  toast("✓ " + (label || "Undertexter") + " aktiverad!", "success");
+  document.getElementById("subtitle-overlay")?.remove();
+}
+
+function toggleSubtitleMenu() {
+  if (currentItemId) openSubtitles(currentItemId, document.getElementById("pb-title")?.textContent || "");
+}
+
+async function autoLoadSubtitles(mediaId) {
+  try {
+    var data = await API.get("/media/" + mediaId + "/subtitles");
+    var subs = data.subtitles || [];
+    var sv = subs.find(function(s) { return s.lang === "sv" || s.lang === "swe"; });
+    if (sv && sv.url) activateSubtitle(sv.url, sv.label);
+  } catch {}
+}
+
 
 function closePlayer() {
   const video = document.getElementById("main-video");
