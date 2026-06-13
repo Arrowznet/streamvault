@@ -1293,7 +1293,7 @@ app.get("/api/media/:id/subtitles", requireAuth, async (req, res) => {
 });
 
 // Serve a .srt file as WebVTT for browser playback
-app.get("/api/media/:id/subtitle-file", requireAuth, async (req, res) => {
+app.get("/api/media/:id/subtitle-file", async (req, res) => {
   try {
     const item = await dbFindOne(db.media, { _id: req.params.id });
     if (!item) return res.status(404).json({ error: "Not found" });

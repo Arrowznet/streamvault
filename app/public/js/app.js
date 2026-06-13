@@ -1135,9 +1135,36 @@ async function autoLoadSubtitles(mediaId) {
   try {
     var data = await API.get("/media/" + mediaId + "/subtitles");
     var subs = data.subtitles || [];
+    // Swedish first, then English, then anything
     var sv = subs.find(function(s) { return s.lang === "sv" || s.lang === "swe"; });
-    if (sv && sv.url) activateSubtitle(sv.url, sv.label);
-  } catch {}
+    var sub = sv || subs[0];
+    if (!sub || !sub.url) return;
+    // Wait for video to be ready before adding track
+    var video = document.getElementById("main-video");
+    if (!video) return;
+    var tryActivate = function() {
+      Array.from(video.querySelectorAll("track")).forEach(function(t) { t.remove(); });
+      var track = document.createElement("track");
+      track.kind = "subtitles";
+      track.label = sub.label || "Svenska";
+      track.srclang = "sv";
+      track.src = sub.url;
+      track.default = true;
+      video.appendChild(track);
+      // Need small delay for track to load
+      setTimeout(function() {
+        if (video.textTracks.length > 0) {
+          video.textTracks[0].mode = "showing";
+          console.log("[SUBTITLES] Auto-activated:", sub.label);
+        }
+      }, 1000);
+    };
+    if (video.readyState >= 1) {
+      tryActivate();
+    } else {
+      video.addEventListener("loadedmetadata", tryActivate, { once: true });
+    }
+  } catch(e) { console.log("[SUBTITLES] Auto-load error:", e.message); }
 }
 
 
