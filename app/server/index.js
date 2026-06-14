@@ -1331,11 +1331,16 @@ app.get("/api/subtitles/search", requireAuth, async (req, res) => {
         path: "/api/v1/subtitles?" + params.toString(),
         headers: {
           "Api-Key": config.opensubtitles_api_key,
-          "User-Agent": "StreamVault/" + STREAMVAULT_VERSION
+          "User-Agent": "StreamVault/" + STREAMVAULT_VERSION,
+          "Content-Type": "application/json",
+          "Accept": "application/json"
         }
       }, r => {
         let d = ""; r.on("data", c => d += c);
-        r.on("end", () => { try { resolve(JSON.parse(d)); } catch { reject(new Error("parse")); } });
+        r.on("end", () => {
+          try { resolve(JSON.parse(d)); }
+          catch(e) { console.log("[SUBTITLES] Parse error, response:", d.substring(0, 200)); reject(new Error("parse")); }
+        });
       }).on("error", reject);
     });
     const results = (data.data || []).slice(0, 10).map(s => ({
