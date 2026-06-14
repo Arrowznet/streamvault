@@ -1326,22 +1326,32 @@ app.get("/api/subtitles/search", requireAuth, async (req, res) => {
     if (imdb_id) params.set("imdb_id", imdb_id);
     else if (query) params.set("query", query);
     const data = await new Promise((resolve, reject) => {
-      https.get({
-        hostname: "api.opensubtitles.com",
-        path: "/api/v1/subtitles?" + params.toString(),
-        headers: {
-          "Api-Key": config.opensubtitles_api_key,
-          "User-Agent": "StreamVault/" + STREAMVAULT_VERSION,
-          "Content-Type": "application/json",
-          "Accept": "application/json"
-        }
-      }, r => {
-        let d = ""; r.on("data", c => d += c);
-        r.on("end", () => {
-          try { resolve(JSON.parse(d)); }
-          catch(e) { console.log("[SUBTITLES] Parse error, response:", d.substring(0, 200)); reject(new Error("parse")); }
-        });
-      }).on("error", reject);
+      function doRequest(url, redirects) {
+        if (redirects > 5) return reject(new Error("Too many redirects"));
+        const parsed = new URL(url);
+        https.get({
+          hostname: parsed.hostname,
+          path: parsed.pathname + parsed.search,
+          headers: {
+            "Api-Key": config.opensubtitles_api_key,
+            "User-Agent": "StreamVault/" + STREAMVAULT_VERSION,
+            "Accept": "application/json"
+          }
+        }, r => {
+          if (r.statusCode === 301 || r.statusCode === 302) {
+            r.resume();
+            const loc = r.headers.location;
+            const nextUrl = loc.startsWith("http") ? loc : "https://api.opensubtitles.com" + loc;
+            return doRequest(nextUrl, redirects + 1);
+          }
+          let d = ""; r.on("data", c => d += c);
+          r.on("end", () => {
+            try { resolve(JSON.parse(d)); }
+            catch(e) { console.log("[SUBTITLES] Parse error:", d.substring(0, 200)); reject(new Error("parse")); }
+          });
+        }).on("error", reject);
+      }
+      doRequest("https://api.opensubtitles.com/api/v1/subtitles?" + params.toString(), 0);
     });
     const results = (data.data || []).slice(0, 10).map(s => ({
       id: s.id,
@@ -1373,16 +1383,35 @@ app.post("/api/subtitles/download", requireAuth, async (req, res) => {
           "Api-Key": config.opensubtitles_api_key,
           "User-Agent": "StreamVault/" + STREAMVAULT_VERSION,
           "Content-Type": "application/json",
+          "Accept": "application/json",
           "Content-Length": Buffer.byteLength(body)
         }
       };
       const r = https.request(options, resp => {
+        // Follow redirects
+        if (resp.statusCode === 301 || resp.statusCode === 302) {
+          resp.resume();
+          const loc = resp.headers.location;
+          const newUrl = loc.startsWith("http") ? new URL(loc) : new URL("https://api.opensubtitles.com" + loc);
+          const r2 = https.request({ hostname: newUrl.hostname, path: newUrl.pathname + newUrl.search, method: "POST",
+            headers: { "Api-Key": config.opensubtitles_api_key, "User-Agent": "StreamVault/" + STREAMVAULT_VERSION, "Content-Type": "application/json", "Accept": "application/json", "Content-Length": Buffer.byteLength(body) }
+          }, resp2 => {
+            let d = ""; resp2.on("data", c => d += c);
+            resp2.on("end", () => { try { resolve(JSON.parse(d)); } catch(e) { console.log("[DOWNLOAD] Parse error:", d.substring(0,200)); reject(new Error("parse")); } });
+          });
+          r2.on("error", reject); r2.write(body); r2.end();
+          return;
+        }
         let d = ""; resp.on("data", c => d += c);
-        resp.on("end", () => { try { resolve(JSON.parse(d)); } catch { reject(new Error("parse")); } });
+        resp.on("end", () => { 
+          console.log("[DOWNLOAD] Response status:", resp.statusCode, "body:", d.substring(0, 300));
+          try { resolve(JSON.parse(d)); } catch(e) { reject(new Error("parse")); } 
+        });
       });
       r.on("error", reject);
       r.write(body); r.end();
     });
+    console.log("[DOWNLOAD] linkData:", JSON.stringify(linkData).substring(0, 300));
     if (!linkData.link) return res.status(400).json({ error: "No download link" });
     // Download and save next to the media file
     const item = await dbFindOne(db.media, { _id: media_id });
