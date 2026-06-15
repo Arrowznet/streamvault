@@ -154,6 +154,10 @@ async function startUpdate(version, downloadUrl, banner) {
     status.textContent = msg;
   }
 
+  // Capture current version to detect when update is complete
+  var currentVersion = null;
+  try { var vInfo = await API.get("/version"); currentVersion = vInfo.version; } catch {}
+
   try {
     setProgress(10, "Contacting server...");
     await new Promise(r => setTimeout(r, 500));
@@ -167,21 +171,28 @@ async function startUpdate(version, downloadUrl, banner) {
     await new Promise(r => setTimeout(r, 4000));
     setProgress(95, "Almost done...");
 
-    // Wait for server to come back
+    // Wait for server to restart with NEW version
     var attempts = 0;
     var interval = setInterval(async function() {
       attempts++;
       try {
-        await API.get("/version");
-        clearInterval(interval);
-        setProgress(100, "Complete! Reloading...");
-        await new Promise(r => setTimeout(r, 1000));
-        window.location.reload();
-      } catch {
-        if (attempts > 30) {
+        var vData = await API.get("/version");
+        // Check if version has changed
+        if (vData.version !== currentVersion) {
           clearInterval(interval);
-          status.textContent = "Server restarting... please refresh manually";
+          setProgress(100, "Complete! Reloading...");
+          await new Promise(r => setTimeout(r, 1500));
+          window.location.reload();
+        } else if (attempts > 40) {
+          // Timeout - reload anyway
+          clearInterval(interval);
+          setProgress(100, "Complete! Reloading...");
+          await new Promise(r => setTimeout(r, 1000));
+          window.location.reload();
         }
+      } catch {
+        // Server is down - good! It's restarting
+        setProgress(90, "Server restarting...");
       }
     }, 2000);
 
