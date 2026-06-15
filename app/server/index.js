@@ -649,13 +649,34 @@ app.get("/api/playback/:id", requireAuth, async (req, res) => {
   const duration = await getDuration(item);
   const token = req.query.token || "";
 
-  // Check if file uses H.265/HEVC codec (needs transcoding in all browsers)
+  // Check if transcoding is needed
   let needsTranscode = !canDirectPlay(ext, ua);
   if (!needsTranscode && (ext === ".mkv" || ext === ".mp4")) {
-    // Check codec via item metadata or ffprobe
+    // Force transcode for H.265
     if (item.codec && (item.codec.includes("hevc") || item.codec.includes("h265") || item.codec.includes("265"))) {
       needsTranscode = true;
-      console.log(`[PLAYBACK] ${item.title}: H.265 detected, forcing HLS`);
+      console.log(`[PLAYBACK] ${item.title}: H.265 detected, forcing DASH`);
+    }
+    // Force transcode for AC3/DTS audio (Chrome can't play these)
+    if (!needsTranscode) {
+      try {
+        const { execFileSync } = require("child_process");
+        const ffprobe = getFfprobePath();
+        const out = execFileSync(ffprobe, [
+          "-v", "quiet", "-show_streams", "-select_streams", "a:0",
+          "-show_entries", "stream=codec_name",
+          "-of", "json", item.file_path
+        ], { timeout: 8000, windowsHide: true }).toString();
+        const probe = JSON.parse(out);
+        const audioCodec = (probe.streams?.[0]?.codec_name || "").toLowerCase();
+        const incompatibleAudio = ["ac3", "dts", "truehd", "eac3", "mlp"];
+        if (incompatibleAudio.some(c => audioCodec.includes(c))) {
+          needsTranscode = true;
+          console.log(`[PLAYBACK] ${item.title}: ${audioCodec} audio detected, forcing DASH`);
+        }
+      } catch(e) {
+        console.log("[PLAYBACK] ffprobe audio check failed:", e.message);
+      }
     }
   }
 
@@ -1302,10 +1323,19 @@ app.get("/api/media/:id/subtitle-file", async (req, res) => {
     if (!file || file.includes("..")) return res.status(400).json({ error: "Invalid" });
     const filePath = path.join(dir, file);
     if (!fs.existsSync(filePath)) return res.status(404).json({ error: "File not found" });
-    // Convert SRT to WebVTT
-    let srt = fs.readFileSync(filePath, "utf8");
-    // Handle different encodings
-    if (srt.charCodeAt(0) === 0xFEFF) srt = srt.slice(1); // BOM
+    // Convert SRT to WebVTT - handle multiple encodings
+    let srt;
+    const rawBuffer = fs.readFileSync(filePath);
+    // Try UTF-8 first, fall back to Latin-1/Windows-1252
+    try {
+      srt = rawBuffer.toString("utf8");
+      // Check if it looks like garbled text (replacement chars indicate wrong encoding)
+      if (srt.includes("\uFFFD")) throw new Error("not utf8");
+    } catch {
+      srt = rawBuffer.toString("latin1");
+    }
+    // Handle BOM
+    if (srt.charCodeAt(0) === 0xFEFF) srt = srt.slice(1);
     const vtt = "WEBVTT\n\n" + srt
       .replace(/\r\n/g, "\n")
       .replace(/\r/g, "\n")
