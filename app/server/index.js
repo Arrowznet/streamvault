@@ -837,7 +837,15 @@ async function startDashTranscode(item, seekSec = 0) {
     videoFilterArgs = ["-vf", "format=yuv420p"];
   }
 
-  console.log(`[DASH] Using encoder: ${encoder}`);
+  // Check if video can be copied directly (already H264, no HDR/4K conversion needed)
+  const itemCodec = (item.codec || "").toLowerCase();
+  const canCopyVideo = !is4kHdr && (itemCodec === "h264" || itemCodec === "avc") && seekSec === 0;
+  
+  if (canCopyVideo) {
+    console.log(`[DASH] Using encoder: copy (H264 passthrough)`);
+  } else {
+    console.log(`[DASH] Using encoder: ${encoder}`);
+  }
 
   const mpdPath = "manifest.mpd"; // relative - cwd set to dashDir
 
@@ -845,18 +853,19 @@ async function startDashTranscode(item, seekSec = 0) {
   // -quality before -b:v sets VBR mode which conflicts with DASH muxer
   const dashEncoderArgs = encoder === "h264_amf" ? [] : [...extraArgs];
 
+  const videoArgs = canCopyVideo
+    ? ["-c:v", "copy"]
+    : ["-vf", "format=yuv420p", "-c:v", encoder, ...dashEncoderArgs, "-b:v", "4000k"];
+
   const args = [
     "-hide_banner", "-loglevel", "warning",
     ...hwaccelArgs,
-    "-re",
     "-fflags", "+genpts+igndts+discardcorrupt",
     "-err_detect", "ignore_err",
     ...(seekSec > 0 ? ["-ss", seekSec.toString()] : []),
     "-i", item.file_path,
     "-avoid_negative_ts", "make_zero",
-    ...videoFilterArgs,
-    "-c:v", encoder, ...dashEncoderArgs,
-    "-b:v", "4000k",
+    ...videoArgs,
     "-c:a", "aac", "-ac", "2", "-b:a", "128k",
     "-async", "1",
     "-af", "aresample=async=1000",
@@ -1658,12 +1667,44 @@ try {
     { timeout: 5000, windowsHide: true }).toString();
 
   const candidates = [];
-  if (encoderList.includes("h264_nvenc")) candidates.push({
-    encoder: "h264_nvenc",
-    // Use more compatible test args - no -tune ll which can fail on some cards
-    extraArgs: ["-preset", "p4"],
-    testArgs: ["-preset", "p4", "-profile:v", "high"]
-  });
+  if (encoderList.includes("h264_nvenc")) {
+    // Detect NVIDIA GPU generation for optimal settings
+    let nvencArgs = ["-preset", "p4", "-profile:v", "high"]; // safe default
+    try {
+      const gpuInfo = execFileSync("nvidia-smi", [
+        "--query-gpu=name,compute_cap",
+        "--format=csv,noheader"
+      ], { timeout: 5000, windowsHide: true }).toString().trim();
+      console.log("[GPU] Detected:", gpuInfo);
+      const computeCap = parseFloat(gpuInfo.split(",")[1]?.trim() || "0");
+      if (computeCap >= 8.9) {
+        // Ada Lovelace (40xx) / Blackwell (50xx) - fastest
+        nvencArgs = ["-preset", "p1", "-rc", "constqp", "-qp", "23", "-gpu", "0", "-profile:v", "high", "-zerolatency", "1"];
+        console.log("[GPU] Ada/Blackwell detected - using p1 constqp preset");
+      } else if (computeCap >= 8.0) {
+        // Ampere (30xx) - very fast
+        nvencArgs = ["-preset", "p1", "-rc", "constqp", "-qp", "23", "-gpu", "0", "-profile:v", "high", "-zerolatency", "1"];
+        console.log("[GPU] Ampere detected - using p1 constqp preset (RTX 3080)");
+      } else if (computeCap >= 7.0) {
+        // Turing (20xx) / Volta - fast
+        nvencArgs = ["-preset", "p3", "-rc", "vbr", "-cq", "23", "-gpu", "0", "-profile:v", "high"];
+        console.log("[GPU] Turing/Volta detected - using p3 preset");
+      } else if (computeCap >= 6.0) {
+        // Pascal (10xx) - standard
+        nvencArgs = ["-preset", "p4", "-gpu", "0", "-profile:v", "high"];
+        console.log("[GPU] Pascal detected - using p4 preset");
+      } else {
+        console.log("[GPU] Older NVIDIA - using safe p4 preset");
+      }
+    } catch(e) {
+      console.log("[GPU] nvidia-smi not available, using default NVENC settings");
+    }
+    candidates.push({
+      encoder: "h264_nvenc",
+      extraArgs: nvencArgs,
+      testArgs: ["-preset", "p4", "-profile:v", "high"]
+    });
+  }
   if (encoderList.includes("h264_amf")) candidates.push({
     encoder: "h264_amf",
     extraArgs: [],

@@ -660,7 +660,6 @@ async function playItem(id, title) {
             },
             gaps: { jumpGaps: true, jumpLargeGaps: true },
             abr: { autoSwitchBitrate: { video: false } },
-            // Timeout for segments that take too long (corrupted audio etc)
             fragmentRequestProgressTimeout: 60000,
             retryAttempts: {
               MPD: 3,
