@@ -281,7 +281,12 @@ async function loadMediaSection(sectionType) {
       return;
     }
 
-    let html = `<div class="grid-wrap">
+    const letters = "#ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("");
+  const alphaNav = `<div class="alpha-nav" id="alpha-nav-${sectionType}">${letters.map(l => 
+    `<span class="alpha-letter" onclick="jumpToLetter('${sectionType}','${l}')">${l}</span>`
+  ).join("")}</div>`;
+
+  let html = `<div class="grid-wrap" style="position:relative">
       <div class="filter-bar">
         <input class="filter-input" type="text" placeholder="Sök..." id="filter-q-${sectionType}" oninput="filterMediaSection('${sectionType}')"/>
         <select class="filter-select" id="filter-sort-${sectionType}" onchange="filterMediaSection('${sectionType}')">
@@ -289,7 +294,8 @@ async function loadMediaSection(sectionType) {
           <option value="year">År (nyast)</option>
           <option value="rating">Betyg</option>
         </select>
-      </div>`;
+      </div>
+      ${alphaNav}`;
 
     // Fetch all libraries and render each as its own section
     for (const lib of relevantLibs) {
@@ -309,6 +315,32 @@ async function loadMediaSection(sectionType) {
     sec.innerHTML = html;
   } catch (e) {
     sec.innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><h3>${e.message}</h3></div>`;
+  }
+}
+
+function jumpToLetter(sectionType, letter) {
+  const groups = document.querySelectorAll(`.section-group[data-type="${sectionType}"]`);
+  for (const group of groups) {
+    const grid = group.querySelector(`[class*="lib-grid-"]`);
+    if (!grid) continue;
+    const items = JSON.parse(grid.getAttribute("data-items") || "[]");
+    const match = items.find(i => {
+      const title = (i.title || "").replace(/^(the |a |an )/i, "").trim().toUpperCase();
+      if (letter === "#") return /^[^A-Z]/.test(title);
+      return title.startsWith(letter);
+    });
+    if (match) {
+      const card = grid.querySelector(`[onclick*="${match.id}"]`);
+      if (card) {
+        card.scrollIntoView({ behavior: "smooth", block: "start" });
+        // Highlight active letter
+        document.querySelectorAll(`#alpha-nav-${sectionType} .alpha-letter`).forEach(el => el.classList.remove("active"));
+        document.querySelectorAll(`#alpha-nav-${sectionType} .alpha-letter`).forEach(el => {
+          if (el.textContent === letter) el.classList.add("active");
+        });
+        return;
+      }
+    }
   }
 }
 

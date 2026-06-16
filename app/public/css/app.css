@@ -620,3 +620,41 @@ main#appMain {
   border-radius: 0 2px 2px 0;
   transition: width 0.3s;
 }
+
+/* ── ALPHABET NAVIGATION ─────────────────────────────────────────────────── */
+.alpha-nav {
+  position: fixed;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  z-index: 100;
+  background: rgba(0,0,0,0.3);
+  border-radius: 12px;
+  padding: 6px 4px;
+}
+.alpha-letter {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+  text-align: center;
+  line-height: 1.2;
+  transition: color 0.15s, background 0.15s;
+  min-width: 16px;
+}
+.alpha-letter:hover {
+  color: var(--text);
+  background: var(--card2);
+}
+.alpha-letter.active {
+  color: var(--accent);
+  background: rgba(232,87,42,0.15);
+}
+@media (max-width: 600px) {
+  .alpha-nav { display: none; }
+}
