@@ -225,6 +225,11 @@ begin
       '/TR "powershell.exe -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File """' + AppDir + '\start.ps1"""" ' +
       '/DELAY 0000:15',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Sleep(2000);
+    Exec('schtasks.exe', '/Run /TN "StreamVault"',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Sleep(3000);
+    // If task didn't start, try again
     Exec('schtasks.exe', '/Run /TN "StreamVault"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
