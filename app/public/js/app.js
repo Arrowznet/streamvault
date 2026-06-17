@@ -604,6 +604,7 @@ async function playItem(id, title) {
     API.post("/dash/" + currentItemId + "/stop").catch(() => {});
   }
 
+  console.log(`[PLAY] ${new Date().toISOString().substring(11,23)} Play pressed: ${title}`);
   bar.style.display = "flex";
   document.getElementById("pb-title").textContent = title;
   document.getElementById("pb-sub").textContent = "Förbereder...";
@@ -675,12 +676,12 @@ async function playItem(id, title) {
         const _captureFirstCT = () => {
           if (window._dashFirstCT === null && video.currentTime > 0) {
             window._dashFirstCT = video.currentTime;
-            console.log("[DASH] firstCT captured:", window._dashFirstCT, "startSec:", startSec);
+            console.log(`[DASH] ${new Date().toISOString().substring(11,23)} firstCT captured:`, window._dashFirstCT, "startSec:", startSec);
             video.removeEventListener("timeupdate", _captureFirstCT);
           }
         };
         video.addEventListener("timeupdate", _captureFirstCT);
-        console.log("[DASH] session start, startSec:", startSec);
+        console.log(`[DASH] ${new Date().toISOString().substring(11,23)} session start, startSec:`, startSec);
         const player = dashjs.MediaPlayer().create();
         player.initialize(video, manifest, true);
         player.updateSettings({

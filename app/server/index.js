@@ -873,14 +873,14 @@ async function startDashTranscode(item, seekSec = 0) {
     "-f", "dash",
     "-seg_duration", "4",
     "-use_template", "1",
-    "-use_timeline", "1",
+    "-use_timeline", "0",
     "-window_size", "0",
     "-adaptation_sets", "id=0,streams=v id=1,streams=a",
     mpdPath
   ];
 
   console.log(`[DASH] FFmpeg path: ${ffmpeg}`);
-  console.log(`[DASH] Starting transcode: ${item.title}`);
+  console.log(`[DASH] ${new Date().toISOString().substring(11,23)} Starting transcode: ${item.title}`);
   console.log(`[DASH] Full args: ${args.join(' ')}`);
   const proc = spawn(ffmpeg, args, { windowsHide: false, cwd: dashDir });
   activeDashTranscodes.set(itemId, { proc, startTime: Date.now(), startSec: seekSec, duration: await getDuration(item) });
@@ -956,7 +956,7 @@ app.post("/api/dash/:id/start", requireAuth, async (req, res) => {
   // Small extra wait for MPD to be written
   await new Promise(r => setTimeout(r, 500));
 
-  console.log(`[DASH] MPD ready for: ${item.title}`);
+  console.log(`[DASH] ${new Date().toISOString().substring(11,23)} MPD ready for: ${item.title}`);
   res.json({
     ok: true,
     manifest: `/api/dash/${item._id}/manifest.mpd?token=${token}`,
