@@ -826,13 +826,21 @@ async function startDashTranscode(item, seekSec = 0) {
   let hwaccelArgs = [];
   let videoFilterArgs = [];
   if (is4kHdr) {
-    console.log(`[DASH] 4K HDR detected (${item.width}x${item.height} 10-bit HEVC) - using d3d11va + scale`);
-    hwaccelArgs = ["-hwaccel", "d3d11va"];
     const targetW = 1920;
     const targetH = item.width && item.height
       ? Math.round((item.height / item.width) * targetW / 2) * 2
       : 800;
-    videoFilterArgs = ["-vf", `scale=${targetW}:${targetH},format=yuv420p`];
+    if (encoder === "h264_nvenc") {
+      // NVENC: use cuda hwaccel for GPU-accelerated decoding, scale on CPU
+      console.log(`[DASH] 4K HDR detected (${item.width}x${item.height} 10-bit HEVC) - using cuda hwaccel + scale`);
+      hwaccelArgs = ["-hwaccel", "cuda"];
+      videoFilterArgs = ["-vf", `scale=${targetW}:${targetH},format=yuv420p`, "-pix_fmt", "yuv420p"];
+    } else {
+      // AMD/CPU fallback: software decode + scale
+      console.log(`[DASH] 4K HDR detected (${item.width}x${item.height} 10-bit HEVC) - using software decode + scale`);
+      hwaccelArgs = [];
+      videoFilterArgs = ["-vf", `scale=${targetW}:${targetH},format=yuv420p`];
+    }
   } else {
     videoFilterArgs = ["-vf", "format=yuv420p"];
   }
@@ -855,7 +863,7 @@ async function startDashTranscode(item, seekSec = 0) {
 
   const videoArgs = canCopyVideo
     ? ["-c:v", "copy", "-bsf:v", "h264_mp4toannexb"]
-    : ["-vf", "format=yuv420p", "-c:v", encoder, ...dashEncoderArgs, "-b:v", "4000k"];
+    : [...videoFilterArgs, "-c:v", encoder, ...dashEncoderArgs, "-b:v", "4000k"];
 
   const args = [
     "-hide_banner", "-loglevel", "warning",
