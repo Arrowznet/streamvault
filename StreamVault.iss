@@ -225,12 +225,13 @@ begin
       '/TR "powershell.exe -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File """' + AppDir + '\start.ps1"""" ' +
       '/DELAY 0000:15',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Sleep(3000);
+    // Start StreamVault directly via schtasks
+    Exec('schtasks.exe', '/Run /TN "StreamVault"',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Sleep(2000);
-    // Create a one-time delayed start task to launch StreamVault after installer exits
-    Exec('schtasks.exe',
-      '/Create /F /RU SYSTEM /RL HIGHEST /SC ONCE /TN "StreamVaultStart" ' +
-      '/TR "schtasks.exe /Run /TN StreamVault" ' +
-      '/ST ' + GetDateTimeString('hh:nn:ss', ':', ':') + ' /DELAY 0000:30',
+    // Try again in case first attempt failed
+    Exec('schtasks.exe', '/Run /TN "StreamVault"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
     SetStep(6, 8, 'Adding firewall rule...', 'Opening port 7000');
