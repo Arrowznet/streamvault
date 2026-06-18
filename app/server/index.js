@@ -854,7 +854,7 @@ async function startDashTranscode(item, seekSec = 0) {
   const dashEncoderArgs = encoder === "h264_amf" ? [] : [...extraArgs];
 
   const videoArgs = canCopyVideo
-    ? ["-c:v", "copy"]
+    ? ["-c:v", "copy", "-bsf:v", "h264_mp4toannexb"]
     : ["-vf", "format=yuv420p", "-c:v", encoder, ...dashEncoderArgs, "-b:v", "4000k"];
 
   const args = [
@@ -869,7 +869,7 @@ async function startDashTranscode(item, seekSec = 0) {
     "-c:a", "aac", "-ac", "2", "-b:a", "128k",
     "-async", "1",
     "-af", "aresample=async=1000",
-    "-force_key_frames", "expr:gte(t,n_forced*2)",
+    ...(canCopyVideo ? [] : ["-force_key_frames", "expr:gte(t,n_forced*2)"]),
     "-f", "dash",
     "-seg_duration", "4",
     "-use_template", "1",
@@ -1345,10 +1345,30 @@ app.get("/api/media/:id/subtitle-file", async (req, res) => {
     }
     // Handle BOM
     if (srt.charCodeAt(0) === 0xFEFF) srt = srt.slice(1);
-    const vtt = "WEBVTT\n\n" + srt
+    
+    // Parse offset (seekSec) for time-shifting subtitles
+    const offsetSec = parseFloat(req.query.offset || "0");
+    
+    // Helper to shift a time string by offset
+    function shiftTime(h, m, s, ms, offset) {
+      let totalMs = (parseInt(h)*3600 + parseInt(m)*60 + parseInt(s))*1000 + parseInt(ms) - Math.round(offset*1000);
+      if (totalMs < 0) totalMs = 0;
+      const oh = Math.floor(totalMs/3600000); totalMs %= 3600000;
+      const om = Math.floor(totalMs/60000); totalMs %= 60000;
+      const os = Math.floor(totalMs/1000);
+      const oms = totalMs % 1000;
+      return String(oh).padStart(2,'0')+':'+String(om).padStart(2,'0')+':'+String(os).padStart(2,'0')+'.'+String(oms).padStart(3,'0');
+    }
+
+    let vttBody = srt
       .replace(/\r\n/g, "\n")
       .replace(/\r/g, "\n")
-      .replace(/(\d+)\n(\d{2}:\d{2}:\d{2}),(\d{3}) --> (\d{2}:\d{2}:\d{2}),(\d{3})/g, "$2.$3 --> $4.$5");
+      .replace(/(\d+)\n(\d{2}):(\d{2}):(\d{2}),(\d{3}) --> (\d{2}):(\d{2}):(\d{2}),(\d{3})/g, function(match, idx, h1,m1,s1,ms1,h2,m2,s2,ms2) {
+        if (offsetSec === 0) return `${shiftTime(h1,m1,s1,ms1,0)} --> ${shiftTime(h2,m2,s2,ms2,0)}`;
+        return `${shiftTime(h1,m1,s1,ms1,offsetSec)} --> ${shiftTime(h2,m2,s2,ms2,offsetSec)}`;
+      });
+
+    const vtt = "WEBVTT\n\n" + vttBody;
     res.setHeader("Content-Type", "text/vtt; charset=utf-8");
     res.send(vtt);
   } catch(e) {

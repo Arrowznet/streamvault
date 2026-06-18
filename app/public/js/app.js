@@ -682,6 +682,12 @@ async function playItem(id, title) {
         };
         video.addEventListener("timeupdate", _captureFirstCT);
         console.log(`[DASH] ${new Date().toISOString().substring(11,23)} session start, startSec:`, startSec);
+        // Re-activate subtitles on every new DASH session (including after seek)
+        var _subtitleStartSec = startSec;
+        if (currentItemId) setTimeout(function() {
+          console.log("[SUBTITLES] Re-activating after session start, startSec:", _subtitleStartSec);
+          autoLoadSubtitles(currentItemId, _subtitleStartSec);
+        }, 3000);
         const player = dashjs.MediaPlayer().create();
         player.initialize(video, manifest, true);
         player.updateSettings({
@@ -1178,15 +1184,20 @@ async function downloadSubtitle(fileId, mediaId) {
 function activateSubtitle(url, label) {
   var video = document.getElementById("main-video");
   if (!video) { toast("Starta filmen först för att aktivera undertext", "info"); return; }
+  
+  var urlWithOffset = url;
+  
   Array.from(video.querySelectorAll("track")).forEach(function(t) { t.remove(); });
   var track = document.createElement("track");
   track.kind = "subtitles";
   track.label = label || "Undertexter";
   track.srclang = "sv";
-  track.src = url;
+  track.src = urlWithOffset;
   track.default = true;
   video.appendChild(track);
-  if (video.textTracks.length > 0) video.textTracks[0].mode = "showing";
+  setTimeout(function() {
+    if (video.textTracks.length > 0) video.textTracks[0].mode = "showing";
+  }, 500);
   _currentSubtitleTrack = url;
   toast("✓ " + (label || "Undertexter") + " aktiverad!", "success");
   document.getElementById("subtitle-overlay")?.remove();
@@ -1196,14 +1207,23 @@ function toggleSubtitleMenu() {
   if (currentItemId) openSubtitles(currentItemId, document.getElementById("pb-title")?.textContent || "");
 }
 
-async function autoLoadSubtitles(mediaId) {
+async function autoLoadSubtitles(mediaId, offsetSec) {
   try {
     var data = await API.get("/media/" + mediaId + "/subtitles");
     var subs = data.subtitles || [];
     // Swedish first, then English, then anything
-    var sv = subs.find(function(s) { return s.lang === "sv" || s.lang === "swe"; });
-    var sub = sv || subs[0];
+    // Priority: 1) Any SRT file (always Swedish), 2) Embedded SV/SWE/Swedish, 3) Nothing
+    var srtSub = subs.find(function(s) { return s.type === "srt"; });
+    var embeddedSv = subs.find(function(s) { 
+      return s.type === "embedded" && (s.lang === "sv" || s.lang === "swe" || (s.label || "").toLowerCase().includes("swedish")); 
+    });
+    var sub = srtSub || embeddedSv || null;
     if (!sub || !sub.url) return;
+    // Apply offset to URL if provided
+    if (offsetSec && offsetSec > 0 && sub.url.includes("/subtitle-file")) {
+      sub = Object.assign({}, sub);
+      sub.url = sub.url + (sub.url.includes("?") ? "&" : "?") + "offset=" + offsetSec;
+    }
     // Wait for video to be ready before adding track
     var video = document.getElementById("main-video");
     if (!video) return;
