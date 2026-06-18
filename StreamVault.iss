@@ -226,11 +226,15 @@ begin
       '/DELAY 0000:15',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Sleep(3000);
-    // Start StreamVault directly via schtasks
-    Exec('schtasks.exe', '/Run /TN "StreamVault"',
+    // Kill any remaining node processes
+    Exec('taskkill.exe', '/F /IM node.exe',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Sleep(2000);
-    // Try again in case first attempt failed
+    // Start StreamVault via Task Scheduler
+    Exec('schtasks.exe', '/Run /TN "StreamVault"',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Sleep(3000);
+    // Verify it started, try again if not
     Exec('schtasks.exe', '/Run /TN "StreamVault"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
