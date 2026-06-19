@@ -1149,26 +1149,54 @@ async function openSubtitles(mediaId, title) {
   try {
     var data = await API.get("/media/" + mediaId + "/subtitles");
     var subs = data.subtitles || [];
+    contentEl.innerHTML = "";
+
+    // Remove subtitle button
+    var removeRow = document.createElement("div");
+    removeRow.style.cssText = "display:flex;align-items:center;gap:10px;padding:10px;border-radius:8px;margin-bottom:4px";
+    removeRow.innerHTML = "<span style='font-size:18px'>🚫</span><div style='flex:1'><div style='font-size:13px;font-weight:500'>Ingen undertext</div></div>";
+    var removeBtn = document.createElement("button");
+    removeBtn.textContent = "Ta bort";
+    removeBtn.style.cssText = "background:var(--danger,#e53);border:none;color:white;font-size:12px;padding:6px 12px;border-radius:6px;cursor:pointer";
+    removeBtn.onclick = function() { stopSubtitleOverlay(); _currentSubtitleTrack = null; overlay.remove(); toast("Undertext borttagen", "info"); };
+    removeRow.appendChild(removeBtn);
+    contentEl.appendChild(removeRow);
+
     if (!subs.length) {
-      contentEl.innerHTML = "<div style='text-align:center;padding:20px;color:var(--muted);font-size:13px'>Inga undertexter hittade i biblioteket</div>";
-      return;
+      var noSubs = document.createElement("div");
+      noSubs.style.cssText = "text-align:center;padding:12px;color:var(--muted);font-size:13px";
+      noSubs.textContent = "Inga undertexter hittade i biblioteket";
+      contentEl.appendChild(noSubs);
+    } else {
+      var label2 = document.createElement("div");
+      label2.style.cssText = "font-size:12px;color:var(--muted);margin:8px 4px 4px;";
+      label2.textContent = "Tillgängliga undertexter:";
+      contentEl.appendChild(label2);
+      subs.forEach(function(s) {
+        var row = document.createElement("div");
+        row.style.cssText = "display:flex;align-items:center;gap:10px;padding:10px;border-radius:8px";
+        var flag = s.lang === "sv" || s.lang === "swe" ? "🇸🇪" : s.lang === "en" || s.lang === "eng" ? "🇬🇧" : "🌐";
+        row.innerHTML = "<span style='font-size:18px'>" + flag + "</span><div style='flex:1'><div style='font-size:13px;font-weight:500'>" + esc(s.label) + "</div><div style='font-size:11px;color:var(--muted)'>" + (s.type === "embedded" ? "Inbakad" : "SRT-fil") + "</div></div>";
+        if (s.url) {
+          var btn = document.createElement("button");
+          btn.textContent = "Aktivera";
+          btn.style.cssText = "background:var(--accent);border:none;color:white;font-size:12px;padding:6px 12px;border-radius:6px;cursor:pointer";
+          var subUrl = s.url, subLabel = s.label;
+          btn.onclick = function() { 
+            if (s.type === "embedded") {
+              // Use async extraction for embedded subtitles
+              var freshUrl = subUrl + (subUrl.includes("?") ? "&" : "?") + "_t=" + Date.now();
+              activateSubtitle(freshUrl, subLabel);
+            } else {
+              activateSubtitle(subUrl, subLabel);
+            }
+            overlay.remove();
+          };
+          row.appendChild(btn);
+        }
+        contentEl.appendChild(row);
+      });
     }
-    contentEl.innerHTML = "<div style='font-size:12px;color:var(--muted);margin-bottom:8px;padding:0 4px'>Tillgängliga undertexter:</div>";
-    subs.forEach(function(s) {
-      var row = document.createElement("div");
-      row.style.cssText = "display:flex;align-items:center;gap:10px;padding:10px;border-radius:8px";
-      var flag = s.lang === "sv" || s.lang === "swe" ? "🇸🇪" : s.lang === "en" || s.lang === "eng" ? "🇬🇧" : "🌐";
-      row.innerHTML = "<span style='font-size:18px'>" + flag + "</span><div style='flex:1'><div style='font-size:13px;font-weight:500'>" + esc(s.label) + "</div><div style='font-size:11px;color:var(--muted)'>" + (s.type === "embedded" ? "Inbakad" : "SRT-fil") + "</div></div>";
-      if (s.url) {
-        var btn = document.createElement("button");
-        btn.textContent = "Aktivera";
-        btn.style.cssText = "background:var(--accent);border:none;color:white;font-size:12px;padding:6px 12px;border-radius:6px;cursor:pointer";
-        var url = s.url, label = s.label;
-        btn.onclick = function() { activateSubtitle(url, label); };
-        row.appendChild(btn);
-      }
-      contentEl.appendChild(row);
-    });
   } catch(e) {
     contentEl.innerHTML = "<div style='text-align:center;padding:20px;color:var(--danger);font-size:13px'>Fel: " + e.message + "</div>";
   }
