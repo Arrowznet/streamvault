@@ -230,11 +230,12 @@ begin
     Exec('taskkill.exe', '/F /IM node.exe',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Sleep(2000);
-    // Start StreamVault via Task Scheduler
-    Exec('schtasks.exe', '/Run /TN "StreamVault"',
+    // Start StreamVault via PowerShell to ensure proper context
+    Exec('powershell.exe',
+      '-NonInteractive -WindowStyle Hidden -Command "Start-ScheduledTask -TaskName StreamVault"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Sleep(3000);
-    // Verify it started, try again if not
+    // Try schtasks as fallback
     Exec('schtasks.exe', '/Run /TN "StreamVault"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
