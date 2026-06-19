@@ -1313,7 +1313,8 @@ app.get("/api/media/:id/subtitles", requireAuth, async (req, res) => {
           lang,
           index: i,
           label: title || (lang === "swe" || lang === "sv" ? "Svenska" : lang === "eng" || lang === "en" ? "English" : lang),
-          codec: s.codec_name
+          codec: s.codec_name,
+          url: "/api/media/" + item._id + "/subtitle-extract?index=" + i
         });
       });
     } catch {}
@@ -1379,6 +1380,90 @@ app.get("/api/media/:id/subtitle-file", async (req, res) => {
     const vtt = "WEBVTT\n\n" + vttBody;
     res.setHeader("Content-Type", "text/vtt; charset=utf-8");
     res.send(vtt);
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Extract embedded subtitle track to VTT
+app.get("/api/media/:id/subtitle-extract", async (req, res) => {
+  try {
+    const item = await dbFindOne(db.media, { _id: req.params.id });
+    if (!item) return res.status(404).json({ error: "Not found" });
+    const trackIndex = parseInt(req.query.index || "0");
+    const offsetSec = parseFloat(req.query.offset || "0");
+
+    const ffmpegPath = getFfmpegPath();
+    // Use cache dir so we don't re-extract every time
+    const cacheDir = path.join(DATA_DIR, "subtitle-cache");
+    if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir, { recursive: true });
+    const cacheFile = path.join(cacheDir, item._id + "_" + trackIndex + ".srt");
+
+    const tempFile = cacheFile + ".tmp";
+    if (!fs.existsSync(cacheFile)) {
+      // Already extracting?
+      if (fs.existsSync(tempFile)) {
+        return res.status(202).json({ status: "extracting", retryAfter: 3 });
+      }
+      // Start async extraction - write to temp file first, then rename
+      const { execFile } = require("child_process");
+      // Create temp file marker immediately
+      fs.writeFileSync(tempFile, "");
+      execFile(ffmpegPath, [
+        "-y", "-i", item.file_path,
+        "-map", "0:s:" + trackIndex,
+        "-f", "srt", "-c:s", "srt",
+        tempFile
+      ], { timeout: 60000, windowsHide: true }, (err) => {
+        if (err) {
+          console.log("[SUBTITLES] Extraction error:", err.message);
+          try { fs.unlinkSync(tempFile); } catch {}
+        } else {
+          // Rename temp to cache file only when complete
+          fs.renameSync(tempFile, cacheFile);
+          console.log("[SUBTITLES] Cached:", cacheFile);
+        }
+      });
+      return res.status(202).json({ status: "extracting", retryAfter: 3 });
+    }
+    const tmpFile = cacheFile;
+
+    // Convert SRT to VTT with optional offset
+    const rawBuffer = fs.readFileSync(tmpFile);
+    let srt;
+    try {
+      srt = rawBuffer.toString("utf8");
+      if (srt.includes("�") || srt.includes("Ã")) throw new Error("not utf8");
+    } catch {
+      srt = rawBuffer.toString("latin1");
+    }
+    if (srt.charCodeAt(0) === 0xFEFF) srt = srt.slice(1);
+
+    function shiftTime(h, m, s, ms, offset) {
+      let totalMs = (parseInt(h)*3600 + parseInt(m)*60 + parseInt(s))*1000 + parseInt(ms) - Math.round(offset*1000);
+      if (totalMs < 0) totalMs = 0;
+      const oh = Math.floor(totalMs/3600000); totalMs %= 3600000;
+      const om = Math.floor(totalMs/60000); totalMs %= 60000;
+      const os2 = Math.floor(totalMs/1000);
+      const oms = totalMs % 1000;
+      return String(oh).padStart(2,'0')+':'+String(om).padStart(2,'0')+':'+String(os2).padStart(2,'0')+'.'+String(oms).padStart(3,'0');
+    }
+
+    const srtCleaned = srt.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    // Match SRT timestamps with or without preceding cue number
+    const timeRegex = /(\d{2}:\d{2}:\d{2},\d{3}) --> (\d{2}:\d{2}:\d{2},\d{3})/g;
+    const vttBody = srtCleaned
+      .replace(timeRegex, function(match, t1, t2) {
+        // Parse each time
+        var p1 = t1.split(/[:,]/);
+        var p2 = t2.split(/[:,]/);
+        return shiftTime(p1[0],p1[1],p1[2],p1[3],offsetSec) + " --> " + shiftTime(p2[0],p2[1],p2[2],p2[3],offsetSec);
+      });
+    const vtt = "WEBVTT\n\n" + vttBody;
+    res.setHeader("Content-Type", "text/vtt; charset=utf-8");
+    res.send(vtt);
+
+    // File is cached - no cleanup needed
   } catch(e) {
     res.status(500).json({ error: e.message });
   }

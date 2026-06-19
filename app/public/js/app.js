@@ -672,24 +672,55 @@ async function playItem(id, title) {
         window._dashStartSec = startSec;
         window._dashFirstCT = null;
         window._dashSessionStart = Date.now();
+        // Increment session ID to invalidate old retry loops
+        _subtitleSessionId++;
+        stopSubtitleOverlay();
+        // Inject pending subtitle track right after video.load() - before player.initialize
+        if (_pendingSubtitle) {
+          var ps = _pendingSubtitle;
+          setTimeout(function() {
+            Array.from(video.querySelectorAll("track")).forEach(function(t) { t.remove(); });
+            var t2 = document.createElement("track");
+            t2.kind = "subtitles";
+            t2.label = ps.label || "Undertexter";
+            t2.srclang = "sv";
+            t2.src = ps.url;
+            t2.default = true;
+            video.appendChild(t2);
+            setTimeout(function() {
+              if (video.textTracks[0]) video.textTracks[0].mode = "showing";
+            }, 1000);
+          }, 100);
+        }
         // Capture video.currentTime at first playback tick to use as offset baseline
         const _captureFirstCT = () => {
           if (window._dashFirstCT === null && video.currentTime > 0) {
             window._dashFirstCT = video.currentTime;
             console.log(`[DASH] ${new Date().toISOString().substring(11,23)} firstCT captured:`, window._dashFirstCT, "startSec:", startSec);
+            // Now dash.js is fully running - safe to add subtitles
+            if (window._pendingSubtitleLoad) {
+              setTimeout(function() {
+                if (window._pendingSubtitleLoad) {
+                  window._pendingSubtitleLoad();
+                  window._pendingSubtitleLoad = null;
+                }
+              }, 200);
+            }
             video.removeEventListener("timeupdate", _captureFirstCT);
           }
         };
         video.addEventListener("timeupdate", _captureFirstCT);
         console.log(`[DASH] ${new Date().toISOString().substring(11,23)} session start, startSec:`, startSec);
-        // Re-activate subtitles on every new DASH session (including after seek)
-        var _subtitleStartSec = startSec;
-        if (currentItemId) setTimeout(function() {
-          console.log("[SUBTITLES] Re-activating after session start, startSec:", _subtitleStartSec);
-          autoLoadSubtitles(currentItemId, _subtitleStartSec);
-        }, 3000);
         const player = dashjs.MediaPlayer().create();
         player.initialize(video, manifest, true);
+        // Re-activate subtitles after first frame
+        var _subtitleStartSec = startSec;
+        window._pendingSubtitleLoad = function() {
+          if (currentItemId) {
+            console.log("[SUBTITLES] First frame captured, loading subtitles startSec:", _subtitleStartSec);
+            autoLoadSubtitles(currentItemId, _subtitleStartSec);
+          }
+        };
         player.updateSettings({
           streaming: {
             buffer: {
@@ -1042,6 +1073,8 @@ document.addEventListener("fullscreenchange", function() {
 
 // ── SUBTITLES ─────────────────────────────────────────────────────────────────
 var _currentSubtitleTrack = null;
+var _pendingSubtitle = null; // {url, label} to inject on next DASH session
+var _subtitleSessionId = 0; // Increments on each new DASH session
 
 async function openSubtitles(mediaId, title) {
   document.getElementById("subtitle-overlay")?.remove();
@@ -1187,17 +1220,39 @@ function activateSubtitle(url, label) {
   
   var urlWithOffset = url;
   
-  Array.from(video.querySelectorAll("track")).forEach(function(t) { t.remove(); });
-  var track = document.createElement("track");
-  track.kind = "subtitles";
-  track.label = label || "Undertexter";
-  track.srclang = "sv";
-  track.src = urlWithOffset;
-  track.default = true;
-  video.appendChild(track);
-  setTimeout(function() {
-    if (video.textTracks.length > 0) video.textTracks[0].mode = "showing";
-  }, 500);
+  // Fetch VTT and render via custom overlay div (works in ALL browsers including LG TV)
+  var fetchUrl = urlWithOffset + (urlWithOffset.includes("?") ? "&" : "?") + "_t=" + Date.now();
+  console.log("[SUBTITLES] Fetching VTT from:", fetchUrl);
+  fetch(fetchUrl)
+    .then(function(r) { return r.text(); })
+    .then(function(vttText) {
+      console.log("[SUBTITLES] VTT text length:", vttText.length, "first 100 chars:", vttText.substring(0, 100));
+      // Parse VTT cues
+      var cues = [];
+      var lines = vttText.split("\n");
+      var i = 0;
+      while (i < lines.length) {
+        if (lines[i] && lines[i].includes(" --> ")) {
+          var times = lines[i].split(" --> ");
+          var startT = parseVTTTime(times[0].trim());
+          var endT = parseVTTTime(times[1].trim().split(" ")[0]);
+          var cueText = "";
+          i++;
+          while (i < lines.length && lines[i].trim() !== "" && !lines[i].includes(" --> ")) {
+            cueText += (cueText ? "\n" : "") + lines[i];
+            i++;
+          }
+          if (!isNaN(startT) && !isNaN(endT) && cueText) {
+            cues.push({ start: startT, end: endT, text: cueText });
+          }
+        } else {
+          i++;
+        }
+      }
+      console.log("[SUBTITLES] Parsed " + cues.length + " cues, first few:", cues.slice(0,3));
+      startSubtitleOverlay(cues, video);
+    })
+    .catch(function(e) { console.log("[SUBTITLES] Fetch error:", e); });
   _currentSubtitleTrack = url;
   toast("✓ " + (label || "Undertexter") + " aktiverad!", "success");
   document.getElementById("subtitle-overlay")?.remove();
@@ -1219,10 +1274,59 @@ async function autoLoadSubtitles(mediaId, offsetSec) {
     });
     var sub = srtSub || embeddedSv || null;
     if (!sub || !sub.url) return;
-    // Apply offset to URL if provided
-    if (offsetSec && offsetSec > 0 && sub.url.includes("/subtitle-file")) {
+    // Apply offset to URL only for SRT files, not embedded (embedded have absolute times)
+    if (offsetSec && offsetSec > 0 && sub.url && sub.type !== "embedded") {
       sub = Object.assign({}, sub);
       sub.url = sub.url + (sub.url.includes("?") ? "&" : "?") + "offset=" + offsetSec;
+    }
+    // For embedded subtitles, check if extraction is ready (may need retries)
+    if (sub.type === "embedded") {
+      // Embedded subtitles have absolute times - never apply offset
+      var subUrl = sub.url.split("?")[0] + "?index=" + sub.index;
+      var subLabel = sub.label;
+      // Store as pending - will be injected on next DASH session reset
+      _pendingSubtitle = { url: subUrl, label: subLabel };
+      // Use a global flag to prevent multiple parallel retry loops
+      var retryKey = "sub_retry_" + mediaId;
+      if (window[retryKey]) return; // Already retrying
+      window[retryKey] = true;
+      var maxRetries = 15;
+      var retryCount = 0;
+      var mySessionId = _subtitleSessionId;
+      var checkReady = async function() {
+        // Abort if a new DASH session has started
+        if (_subtitleSessionId !== mySessionId) { window[retryKey] = false; return; }
+        try {
+          // Add cache-buster to avoid browser caching the 202 response
+          var resp = await fetch(subUrl + (subUrl.includes("?") ? "&" : "?") + "_t=" + Date.now());
+          if (resp.status === 202) {
+            retryCount++;
+            if (retryCount < maxRetries) {
+              console.log("[SUBTITLES] Extracting embedded subtitle, retry " + retryCount + "...");
+              setTimeout(checkReady, 3000);
+            } else {
+              window[retryKey] = false;
+            }
+            return;
+          }
+          if (resp.ok) {
+            if (!window[retryKey]) return; // Already handled by another loop
+            console.log("[SUBTITLES] Cache ready, activating!");
+            window[retryKey] = false;
+            // Use a fresh URL with cache-buster
+            var freshUrl = subUrl + (subUrl.includes("?") ? "&" : "?") + "_t=" + Date.now();
+            activateSubtitle(freshUrl, subLabel);
+          } else {
+            console.log("[SUBTITLES] Unexpected status:", resp.status);
+            window[retryKey] = false;
+          }
+        } catch(e) {
+          window[retryKey] = false;
+          console.log("[SUBTITLES] Check error:", e.message, e);
+        }
+      };
+      checkReady();
+      return;
     }
     // Wait for video to be ready before adding track
     var video = document.getElementById("main-video");
@@ -1253,10 +1357,108 @@ async function autoLoadSubtitles(mediaId, offsetSec) {
 }
 
 
+// ── SUBTITLE OVERLAY RENDERER ────────────────────────────────────────────────
+var _subtitleOverlayInterval = null;
+var _subtitleOverlayId = 0; // Unique ID to prevent multiple intervals
+
+function startSubtitleOverlay(cues, video) {
+  // Stop any existing overlay
+  stopSubtitleOverlay();
+  // Disable any native track elements to prevent double subtitles
+  Array.from(video.querySelectorAll("track")).forEach(function(t) { t.remove(); });
+  if (video.textTracks && video.textTracks.length > 0) {
+    Array.from(video.textTracks).forEach(function(tt) { try { tt.mode = "disabled"; } catch(e) {} });
+  }
+  // Increment ID so any lingering callbacks know they're stale
+  _subtitleOverlayId++;
+  var myId = _subtitleOverlayId;
+
+  // Create or reuse overlay div - attach to body and position over video
+  var overlay = document.getElementById("sv-subtitle-overlay");
+  if (!overlay) {
+    overlay = document.createElement("div");
+    overlay.id = "sv-subtitle-overlay";
+    document.body.appendChild(overlay);
+  }
+  overlay.style.display = "block";
+  
+  // Position overlay over the video element
+  var positionOverlay = function() {
+    var rect = video.getBoundingClientRect();
+    overlay.style.cssText = [
+      "position:fixed",
+      "bottom:" + (window.innerHeight - rect.bottom + 60) + "px",
+      "left:" + rect.left + "px",
+      "width:" + rect.width + "px",
+      "text-align:center",
+      "pointer-events:none",
+      "z-index:9999",
+      "padding:0 40px",
+      "display:block"
+    ].join(";");
+  };
+  positionOverlay();
+  // Reposition on window resize
+  window._subtitleOverlayResize = positionOverlay;
+  window.addEventListener("resize", positionOverlay);
+
+  // Poll video currentTime and show correct cue
+  _subtitleOverlayInterval = setInterval(function() {
+    if (myId !== _subtitleOverlayId) { clearInterval(_subtitleOverlayInterval); return; }
+    if (!video || !video.parentNode) { stopSubtitleOverlay(); return; }
+    var ct = (window._dashStartSec || 0) + (video.currentTime || 0);
+    // Adjust for firstCT offset
+    if (window._dashFirstCT) ct = (window._dashStartSec || 0) + Math.max(0, video.currentTime - window._dashFirstCT);
+
+    var activeCue = null;
+    for (var i = 0; i < cues.length; i++) {
+      if (ct >= cues[i].start && ct <= cues[i].end) {
+        activeCue = cues[i];
+        break;
+      }
+    }
+    if (activeCue) {
+      var html = activeCue.text
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+        .replace(/\n/g, "<br>");
+      overlay.innerHTML = "<span class='sv-sub-text'>" + html + "</span>";
+    } else {
+      overlay.innerHTML = "";
+    }
+  }, 100);
+}
+
+function stopSubtitleOverlay() {
+  if (_subtitleOverlayInterval) {
+    clearInterval(_subtitleOverlayInterval);
+    _subtitleOverlayInterval = null;
+  }
+  var overlay = document.getElementById("sv-subtitle-overlay");
+  if (overlay) overlay.innerHTML = "";
+}
+
+function parseVTTTime(timeStr) {
+  // Parse HH:MM:SS.mmm or MM:SS.mmm
+  var parts = timeStr.split(":");
+  var seconds = 0;
+  if (parts.length === 3) {
+    seconds = parseInt(parts[0]) * 3600 + parseInt(parts[1]) * 60 + parseFloat(parts[2]);
+  } else if (parts.length === 2) {
+    seconds = parseInt(parts[0]) * 60 + parseFloat(parts[1]);
+  }
+  return seconds;
+}
+
 function closePlayer() {
+  stopSubtitleOverlay();
+  // Destroy dash.js player first to prevent SourceBuffer errors
+  if (window._dashPlayer) {
+    try { window._dashPlayer.destroy(); } catch {}
+    window._dashPlayer = null;
+  }
   const video = document.getElementById("main-video");
   video?.pause();
-  if (video) video.src = "";
+  if (video) { video.src = ""; video.load(); }
   document.getElementById("player-bar").style.display = "none";
   document.body.style.paddingBottom = "";
   nowPlayingId = null;
