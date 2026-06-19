@@ -35,6 +35,7 @@ try {
   const keys = require("./keys.js");
   if (!config.tmdb_api_key && keys.TMDB_KEY) config.tmdb_api_key = keys.TMDB_KEY;
   if (!config.opensubtitles_api_key && keys.OPENSUBTITLES_KEY) config.opensubtitles_api_key = keys.OPENSUBTITLES_KEY;
+  if (keys.GITHUB_TOKEN && !process.env.GITHUB_TOKEN) process.env.GITHUB_TOKEN = keys.GITHUB_TOKEN;
 } catch {} // keys.js is optional
 
 const db = {
@@ -203,7 +204,10 @@ app.get("/api/updates/check", requireAuth, async (req, res) => {
       https.get({
         hostname: "api.github.com",
         path: "/repos/" + GITHUB_REPO + "/releases/latest",
-        headers: { "User-Agent": "StreamVault/" + STREAMVAULT_VERSION }
+        headers: {
+          "User-Agent": "StreamVault/" + STREAMVAULT_VERSION,
+          ...(process.env.GITHUB_TOKEN ? { "Authorization": "token " + process.env.GITHUB_TOKEN } : {})
+        }
       }, r => {
         let d = ""; r.on("data", c => d += c);
         r.on("end", () => { try { resolve(JSON.parse(d)); } catch { reject(new Error("parse")); } });
