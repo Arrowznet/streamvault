@@ -1,7 +1,6 @@
 name: Build StreamVault Setup
 on:
   push:
-    branches:
     tags:
       - 'v*'
   workflow_dispatch:
