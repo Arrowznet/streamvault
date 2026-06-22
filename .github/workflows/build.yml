@@ -27,7 +27,7 @@ jobs:
         shell: powershell
 
       - name: Download Node.js
-        run: Invoke-WebRequest -Uri "https://nodejs.org/dist/v20.14.0/node-v20.14.0-x64.msi" -OutFile "deps\node-v20.14.0-x64.msi"
+        run: Invoke-WebRequest -Uri "https://nodejs.org/dist/v22.15.0/node-v22.15.0-x64.msi" -OutFile "deps\node-v22.15.0-x64.msi"
         shell: powershell
 
       - name: Download FFmpeg
