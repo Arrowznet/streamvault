@@ -1318,7 +1318,7 @@ async function autoLoadSubtitles(mediaId, offsetSec) {
       var retryKey = "sub_retry_" + mediaId;
       if (window[retryKey]) return; // Already retrying
       window[retryKey] = true;
-      var maxRetries = 15;
+      var maxRetries = 40; // ~120 seconds total (40 × 3s)
       var retryCount = 0;
       var mySessionId = _subtitleSessionId;
       var checkReady = async function() {
@@ -1543,6 +1543,35 @@ async function handleSearch() {
 }
 
 // ── SETTINGS ──────────────────────────────────────────────────────────────────
+var _cacheStatusInterval = null;
+
+function startCacheStatusPolling() {
+  if (_cacheStatusInterval) return; // already polling
+  _cacheStatusInterval = setInterval(async () => {
+    try {
+      const cs = await API.get("/subtitles/cache-status");
+      // Update progress bar
+      const pct = cs.total > 0 ? Math.round((cs.done / cs.total) * 100) : 0;
+      const bar = document.getElementById("subtitle-cache-bar");
+      const label = document.getElementById("subtitle-cache-label");
+      const status = document.getElementById("subtitle-cache-status");
+      const cached = document.getElementById("subtitle-cache-cached");
+      const pct2 = cs.withSwe > 0 ? Math.round((cs.done / cs.withSwe) * 100) : 0;
+      if (bar) bar.style.width = pct2 + "%";
+      if (label) label.textContent = cs.done + " av " + cs.withSwe + " klara";
+      if (status) status.textContent = cs.running ? "⏳ Extraherar undertexter..." : cs.queued > 0 ? "⏳ Väntar i kö..." : "✅ Alla undertexter är redo!";
+      const withSweEl = document.getElementById("subtitle-cache-withswe");
+      if (withSweEl) withSweEl.textContent = cs.withSwe + " filmer med inbyggd text";
+      if (cached) cached.textContent = "💾 " + (cs.done > 0 ? cs.done : cs.cached) + " svenska undertextfiler extraherade och sparade";
+      // Stop polling when done
+      if (!cs.running && cs.queued === 0) {
+        clearInterval(_cacheStatusInterval);
+        _cacheStatusInterval = null;
+      }
+    } catch {}
+  }, 3000);
+}
+
 async function loadSettings() {
   if (currentUser.role !== "admin") {
     document.getElementById("sec-settings").innerHTML = `<div class="empty"><div class="empty-icon">🔒</div><h3>Kräver adminbehörighet</h3></div>`;
@@ -1554,12 +1583,16 @@ async function loadSettings() {
     // Start updating next scan label
     setTimeout(updateNextScanLabel, 500);
     setInterval(updateNextScanLabel, 30000);
-
-    const [cfg, users, libs, scanStatus, updateInfo] = await Promise.all([
+    const [cfg, users, libs, scanStatus, updateInfo, cacheStatus] = await Promise.all([
       API.get("/config"), API.get("/users"), API.get("/libraries"),
-      API.get("/scan/status"), API.get("/updates/check").catch(() => null)
+      API.get("/scan/status"), API.get("/updates/check").catch(() => null),
+      API.get("/subtitles/cache-status").catch(() => null)
     ]);
     const counts = Object.fromEntries((scanStatus.counts || []).map(c => [c.type, c.c]));
+    // Auto-refresh cache status while queue is running
+    if (cacheStatus && (cacheStatus.running || cacheStatus.queued > 0)) {
+      startCacheStatusPolling();
+    }
 
     sec.innerHTML = `<div class="settings-wrap">
       <div class="settings-title">Inställningar</div>
@@ -1588,6 +1621,27 @@ async function loadSettings() {
         </div>
         <div style="font-size:12px;color:var(--muted);margin-top:8px;">👁 Filbevakning aktiv · <span id="next-scan-label">Beräknar...</span></div>
       </div>
+
+      ${cacheStatus && (cacheStatus.total > 0 || cacheStatus.cached > 0) ? `<div class="settings-section" id="subtitle-cache-section">
+        <div class="settings-section-title">Automatiska undertexter</div>
+        <div style="font-size:13px;color:var(--muted);margin-bottom:8px">
+          <div>${cacheStatus.total} filmer hittade</div>
+          <div id="subtitle-cache-withswe">${cacheStatus.withSwe || 0} filmer med inbyggd svensk text</div>
+        </div>
+        <div style="margin-bottom:10px">
+          <div style="font-size:13px;font-weight:500;margin-bottom:6px">
+            <span id="subtitle-cache-status">${cacheStatus.running ? '⏳ Extraherar undertexter...' : cacheStatus.queued > 0 ? '⏳ Väntar i kö...' : '✅ Alla undertexter är redo!'}</span>
+          </div>
+          ${(cacheStatus.running || cacheStatus.queued > 0) ? `
+          <div style="background:var(--card2);border-radius:4px;height:8px;overflow:hidden;margin-bottom:6px">
+            <div id="subtitle-cache-bar" style="height:100%;background:var(--accent);border-radius:4px;animation:pulse 1.5s ease-in-out infinite;width:100%"></div>
+          </div>` : ''}
+          ${cacheStatus.errors > 0 ? `<div style="font-size:11px;color:var(--muted);margin-top:4px">⚠️ ${cacheStatus.errors} filer hoppades över (bildbaserade undertexter stöds ej)</div>` : ''}
+        </div>
+        <div id="subtitle-cache-cached" style="font-size:12px;color:var(--muted)">💾 ${cacheStatus.done > 0 ? cacheStatus.done : cacheStatus.cached} svenska undertextfiler extraherade och sparade</div>
+      </div>` : ''}
+
+      <div class="settings-section">
 
       <div class="settings-section">
         <div class="settings-section-title">Bibliotek</div>

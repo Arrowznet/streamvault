@@ -13,6 +13,14 @@ const rateLimit = require("express-rate-limit");
 const Datastore = require("nedb");
 const { v4: uuidv4 } = require("uuid");
 
+// Subtitle pre-cache queue
+const _subtitleCacheQueue = [];
+let _subtitleCacheRunning = false;
+let _subtitleCacheTotal = 0;   // total films queued
+let _subtitleCacheWithSwe = 0; // films with Swedish subtitles found
+let _subtitleCacheDone = 0;    // films successfully extracted
+let _subtitleCacheErrors = 0;  // films that failed
+
 const DATA_DIR = process.env.STREAMVAULT_DATA
   ? path.join(process.env.STREAMVAULT_DATA, "data")
   : path.join(__dirname, "..", "data");
@@ -374,7 +382,9 @@ async function scanLibraries() {
           const {cleanName,year} = cleanTitle(entry.isDirectory()?entry.name:path.basename(filePath));
           const meta = await getMovieMeta(cleanName,year);
           const stat = fs.statSync(filePath);
-          await dbInsert(db.media,{_id:id,library_id:lib.id,type:"movie",title:cleanName,year:meta?.year||year,file_path:filePath,file_size:stat.size,tmdb_id:meta?.tmdb_id||null,poster_url:meta?.poster_url||null,backdrop_url:meta?.backdrop_url||null,overview:meta?.overview||null,rating:meta?.rating||null,added_at:new Date().toISOString()});
+          const newItem = {_id:id,library_id:lib.id,type:"movie",title:cleanName,year:meta?.year||year,file_path:filePath,file_size:stat.size,tmdb_id:meta?.tmdb_id||null,poster_url:meta?.poster_url||null,backdrop_url:meta?.backdrop_url||null,overview:meta?.overview||null,rating:meta?.rating||null,added_at:new Date().toISOString()};
+          await dbInsert(db.media, newItem);
+          queueSubtitleCache(newItem); // queue Swedish subtitle pre-cache (sequential)
           added++;
         }
       }
@@ -395,6 +405,107 @@ async function scanLibraries() {
     }
   } finally { isScanning=false; }
   console.log(`Scan complete: ${added} new items`);
+}
+
+// Subtitle pre-cache queue - processes one film at a time to avoid CPU contention
+function queueSubtitleCache(item) {
+  _subtitleCacheQueue.push(item);
+  _subtitleCacheTotal++;
+  if (!_subtitleCacheRunning) {
+    _subtitleCacheRunning = true;
+    setTimeout(processSubtitleCacheQueue, 100);
+  }
+}
+
+async function processSubtitleCacheQueue() {
+  while (_subtitleCacheQueue.length > 0) {
+    const item = _subtitleCacheQueue.shift();
+
+    try {
+      await preCacheSubtitles(item);
+    } catch(e) {
+      console.log("[SUBTITLES] Queue error:", e.message);
+    }
+
+    // Small pause between extractions to avoid CPU contention
+    await new Promise(r => setTimeout(r, 2000));
+  }
+  _subtitleCacheRunning = false;
+}
+
+// Pre-cache Swedish subtitles for a media file (runs sequentially via queue)
+function preCacheSubtitles(item) {
+  return new Promise((resolve) => {
+    try {
+      const ffprobePath = getFfmpegPath().replace("ffmpeg.exe", "ffprobe.exe");
+      const { execFile } = require("child_process");
+      execFile(ffprobePath, [
+        "-v", "quiet", "-print_format", "json", "-show_streams",
+        "-select_streams", "s", item.file_path
+      ], { timeout: 30000, windowsHide: true }, (err, stdout) => {
+        if (err) { console.log("[SUBTITLES] ffprobe error for", item.title, ":", err.message?.split("\n")[0]); return resolve(); }
+        try {
+          const data = JSON.parse(stdout);
+          const streams = data.streams || [];
+          if (!streams.length) return resolve();
+          const cacheDir = path.join(DATA_DIR, "subtitle-cache");
+          if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir, { recursive: true });
+
+          // Find Swedish subtitle stream
+          // TODO: when per-user language preference is implemented, use preferred language here
+          const sweStream = streams.find(s => {
+            const lang = (s.tags?.language || "").toLowerCase();
+            const title = (s.tags?.title || "").toLowerCase();
+            return lang === "swe" || lang === "sv" || title.includes("svenska") || title.includes("swedish");
+          });
+          if (!sweStream) return resolve(); // No Swedish subtitle found, skip silently
+          // Use subtitle-relative index for -map 0:s:N
+          const subIdx = streams.indexOf(sweStream);
+          // Use global stream index for cache file naming (consistent with playback extraction)
+          const globalIdx = sweStream.index;
+
+          const cacheFile = path.join(cacheDir, item._id + "_" + subIdx + ".srt");
+          if (fs.existsSync(cacheFile)) return resolve(); // already cached
+          // Use .srt.part extension so FFmpeg recognizes the format
+          const tempFile = cacheFile.replace(".srt", ".part.srt");
+          if (fs.existsSync(tempFile)) {
+            // Remove stale tmp file from previous failed attempt
+            try { fs.unlinkSync(tempFile); } catch {}
+          }
+
+          const ffmpegPathNow = getFfmpegPath();
+          _subtitleCacheWithSwe++;
+          console.log("[SUBTITLES] Pre-caching swe for:", item.title);
+          execFile(ffmpegPathNow, [
+            "-y", "-i", item.file_path,
+            "-map", "0:s:" + subIdx,
+            "-f", "srt", "-c:s", "srt",
+            tempFile
+          ], { timeout: 300000, windowsHide: true }, (err2) => {
+            if (err2) {
+              try { fs.unlinkSync(tempFile); } catch {}
+              // Check if it's a bitmap subtitle (PGS/VOBSUB) - can't convert to SRT
+              const errMsg = err2.message || String(err2);
+              if (errMsg.includes("bitmap to bitmap") || errMsg.includes("only possible from text")) {
+                console.log("[SUBTITLES] Skipping bitmap subtitle for:", item.title, "(PGS/VOBSUB not supported)");
+                _subtitleCacheErrors++;
+              } else {
+                console.log("[SUBTITLES] Pre-cache error for", item.title, ":", errMsg.split("\n")[0]);
+                _subtitleCacheErrors++;
+              }
+            } else {
+              try {
+                fs.renameSync(tempFile, cacheFile);
+                console.log("[SUBTITLES] Pre-cached swe for:", item.title);
+                _subtitleCacheDone++;
+              } catch(e) {}
+            }
+            resolve();
+          });
+        } catch(e) { resolve(); }
+      });
+    } catch(e) { resolve(); }
+  });
 }
 
 async function scanEpisodes(showPath,showId,libId) {
@@ -1418,7 +1529,7 @@ app.get("/api/media/:id/subtitle-extract", async (req, res) => {
         "-map", "0:s:" + trackIndex,
         "-f", "srt", "-c:s", "srt",
         tempFile
-      ], { timeout: 60000, windowsHide: true }, (err) => {
+      ], { timeout: 180000, windowsHide: true }, (err) => {
         if (err) {
           console.log("[SUBTITLES] Extraction error:", err.message);
           try { fs.unlinkSync(tempFile); } catch {}
@@ -1604,6 +1715,23 @@ app.get("/api/search/streaming", requireAuth, async (req, res) => {
 app.post("/api/scan", requireAdmin, (req, res) => {
   res.json({message:"Skanning startad"});
   scanLibraries().catch(console.error);
+});
+
+app.get("/api/subtitles/cache-status", requireAuth, (req, res) => {
+  const cacheDir = path.join(DATA_DIR, "subtitle-cache");
+  let cached = 0;
+  try {
+    cached = fs.readdirSync(cacheDir).filter(f => f.endsWith(".srt") && !f.startsWith("test")).length;
+  } catch {}
+  res.json({
+    total: _subtitleCacheTotal,
+    withSwe: _subtitleCacheWithSwe,
+    done: _subtitleCacheDone,
+    errors: _subtitleCacheErrors,
+    cached: cached,
+    running: _subtitleCacheRunning,
+    queued: _subtitleCacheQueue.length
+  });
 });
 
 app.get("/api/scan/status", requireAuth, async (req, res) => {
