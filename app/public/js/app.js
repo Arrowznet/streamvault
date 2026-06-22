@@ -206,7 +206,7 @@ async function startUpdate(version, downloadUrl, banner) {
 
 
 
-function switchSection(name) {
+async function switchSection(name, extra) {
   document.querySelectorAll(".section").forEach(s => s.classList.remove("active"));
   document.querySelectorAll(".ntab").forEach(b => b.classList.remove("active"));
   document.getElementById("sec-" + name).classList.add("active");
@@ -219,6 +219,7 @@ function switchSection(name) {
   else if (name === "music") loadMusicPage();
   else if (name === "search") loadSearchPage();
   else if (name === "settings") loadSettings();
+
   document.getElementById("userMenu").style.display = "none";
 }
 
@@ -1673,14 +1674,15 @@ async function loadSettings() {
       <div class="settings-section">
         <div class="settings-section-title">Användare</div>
         <div class="user-list">
-          ${users.map(u => `<div class="user-row">
+          ${users.map(u => `<div class="user-row" style="cursor:pointer" onclick="loadUserPage('${u.id}')">
             <div class="user-av">${(u.username || "?")[0].toUpperCase()}</div>
             <div class="user-info">
               <div class="user-name">${esc(u.username)}</div>
               <div class="user-role">Senast inloggad: ${u.last_login ? new Date(u.last_login).toLocaleDateString("sv-SE") : "Aldrig"}</div>
             </div>
             <span class="user-badge ${u.role === "admin" ? "badge-admin" : "badge-user"}">${u.role === "admin" ? "Admin" : "Användare"}</span>
-            ${u.id !== currentUser.id ? `<button class="s-btn danger" onclick="deleteUser('${u.id}')">Ta bort</button>` : ""}
+            <button class="s-btn" onclick="event.stopPropagation();loadUserPage('${u.id}')">Hantera</button>
+            ${u.id !== currentUser.id ? `<button class="s-btn danger" onclick="event.stopPropagation();deleteUser('${u.id}')">Ta bort</button>` : ""}
           </div>`).join("")}
         </div>
         <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
@@ -1764,6 +1766,41 @@ async function addUser() {
   if (!username || !password) { toast("Ange användarnamn och lösenord", "error"); return; }
   try { await API.post("/users", { username, password, role }); toast(`✓ ${username} skapad!`, "success"); loadSettings(); }
   catch (e) { toast(e.message, "error"); }
+}
+
+async function loadUserPage(userId) {
+  const data = await API.get("/users");
+  const users = data.users || data || [];
+  const user = (Array.isArray(users) ? users : []).find(u => u.id === userId);
+  if (!user) return;
+  // Hide all sections and show settings section with user page content
+  document.querySelectorAll(".section").forEach(s => s.classList.remove("active"));
+  const sec = document.getElementById("sec-settings");
+  if (sec) {
+    sec.classList.add("active");
+    renderUserPage(user);
+  }
+}
+
+async function renderUserPage(user) {
+  const main = document.getElementById("sec-settings");
+  main.innerHTML = `
+    <div style="max-width:600px;margin:0 auto;padding:24px">
+      <button class="s-btn" onclick="switchSection('settings')" style="margin-bottom:20px">← Tillbaka</button>
+      <div style="display:flex;align-items:center;gap:16px;margin-bottom:24px">
+        <div class="user-av" style="width:56px;height:56px;font-size:24px">${(user.username||"?")[0].toUpperCase()}</div>
+        <div>
+          <div style="font-size:20px;font-weight:600">${esc(user.username)}</div>
+          <span class="user-badge ${user.role === "admin" ? "badge-admin" : "badge-user"}">${user.role === "admin" ? "Admin" : "Användare"}</span>
+        </div>
+      </div>
+      <div class="settings-section">
+        <div class="settings-section-title">Användarinformation</div>
+        <div style="font-size:13px;color:var(--muted)">Senast inloggad: ${user.last_login ? new Date(user.last_login).toLocaleDateString("sv-SE") : "Aldrig"}</div>
+        <div style="font-size:13px;color:var(--muted);margin-top:4px">Skapad: ${user.created_at ? new Date(user.created_at).toLocaleDateString("sv-SE") : "Okänt"}</div>
+      </div>
+    </div>
+  `;
 }
 
 async function deleteUser(id) {
