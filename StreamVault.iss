@@ -45,7 +45,7 @@ Source: "app\server\*"; DestDir: "{app}\server"; Flags: recursesubdirs createall
 Source: "app\public\*"; DestDir: "{app}\public"; Flags: recursesubdirs createallsubdirs
 Source: "app\package.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "app\setup\setup.html"; DestDir: "{app}\setup"; Flags: ignoreversion
-Source: "deps\node-v20.14.0-x64.msi"; DestDir: "{tmp}"; Flags: deleteafterinstall
+Source: "deps\node-v22.15.0-x64.msi"; DestDir: "{tmp}"; Flags: deleteafterinstall
 Source: "deps\ffmpeg-release-essentials.zip"; DestDir: "{tmp}"; Flags: deleteafterinstall
 Source: "deps\nssm\nssm.exe"; DestDir: "{app}\tools"; Flags: ignoreversion
 Source: "assets\icon.ico"; DestDir: "{app}"; Flags: ignoreversion
@@ -153,7 +153,7 @@ begin
 
     SetStep(0, 8, 'Installing Node.js 20 LTS...', 'This may take 1-2 minutes...');
     Exec('msiexec.exe',
-      '/i "' + ExpandConstant('{tmp}\node-v20.14.0-x64.msi') + '" /qn /norestart ADDLOCAL=ALL',
+      '/i "' + ExpandConstant('{tmp}\node-v22.15.0-x64.msi') + '" /qn /norestart ADDLOCAL=ALL',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Sleep(2000);
 
