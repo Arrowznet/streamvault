@@ -230,13 +230,11 @@ begin
     Exec('taskkill.exe', '/F /IM node.exe',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Sleep(2000);
-    // Start StreamVault via schtasks
-    Exec('schtasks.exe', '/Run /TN "StreamVault"',
-      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    Sleep(5000);
-    // Verify it started, try once more if not
-    Exec('schtasks.exe', '/Run /TN "StreamVault"',
-      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    // Start StreamVault directly via start.ps1
+    Exec('powershell.exe',
+      '-NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "C:\Program Files\StreamVault\start.ps1"',
+      '', SW_HIDE, ewNoWait, ResultCode);
+    Sleep(3000);
 
     SetStep(6, 8, 'Adding firewall rule...', 'Opening port 7000');
     Exec('netsh.exe', 'advfirewall firewall delete rule name="StreamVault"',
