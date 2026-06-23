@@ -56,7 +56,6 @@ Name: "{group}\Uninstall StreamVault"; Filename: "{uninstallexe}"
 Name: "{commondesktop}\StreamVault"; Filename: "{#AppURL}"; IconFilename: "{app}\icon.ico"; Tasks: desktopicon
 
 [Run]
-Filename: "powershell.exe"; Parameters: "-NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\start.ps1"""; Flags: runhidden nowait; Description: "Starting StreamVault server"
 Filename: "{#AppURL}/setup"; Description: "Open StreamVault setup wizard"; Flags: postinstall shellexec skipifsilent
 
 [UninstallRun]
@@ -231,7 +230,7 @@ begin
     Exec('taskkill.exe', '/F /IM node.exe',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Sleep(2000);
-    // Server will be started by [Run] section after install completes
+    // Server will be started by DeinitializeSetup
 
     SetStep(6, 8, 'Adding firewall rule...', 'Opening port 7000');
     Exec('netsh.exe', 'advfirewall firewall delete rule name="StreamVault"',
@@ -260,4 +259,13 @@ begin
     DelTree(ExpandConstant('{commonappdata}\StreamVault'), True, True, True);
   Exec('netsh.exe', 'advfirewall firewall delete rule name="StreamVault"',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+procedure DeinitializeSetup();
+var
+  ResultCode: Integer;
+begin
+  // ShellExec with runas verb runs in user context instead of SYSTEM
+  ShellExec('runas', 'schtasks.exe', '/Run /TN "StreamVault"',
+    '', SW_HIDE, ewNoWait, ResultCode);
 end;
