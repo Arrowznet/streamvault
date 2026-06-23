@@ -1625,10 +1625,10 @@ async function loadSettings() {
 
       ${cacheStatus && (cacheStatus.total > 0 || cacheStatus.cached > 0) ? `<div class="settings-section" id="subtitle-cache-section">
         <div class="settings-section-title">Automatiska undertexter</div>
-        <div style="font-size:13px;color:var(--muted);margin-bottom:8px">
+        ${(cacheStatus.running || cacheStatus.queued > 0 || cacheStatus.total > 0) ? `<div style="font-size:13px;color:var(--muted);margin-bottom:8px">
           <div>${cacheStatus.total} filmer hittade</div>
           <div id="subtitle-cache-withswe">${cacheStatus.withSwe || 0} filmer med inbyggd svensk text</div>
-        </div>
+        </div>` : ''}
         <div style="margin-bottom:10px">
           <div style="font-size:13px;font-weight:500;margin-bottom:6px">
             <span id="subtitle-cache-status">${cacheStatus.running ? '⏳ Extraherar undertexter...' : cacheStatus.queued > 0 ? '⏳ Väntar i kö...' : '✅ Alla undertexter är redo!'}</span>
