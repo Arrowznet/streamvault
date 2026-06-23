@@ -277,7 +277,7 @@ app.post("/api/updates/install", requireAdmin, async (req, res) => {
       console.log("[UPDATE] Download complete, running installer...");
 
       // Run installer silently - /SILENT = silent, /NORESTART = don't restart
-      spawn(tmpFile, ["/SILENT", "/NORESTART"], {
+      spawn(tmpFile, ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"], {
         detached: true,
         stdio: "ignore"
       }).unref();
