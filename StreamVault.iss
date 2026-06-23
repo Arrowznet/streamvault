@@ -56,6 +56,7 @@ Name: "{group}\Uninstall StreamVault"; Filename: "{uninstallexe}"
 Name: "{commondesktop}\StreamVault"; Filename: "{#AppURL}"; IconFilename: "{app}\icon.ico"; Tasks: desktopicon
 
 [Run]
+Filename: "powershell.exe"; Parameters: "-NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\start.ps1"""; Flags: runhidden nowait; Description: "Starting StreamVault server"
 Filename: "{#AppURL}/setup"; Description: "Open StreamVault setup wizard"; Flags: postinstall shellexec skipifsilent
 
 [UninstallRun]
@@ -230,11 +231,7 @@ begin
     Exec('taskkill.exe', '/F /IM node.exe',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Sleep(2000);
-    // Start StreamVault directly via start.ps1
-    Exec('powershell.exe',
-      '-NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "C:\Program Files\StreamVault\start.ps1"',
-      '', SW_HIDE, ewNoWait, ResultCode);
-    Sleep(3000);
+    // Server will be started by [Run] section after install completes
 
     SetStep(6, 8, 'Adding firewall rule...', 'Opening port 7000');
     Exec('netsh.exe', 'advfirewall firewall delete rule name="StreamVault"',
