@@ -1897,8 +1897,8 @@ async function openFolderBrowser(callback) {
       </div>
       <div class="fb-footer">
         <span class="fb-selected-path" id="fb-selected-display">Ingen mapp vald</span>
-        <button class="btn btn-ghost btn-sm" onclick="closeFolderBrowser()">Avbryt</button>
-        <button class="btn btn-primary btn-sm" id="fb-select-btn" onclick="confirmFolderSelection()" disabled>Välj denna mapp</button>
+        <button class="s-btn" onclick="closeFolderBrowser()">Avbryt</button>
+        <button class="s-btn primary" id="fb-select-btn" onclick="confirmFolderSelection()" disabled>Välj denna mapp</button>
       </div>
     </div>`;
   document.body.appendChild(overlay);
