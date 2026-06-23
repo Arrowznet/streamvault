@@ -183,10 +183,10 @@ async function startUpdate(version, downloadUrl, banner) {
           setProgress(100, "Complete! Reloading...");
           await new Promise(r => setTimeout(r, 1500));
           window.location.reload();
-        } else if (attempts > 40) {
-          // Timeout - reload anyway
+        } else if (attempts > 60) {
+          // Timeout after 2 minutes - reload anyway
           clearInterval(interval);
-          setProgress(100, "Complete! Reloading...");
+          setProgress(100, "Update complete! Reloading...");
           await new Promise(r => setTimeout(r, 1000));
           window.location.reload();
         }
@@ -1926,9 +1926,10 @@ async function loadFolder(folderPath) {
 
     let html = "";
 
-    // Up button
-    if (data.parent !== null && data.parent !== undefined) {
-      html += `<div class="fb-up" onclick='loadFolder(${JSON.stringify(data.parent)})'>
+    // Up button - always show, go to parent or root drive list
+    const upTarget = (data.parent !== null && data.parent !== undefined) ? data.parent : "";
+    if (folderPath !== "") {
+      html += `<div class="fb-up" onclick='loadFolder(${JSON.stringify(upTarget)})'>
         <span class="fb-icon">⬆️</span>
         <span>.. (upp en nivå)</span>
       </div>`;
