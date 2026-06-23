@@ -1,7 +1,7 @@
 ; StreamVault v1.0.0 - Inno Setup 6
 
 #define AppName "StreamVault"
-#define AppVersion "1.0.0"
+#define AppVersion "1.1.29"
 #define AppPublisher "StreamVault"
 #define AppURL "http://localhost:7000"
 

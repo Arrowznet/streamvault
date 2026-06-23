@@ -1575,7 +1575,8 @@ function startCacheStatusPolling() {
 
 async function loadSettings() {
   if (currentUser.role !== "admin") {
-    document.getElementById("sec-settings").innerHTML = `<div class="empty"><div class="empty-icon">🔒</div><h3>Kräver adminbehörighet</h3></div>`;
+    // Non-admin users see their own profile page instead
+    renderUserPage(currentUser);
     return;
   }
   const sec = document.getElementById("sec-settings");
@@ -1694,14 +1695,6 @@ async function loadSettings() {
       </div>
 
       <div class="settings-section">
-        <div class="settings-section-title">Byt lösenord</div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap">
-          <input class="s-input" type="password" id="new-own-pass" placeholder="Nytt lösenord"/>
-          <button class="s-btn primary" onclick="changeOwnPassword()">Byt lösenord</button>
-        </div>
-      </div>
-
-      <div class="settings-section">
         <div class="settings-section-title">API-nycklar</div>
         <div class="setting-row">
           <div><div class="setting-label">TMDB API-nyckel</div><div class="setting-desc">Filmaffischer och beskrivningar</div></div>
@@ -1799,8 +1792,29 @@ async function renderUserPage(user) {
         <div style="font-size:13px;color:var(--muted)">Senast inloggad: ${user.last_login ? new Date(user.last_login).toLocaleDateString("sv-SE") : "Aldrig"}</div>
         <div style="font-size:13px;color:var(--muted);margin-top:4px">Skapad: ${user.created_at ? new Date(user.created_at).toLocaleDateString("sv-SE") : "Okänt"}</div>
       </div>
+      <div class="settings-section">
+        <div class="settings-section-title">Byt lösenord</div>
+        <div style="display:flex;flex-direction:column;gap:10px;max-width:320px">
+          <input id="up-new-pw" type="password" placeholder="Nytt lösenord" class="s-input">
+          <input id="up-confirm-pw" type="password" placeholder="Bekräfta lösenord" class="s-input">
+          <button class="s-btn" onclick="changeUserPassword('${user.id}')">Spara lösenord</button>
+        </div>
+      </div>
     </div>
   `;
+}
+
+async function changeUserPassword(userId) {
+  const pw = document.getElementById("up-new-pw").value;
+  const confirm = document.getElementById("up-confirm-pw").value;
+  if (!pw || pw.length < 6) return toast("Lösenordet måste vara minst 6 tecken", "error");
+  if (pw !== confirm) return toast("Lösenorden matchar inte", "error");
+  try {
+    await API.patch("/users/" + userId + "/password", { password: pw });
+    toast("Lösenordet har ändrats!", "success");
+    document.getElementById("up-new-pw").value = "";
+    document.getElementById("up-confirm-pw").value = "";
+  } catch(e) { toast(e.message, "error"); }
 }
 
 async function deleteUser(id) {
