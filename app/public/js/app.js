@@ -167,9 +167,9 @@ async function startUpdate(version, downloadUrl, banner) {
 
     setProgress(60, "Installing...");
     await new Promise(r => setTimeout(r, 3000));
-    setProgress(80, "Restarting server...");
-    await new Promise(r => setTimeout(r, 4000));
-    setProgress(95, "Almost done...");
+    setProgress(80, "Installing update... This may take 1-2 minutes, please wait.");
+    await new Promise(r => setTimeout(r, 2000));
+    setProgress(90, "Waiting for server to restart... Page will reload automatically.");
 
     // Wait for server to restart with NEW version
     var attempts = 0;
