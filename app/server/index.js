@@ -282,6 +282,9 @@ app.post("/api/updates/install", requireAdmin, async (req, res) => {
         stdio: "ignore"
       }).unref();
 
+      // Exit so installer can replace files, Task Scheduler will restart us
+      setTimeout(() => process.exit(0), 1000);
+
     } catch(e) {
       console.log("[UPDATE] Error:", e.message);
     }
