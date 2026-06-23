@@ -11,46 +11,42 @@ jobs:
       - uses: actions/checkout@v4
         env:
           FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
       - name: Install Inno Setup
         run: choco install innosetup --yes --no-progress
         shell: powershell
-
       - name: Run npm install for bundling
         run: |
           cd app
           npm install --production
         shell: powershell
-
       - name: Create deps folder
         run: New-Item -ItemType Directory -Force -Path "deps\nssm"
         shell: powershell
-
       - name: Download Node.js
         run: Invoke-WebRequest -Uri "https://nodejs.org/dist/v22.15.0/node-v22.15.0-x64.msi" -OutFile "deps\node-v22.15.0-x64.msi"
         shell: powershell
-
       - name: Download FFmpeg
         run: Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile "deps\ffmpeg-release-essentials.zip"
         shell: powershell
-
       - name: Download NSSM
         run: |
           choco install nssm --yes --no-progress
           Copy-Item "C:\ProgramData\chocolatey\lib\nssm\tools\nssm.exe" "deps\nssm\nssm.exe"
         shell: powershell
-
+      - name: Sync version from package.json to ISS
+        run: |
+          $version = (Get-Content app/package.json | ConvertFrom-Json).version
+          (Get-Content StreamVault.iss) -replace '#define AppVersion ".*"', "#define AppVersion `"$version`"" | Set-Content StreamVault.iss
+        shell: powershell
       - name: Build installer
         run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" StreamVault.iss'
         shell: powershell
-
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: StreamVault-Setup
           path: Output\StreamVault-Setup.exe
           retention-days: 30
-
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
