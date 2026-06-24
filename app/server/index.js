@@ -282,7 +282,12 @@ app.post("/api/updates/install", requireAdmin, async (req, res) => {
         stdio: "ignore"
       }).unref();
 
-      // Exit so installer can replace files, Task Scheduler will restart us
+      // Schedule a restart via Task Scheduler after installer has had time to finish
+      // We use a separate scheduled task approach - write a restart flag file
+      const restartFlagPath = path.join(DATA_DIR, "pending_restart.flag");
+      fs.writeFileSync(restartFlagPath, new Date().toISOString());
+      
+      // Exit so installer can replace files
       setTimeout(() => process.exit(0), 1000);
 
     } catch(e) {
@@ -335,7 +340,7 @@ const metaCache = new Map();
 function tmdbFetch(endpoint) {
   return new Promise(resolve => {
     if (!config.tmdb_api_key) return resolve(null);
-    https.get(`https://api.themoviedb.org/3${endpoint}&api_key=${config.tmdb_api_key}`, res => {
+    https.get(`https://api.themoviedb.org/3${endpoint}&api_key=${config.tmdb_api_key}&language=en-US`, res => {
       let d=""; res.on("data",c=>d+=c); res.on("end",()=>{ try{resolve(JSON.parse(d))}catch{resolve(null)} });
     }).on("error",()=>resolve(null));
   });
@@ -1588,41 +1593,124 @@ app.get("/api/media/:id/subtitle-extract", async (req, res) => {
 });
 
 // Search OpenSubtitles
+// Calculate OpenSubtitles hash for a file
+async function calcOpenSubtitlesHash(filePath) {
+  return new Promise((resolve, reject) => {
+    const HASH_CHUNK = 65536; // 64KB
+    fs.stat(filePath, (err, stat) => {
+      if (err) return reject(err);
+      const fileSize = stat.size;
+      if (fileSize < HASH_CHUNK * 2) return reject(new Error("File too small"));
+      let hash = BigInt(fileSize);
+      const buf = Buffer.alloc(HASH_CHUNK);
+      const fd = require("fs").openSync(filePath, "r");
+      try {
+        // Read first 64KB
+        fs.readSync(fd, buf, 0, HASH_CHUNK, 0);
+        for (let i = 0; i < HASH_CHUNK; i += 8) {
+          hash = (hash + buf.readBigUInt64LE(i)) & BigInt("0xFFFFFFFFFFFFFFFF");
+        }
+        // Read last 64KB
+        fs.readSync(fd, buf, 0, HASH_CHUNK, fileSize - HASH_CHUNK);
+        for (let i = 0; i < HASH_CHUNK; i += 8) {
+          hash = (hash + buf.readBigUInt64LE(i)) & BigInt("0xFFFFFFFFFFFFFFFF");
+        }
+      } finally {
+        fs.closeSync(fd);
+      }
+      resolve(hash.toString(16).padStart(16, "0"));
+    });
+  });
+}
+
+app.get("/api/tmdb/lookup", requireAuth, async (req, res) => {
+  const { id, type = "movie" } = req.query;
+  if (!id) return res.status(400).json({ error: "Missing id" });
+  if (!config.tmdb_api_key) return res.status(400).json({ error: "No TMDB API key" });
+  try {
+    const endpoint = type === "tv" ? "tv" : "movie";
+    const url = `https://api.themoviedb.org/3/${endpoint}/${id}?api_key=${config.tmdb_api_key}&language=en-US`;
+    const data = await new Promise((resolve, reject) => {
+      https.get(url, r => {
+        let d = ""; r.on("data", c => d += c);
+        r.on("end", () => { try { resolve(JSON.parse(d)); } catch(e) { reject(e); } });
+      }).on("error", reject);
+    });
+    if (data.success === false) return res.status(404).json({ error: "Not found" });
+    const title = data.title || data.name;
+    const year = (data.release_date || data.first_air_date || "").substring(0, 4);
+    const poster = data.poster_path ? "https://image.tmdb.org/t/p/w200" + data.poster_path : null;
+    const backdrop = data.backdrop_path ? "https://image.tmdb.org/t/p/w1280" + data.backdrop_path : null;
+    res.json({ id: data.id, title, year, poster_url: poster, backdrop_url: backdrop, overview: data.overview, rating: data.vote_average });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get("/api/subtitles/search", requireAuth, async (req, res) => {
   try {
-    const { query, lang = "sv", imdb_id } = req.query;
+    const { query, lang = "sv", imdb_id, media_id } = req.query;
     if (!config.opensubtitles_api_key) return res.json({ subtitles: [] });
-    const params = new URLSearchParams({ languages: lang });
-    if (imdb_id) params.set("imdb_id", imdb_id);
-    else if (query) params.set("query", query);
-    const data = await new Promise((resolve, reject) => {
-      function doRequest(url, redirects) {
-        if (redirects > 5) return reject(new Error("Too many redirects"));
-        const parsed = new URL(url);
-        https.get({
-          hostname: parsed.hostname,
-          path: parsed.pathname + parsed.search,
-          headers: {
-            "Api-Key": config.opensubtitles_api_key,
-            "User-Agent": "StreamVault/" + STREAMVAULT_VERSION,
-            "Accept": "application/json"
+
+    async function doOpenSubsRequest(params) {
+      return new Promise((resolve, reject) => {
+        function doRequest(url, redirects) {
+          if (redirects > 5) return reject(new Error("Too many redirects"));
+          const parsed = new URL(url);
+          https.get({
+            hostname: parsed.hostname,
+            path: parsed.pathname + parsed.search,
+            headers: {
+              "Api-Key": config.opensubtitles_api_key,
+              "User-Agent": "StreamVault/" + STREAMVAULT_VERSION,
+              "Accept": "application/json"
+            }
+          }, r => {
+            if (r.statusCode === 301 || r.statusCode === 302) {
+              r.resume();
+              const loc = r.headers.location;
+              const nextUrl = loc.startsWith("http") ? loc : "https://api.opensubtitles.com" + loc;
+              return doRequest(nextUrl, redirects + 1);
+            }
+            let d = ""; r.on("data", c => d += c);
+            r.on("end", () => {
+              try { resolve(JSON.parse(d)); }
+              catch(e) { console.log("[SUBTITLES] Parse error:", d.substring(0, 200)); reject(new Error("parse")); }
+            });
+          }).on("error", reject);
+        }
+        doRequest("https://api.opensubtitles.com/api/v1/subtitles?" + params.toString(), 0);
+      });
+    }
+
+    let data = null;
+
+    // Try hash-based search first if media_id provided
+    if (media_id) {
+      try {
+        const item = await dbFindOne(db.media, { _id: media_id });
+        if (item && item.file_path) {
+          const hash = await calcOpenSubtitlesHash(item.file_path);
+          console.log("[SUBTITLES] Trying hash search:", hash);
+          const hashParams = new URLSearchParams({ languages: lang, moviehash: hash });
+          const hashData = await doOpenSubsRequest(hashParams);
+          if (hashData.data && hashData.data.length > 0) {
+            console.log("[SUBTITLES] Hash search found", hashData.data.length, "results");
+            data = hashData;
           }
-        }, r => {
-          if (r.statusCode === 301 || r.statusCode === 302) {
-            r.resume();
-            const loc = r.headers.location;
-            const nextUrl = loc.startsWith("http") ? loc : "https://api.opensubtitles.com" + loc;
-            return doRequest(nextUrl, redirects + 1);
-          }
-          let d = ""; r.on("data", c => d += c);
-          r.on("end", () => {
-            try { resolve(JSON.parse(d)); }
-            catch(e) { console.log("[SUBTITLES] Parse error:", d.substring(0, 200)); reject(new Error("parse")); }
-          });
-        }).on("error", reject);
+        }
+      } catch(e) {
+        console.log("[SUBTITLES] Hash search failed, falling back to name search:", e.message);
       }
-      doRequest("https://api.opensubtitles.com/api/v1/subtitles?" + params.toString(), 0);
-    });
+    }
+
+    // Fallback to name/imdb search
+    if (!data) {
+      const params = new URLSearchParams({ languages: lang });
+      if (imdb_id) params.set("imdb_id", imdb_id);
+      else if (query) params.set("query", query);
+      data = await doOpenSubsRequest(params);
+    }
     const results = (data.data || []).slice(0, 10).map(s => ({
       id: s.id,
       lang: s.attributes?.language,

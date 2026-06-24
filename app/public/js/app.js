@@ -1210,7 +1210,7 @@ async function searchSubtitles(mediaId) {
   if (!el || !query) return;
   el.innerHTML = "<div style='text-align:center;padding:20px;color:var(--muted)'>⏳ Söker...</div>";
   try {
-    var data = await API.get("/subtitles/search?query=" + encodeURIComponent(query) + "&lang=" + lang);
+    var data = await API.get("/subtitles/search?query=" + encodeURIComponent(query) + "&lang=" + lang + (mediaId ? "&media_id=" + encodeURIComponent(mediaId) : ""));
     var subs = data.subtitles || [];
     if (!subs.length) { el.innerHTML = "<div style='text-align:center;padding:20px;color:var(--muted);font-size:13px'>Inga träffar</div>"; return; }
     el.innerHTML = "";
@@ -2019,10 +2019,15 @@ async function openFixMeta(mediaId, currentTitle, type) {
         <button onclick="document.getElementById('fix-meta-overlay').remove()" style="background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer;">✕</button>
       </div>
       <div style="padding:16px 20px;border-bottom:1px solid var(--border);">
-        <div style="display:flex;gap:8px;">
+        <div style="display:flex;gap:8px;margin-bottom:8px;">
           <input id="fix-search-input" style="flex:1;background:var(--card2);border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:14px;padding:10px 14px;border-radius:8px;outline:none;" 
             type="text" placeholder="Sök efter rätt film..." value="${esc(currentTitle)}"/>
           <button onclick="runFixSearch('${mediaId}','${type}')" style="background:var(--accent);border:none;color:white;font-family:inherit;font-size:14px;font-weight:500;padding:10px 18px;border-radius:8px;cursor:pointer;">Sök</button>
+        </div>
+        <div style="display:flex;gap:8px;">
+          <input id="fix-tmdb-id-input" style="flex:1;background:var(--card2);border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:14px;padding:8px 14px;border-radius:8px;outline:none;" 
+            type="text" placeholder="TMDB-URL eller ID (t.ex. themoviedb.org/movie/123 eller 123)"/>
+          <button onclick="applyTmdbId('${mediaId}','${type}')" style="background:var(--card2);border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:13px;padding:8px 14px;border-radius:8px;cursor:pointer;">Använd ID</button>
         </div>
       </div>
       <div id="fix-search-results" style="flex:1;overflow-y:auto;padding:12px;">
@@ -2034,6 +2039,65 @@ async function openFixMeta(mediaId, currentTitle, type) {
   document.getElementById("fix-search-input").addEventListener("keydown", e => {
     if (e.key === "Enter") runFixSearch(mediaId, type);
   });
+}
+
+async function applyFixedMeta(mediaId, tmdbId, type) {
+  try {
+    // Fetch full TMDB data first
+    const data = await API.get("/tmdb/lookup?id=" + tmdbId + "&type=" + type);
+    if (!data || !data.id) return toast("Kunde inte hämta filminfo", "error");
+    await API.post(`/media/${mediaId}/fix-meta`, {
+      tmdb_id: data.id,
+      title: data.title,
+      year: data.year,
+      overview: data.overview,
+      poster_url: data.poster_url,
+      backdrop_url: data.backdrop_url,
+      rating: data.rating
+    });
+    document.getElementById("fix-meta-overlay")?.remove();
+    toast("✓ Filminformation uppdaterad!", "success");
+    closeDetail();
+    const activeSection = document.querySelector(".ntab.active");
+    if (activeSection) {
+      const sectionName = ["home","movies","tvshows","music","search"][
+        [...document.querySelectorAll(".ntab")].indexOf(activeSection)
+      ];
+      if (sectionName) setTimeout(() => switchSection(sectionName), 100);
+    }
+    setTimeout(() => openDetail(mediaId), 600);
+  } catch(e) { toast(e.message || "Fel vid uppdatering", "error"); }
+}
+
+async function applyTmdbId(mediaId, type) {
+  const raw = document.getElementById("fix-tmdb-id-input").value.trim();
+  if (!raw) return toast("Ange ett TMDB-ID eller URL", "error");
+  // Extract ID from URL or use directly
+  let tmdbId = raw;
+  const urlMatch = raw.match(/themoviedb\.org\/(movie|tv)\/(\d+)/);
+  if (urlMatch) tmdbId = urlMatch[2];
+  else tmdbId = raw.replace(/\D/g, "");
+  if (!tmdbId) return toast("Kunde inte hitta ett giltigt TMDB-ID", "error");
+  const results = document.getElementById("fix-search-results");
+  results.innerHTML = `<div style="text-align:center;padding:32px;color:var(--muted)">⏳ Hämtar info...</div>`;
+  try {
+    const data = await API.get("/tmdb/lookup?id=" + tmdbId + "&type=" + type);
+    if (!data || !data.id) return toast("Hittade ingen film med det ID:t", "error");
+    // Show result and confirm button
+    results.innerHTML = `
+      <div style="display:flex;align-items:center;gap:16px;padding:16px;border-radius:10px;background:var(--card2)">
+        ${data.poster_url ? `<img src="${data.poster_url}" style="width:60px;height:90px;object-fit:cover;border-radius:6px;">` : ''}
+        <div style="flex:1">
+          <div style="font-size:15px;font-weight:600">${esc(data.title)}</div>
+          <div style="font-size:13px;color:var(--muted)">${data.year || ""}</div>
+          <div style="font-size:12px;color:var(--muted);margin-top:4px">TMDB ID: ${data.id}</div>
+        </div>
+        <button onclick="applyFixedMeta('${mediaId}', ${data.id}, '${type}')" 
+          style="background:var(--accent);border:none;color:white;font-family:inherit;font-size:13px;padding:10px 16px;border-radius:8px;cursor:pointer;">
+          ✓ Använd denna
+        </button>
+      </div>`;
+  } catch(e) { toast(e.message || "Fel vid hämtning", "error"); }
 }
 
 async function runFixSearch(mediaId, type) {
