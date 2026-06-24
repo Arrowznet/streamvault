@@ -385,7 +385,7 @@ async function scanLibraries() {
             if (vf) filePath=path.join(fullPath,vf.name);
           }
           if (!filePath) continue;
-          const id = Buffer.from(filePath).toString("base64url").slice(0,64);
+          const id = Buffer.from(filePath).toString("base64url");
           if (await dbFindOne(db.media,{_id:id})) continue;
           const {cleanName,year} = cleanTitle(entry.isDirectory()?entry.name:path.basename(filePath));
           const meta = await getMovieMeta(cleanName,year);
@@ -397,17 +397,22 @@ async function scanLibraries() {
         }
       }
       if (lib.type === "tvshows") {
-        for (const show of fs.readdirSync(lib.path,{withFileTypes:true}).filter(f=>f.isDirectory())) {
+        const shows = fs.readdirSync(lib.path,{withFileTypes:true}).filter(f=>f.isDirectory());
+        console.log(`[SCAN] TV library "${lib.name}": found ${shows.length} show folders`);
+        for (const show of shows) {
           const showPath=path.join(lib.path,show.name);
-          const showId=Buffer.from(showPath).toString("base64url").slice(0,64);
+          const showId=Buffer.from(showPath).toString("base64url");
           if (!await dbFindOne(db.media,{_id:showId})) {
             const {cleanName}=cleanTitle(show.name);
             const meta=await getTVMeta(cleanName);
+            if (!meta) console.log(`[SCAN] No TMDB match for TV show: "${cleanName}"`);
+            else console.log(`[SCAN] Matched TV show: "${cleanName}" → "${meta.title || cleanName}" (TMDB ${meta.tmdb_id})`);
             await dbInsert(db.media,{_id:showId,library_id:lib.id,type:"tvshow",title:cleanName,file_path:showPath,tmdb_id:meta?.tmdb_id||null,poster_url:meta?.poster_url||null,backdrop_url:meta?.backdrop_url||null,overview:meta?.overview||null,rating:meta?.rating||null,added_at:new Date().toISOString()});
             added++;
           }
           await scanEpisodes(showPath,showId,lib.id);
         }
+        console.log(`[SCAN] TV library "${lib.name}": done`);
       }
       if (lib.type === "music") await scanMusic(lib.path,lib.id);
     }
@@ -516,17 +521,83 @@ function preCacheSubtitles(item) {
   });
 }
 
-async function scanEpisodes(showPath,showId,libId) {
+// Fetch TMDB episode info in background after scan
+async function enrichEpisodeMeta(episode) {
+  if (!config.tmdb_api_key) return;
+  const show = await dbFindOne(db.media, { _id: episode.parent_id });
+  if (!show || !show.tmdb_id) {
+    console.log(`[ENRICH] Skipping S${episode.season}E${episode.episode} - no show TMDB ID`);
+    return;
+  }
+  if (episode.season === 0 || episode.episode === 0) return;
+  try {
+    const data = await tmdbFetch(`/tv/${show.tmdb_id}/season/${episode.season}/episode/${episode.episode}?`);
+    if (!data || !data.name) {
+      console.log(`[ENRICH] No data for ${show.title} S${episode.season}E${episode.episode}`);
+      return;
+    }
+    await dbUpdate(db.media, { _id: episode._id }, {
+      $set: {
+        title: data.name,
+        overview: data.overview || null,
+        rating: data.vote_average || null,
+        still_url: data.still_path ? `https://image.tmdb.org/t/p/w300${data.still_path}` : null
+      }
+    });
+    console.log(`[ENRICH] ${show.title} S${episode.season}E${episode.episode} → "${data.name}"`);
+  } catch(e) {
+    console.log(`[ENRICH] Error for ${show.title} S${episode.season}E${episode.episode}:`, e.message);
+  }
+}
+
+// Queue for episode enrichment
+const _episodeEnrichQueue = [];
+let _episodeEnrichRunning = false;
+
+function queueEpisodeEnrich(episode) {
+  _episodeEnrichQueue.push(episode);
+  if (!_episodeEnrichRunning) processEpisodeEnrichQueue();
+}
+
+async function processEpisodeEnrichQueue() {
+  if (_episodeEnrichRunning) return;
+  _episodeEnrichRunning = true;
+  while (_episodeEnrichQueue.length > 0) {
+    const ep = _episodeEnrichQueue.shift();
+    await enrichEpisodeMeta(ep);
+    await new Promise(r => setTimeout(r, 300)); // small delay between API calls
+  }
+  _episodeEnrichRunning = false;
+}
+
+async function scanEpisodes(showPath,showId,libId,depth=0) {
   if (!fs.existsSync(showPath)) return;
+  let newEpisodes = 0;
+  let skipped = 0;
   for (const entry of fs.readdirSync(showPath,{withFileTypes:true})) {
     const fullPath=path.join(showPath,entry.name);
-    if (entry.isDirectory()) { await scanEpisodes(fullPath,showId,libId); continue; }
+    if (entry.isDirectory()) {
+      if (depth === 0) console.log(`[SCAN] Scanning season folder: "${entry.name}"`);
+      await scanEpisodes(fullPath,showId,libId,depth+1);
+      continue;
+    }
     if (!VIDEO_EXT.has(path.extname(entry.name).toLowerCase())) continue;
-    const id=Buffer.from(fullPath).toString("base64url").slice(0,64);
-    if (await dbFindOne(db.media,{_id:id})) continue;
-    const em=entry.name.match(/[Ss](\d+)[Ee](\d+)/);
-    await dbInsert(db.media,{_id:id,library_id:libId,type:"episode",title:path.parse(entry.name).name,file_path:fullPath,file_size:fs.statSync(fullPath).size,parent_id:showId,season:em?parseInt(em[1]):0,episode:em?parseInt(em[2]):0,added_at:new Date().toISOString()});
+    const id=Buffer.from(fullPath).toString("base64url");
+    if (await dbFindOne(db.media,{_id:id})) { skipped++; continue; }
+    // Try multiple naming conventions - order matters, most specific first!
+    const em = entry.name.match(/[Ss](\d+)[\s._-]?[Ee](\d+)/) ||   // S01E01, S01 E01, S01-E01
+               entry.name.match(/[Ss](\d+)[xX](\d+)/) ||              // S01x01
+               entry.name.match(/(?<![\d])(\d+)[xX](\d+)(?![\d])/) || // 1x01, 2x01
+               entry.name.match(/\.([1-9])(\d{2})\.|[-_\s]([1-9])(\d{2})[-_\s.]/); // .301. or -301-
+    if (!em) console.log(`[SCAN] Warning: could not detect season/episode from "${entry.name}"`);
+    const emSeason = em ? parseInt(em[1] || em[3]) : 0;
+    const emEpisode = em ? parseInt(em[2] || em[4]) : 0;
+    const newEp = {_id:id,library_id:libId,type:"episode",title:path.parse(entry.name).name,file_path:fullPath,file_size:fs.statSync(fullPath).size,parent_id:showId,season:emSeason,episode:emEpisode,added_at:new Date().toISOString()};
+    await dbInsert(db.media, newEp);
+    queueEpisodeEnrich(newEp); // fetch episode title from TMDB in background
+    newEpisodes++;
   }
+  if (depth === 0 && newEpisodes > 0) console.log(`[SCAN] Added ${newEpisodes} new episodes from "${path.basename(showPath)}"`);
 }
 
 async function scanMusic(dir,libId,depth=0) {
@@ -535,7 +606,7 @@ async function scanMusic(dir,libId,depth=0) {
     const fullPath=path.join(dir,entry.name);
     if (entry.isDirectory()) { await scanMusic(fullPath,libId,depth+1); continue; }
     if (!AUDIO_EXT.has(path.extname(entry.name).toLowerCase())) continue;
-    const id=Buffer.from(fullPath).toString("base64url").slice(0,64);
+    const id=Buffer.from(fullPath).toString("base64url");
     if (await dbFindOne(db.media,{_id:id})) continue;
     await dbInsert(db.media,{_id:id,library_id:libId,type:"music",title:path.parse(entry.name).name,file_path:fullPath,file_size:fs.statSync(fullPath).size,extra_data:JSON.stringify({artist:path.basename(path.dirname(path.dirname(fullPath))),album:path.basename(path.dirname(fullPath))}),added_at:new Date().toISOString()});
   }
