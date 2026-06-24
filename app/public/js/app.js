@@ -236,10 +236,12 @@ async function loadHome() {
   const sec = document.getElementById("sec-home");
   sec.innerHTML = `<div class="spinner-wrap"><div class="spinner"></div></div>`;
   try {
-    const [libs, continueW, recents] = await Promise.all([
+    const [libs, continueW, recentMovies, recentShows, ongoingShows] = await Promise.all([
       API.get("/libraries"),
       API.get("/continue-watching"),
-      API.get("/recently-added")
+      API.get("/recently-added?type=movie"),
+      API.get("/recently-added?type=tvshow"),
+      API.get("/ongoing-shows")
     ]);
     allLibraries = libs;
     let html = "";
@@ -253,15 +255,8 @@ async function loadHome() {
     }
 
     if (continueW?.length) html += buildRow("Fortsätt titta", continueW);
-    if (recents?.length) html += buildRow("Nyligen tillagda filmer", recents.slice(0, 16));
-
-    // Show each library as its own row
-    for (const lib of libs) {
-      const data = await API.get(`/libraries/${lib.id}/contents`);
-      if (data.items.length) {
-        html += buildRow(lib.name, data.items.slice(0, 16));
-      }
-    }
+    if (recentMovies?.length) html += buildRow("Nyligen tillagda filmer", recentMovies.slice(0, 16));
+    if (recentShows?.length) html += buildRow("Nyligen tillagda TV-serier", recentShows.slice(0, 16));
 
     sec.innerHTML = html || `<div class="empty"><div class="empty-icon">🎬</div><h3>Biblioteket är tomt</h3><p>Lägg till mediabibliotek under Inställningar → Bibliotek</p></div>`;
   } catch (e) {
@@ -1551,21 +1546,35 @@ function startCacheStatusPolling() {
   _cacheStatusInterval = setInterval(async () => {
     try {
       const cs = await API.get("/subtitles/cache-status");
-      // Update progress bar
-      const pct = cs.total > 0 ? Math.round((cs.done / cs.total) * 100) : 0;
       const bar = document.getElementById("subtitle-cache-bar");
       const label = document.getElementById("subtitle-cache-label");
       const status = document.getElementById("subtitle-cache-status");
       const cached = document.getElementById("subtitle-cache-cached");
-      const pct2 = cs.withSwe > 0 ? Math.round((cs.done / cs.withSwe) * 100) : 0;
-      if (bar) bar.style.width = pct2 + "%";
+      const withSweEl = document.getElementById("subtitle-cache-withswe");
+      const isDone = !cs.running && cs.queued === 0;
+      const pct = cs.withSwe > 0 ? Math.round((cs.done / cs.withSwe) * 100) : 0;
+      if (bar) bar.style.width = pct + "%";
       if (label) label.textContent = cs.done + " av " + cs.withSwe + " klara";
       if (status) status.textContent = cs.running ? "⏳ Extraherar undertexter..." : cs.queued > 0 ? "⏳ Väntar i kö..." : "✅ Alla undertexter är redo!";
-      const withSweEl = document.getElementById("subtitle-cache-withswe");
-      if (withSweEl) withSweEl.textContent = cs.withSwe + " filmer med inbyggd text";
-      if (cached) cached.textContent = "💾 " + (cs.done > 0 ? cs.done : cs.cached) + " svenska undertextfiler extraherade och sparade";
-      // Stop polling when done
-      if (!cs.running && cs.queued === 0) {
+      const statsEl = document.getElementById("subtitle-cache-stats");
+      if (statsEl) {
+        let html = "";
+        if (cs.total > 0) {
+          html += `<div style="font-weight:500;margin-bottom:2px">Filmer → ${cs.total}</div>`;
+          html += `<div style="padding-left:12px">${cs.withSwe||0} med inbyggd svensk text</div>`;
+          html += `<div style="padding-left:12px">${cs.withEng||0} med inbyggd engelsk text</div>`;
+          html += `<div style="padding-left:12px">${cs.withExtSrt||0} med extern SRT-fil</div>`;
+        }
+        if ((cs.totalEps||0) > 0) {
+          html += `<div style="font-weight:500;margin-top:6px;margin-bottom:2px">Serier → ${cs.totalEps} avsnitt</div>`;
+          html += `<div style="padding-left:12px">${cs.withSweEps||0} med inbyggd svensk text</div>`;
+          html += `<div style="padding-left:12px">${cs.withEngEps||0} med inbyggd engelsk text</div>`;
+          html += `<div style="padding-left:12px">${cs.withExtSrtEps||0} med extern SRT-fil</div>`;
+        }
+        statsEl.innerHTML = html;
+      }
+      if (cached) cached.textContent = "💾 " + cs.cached + " svenska undertextfiler extraherade och sparade";
+      if (isDone) {
         clearInterval(_cacheStatusInterval);
         _cacheStatusInterval = null;
       }
@@ -1576,7 +1585,10 @@ function startCacheStatusPolling() {
 async function loadSettings() {
   if (currentUser.role !== "admin") {
     // Non-admin users see their own profile page instead
-    renderUserPage(currentUser);
+    // Fetch full user data via /me to get last_login etc
+    const fullUser = await API.get("/me");
+    if (fullUser._id && !fullUser.id) fullUser.id = fullUser._id;
+    renderUserPage(fullUser);
     return;
   }
   const sec = document.getElementById("sec-settings");
@@ -1626,9 +1638,15 @@ async function loadSettings() {
 
       ${cacheStatus && (cacheStatus.total > 0 || cacheStatus.cached > 0) ? `<div class="settings-section" id="subtitle-cache-section">
         <div class="settings-section-title">Automatiska undertexter</div>
-        ${(cacheStatus.running || cacheStatus.queued > 0 || cacheStatus.total > 0) ? `<div style="font-size:13px;color:var(--muted);margin-bottom:8px">
-          <div>${cacheStatus.total} filmer hittade</div>
-          <div id="subtitle-cache-withswe">${cacheStatus.withSwe || 0} filmer med inbyggd svensk text</div>
+        ${(cacheStatus.running || cacheStatus.queued > 0 || cacheStatus.total > 0 || cacheStatus.totalEps > 0) ? `<div style="font-size:13px;color:var(--muted);margin-bottom:8px" id="subtitle-cache-stats">
+          ${cacheStatus.total > 0 ? `<div style="font-weight:500;margin-bottom:2px">Filmer → ${cacheStatus.total}</div>
+            <div style="padding-left:12px">${cacheStatus.withSwe || 0} med inbyggd svensk text</div>
+            <div style="padding-left:12px">${cacheStatus.withEng || 0} med inbyggd engelsk text</div>
+            <div style="padding-left:12px">${cacheStatus.withExtSrt || 0} med extern SRT-fil</div>` : ''}
+          ${(cacheStatus.totalEps || 0) > 0 ? `<div style="font-weight:500;margin-top:6px;margin-bottom:2px">Serier → ${cacheStatus.totalShows || "?"} serier hittade med totalt ${cacheStatus.totalEps} avsnitt</div>
+            <div style="padding-left:12px">${cacheStatus.withSweEps || 0} med inbyggd svensk text</div>
+            <div style="padding-left:12px">${cacheStatus.withEngEps || 0} med inbyggd engelsk text</div>
+            <div style="padding-left:12px">${cacheStatus.withExtSrtEps || 0} med extern SRT-fil</div>` : ''}
         </div>` : ''}
         <div style="margin-bottom:10px">
           <div style="font-size:13px;font-weight:500;margin-bottom:6px">
@@ -1762,10 +1780,18 @@ async function addUser() {
 }
 
 async function loadUserPage(userId) {
-  const data = await API.get("/users");
-  const users = data.users || data || [];
-  const user = (Array.isArray(users) ? users : []).find(u => u.id === userId);
+  let user;
+  if (currentUser.role !== "admin" || userId === currentUser.id) {
+    // Use /me endpoint for own profile
+    user = await API.get("/me");
+  } else {
+    const data = await API.get("/users");
+    const users = data.users || data || [];
+    user = (Array.isArray(users) ? users : []).find(u => u.id === userId);
+  }
   if (!user) return;
+  // Normalize _id to id
+  if (user._id && !user.id) user.id = user._id;
   // Hide all sections and show settings section with user page content
   document.querySelectorAll(".section").forEach(s => s.classList.remove("active"));
   const sec = document.getElementById("sec-settings");
@@ -1792,6 +1818,12 @@ async function renderUserPage(user) {
         <div style="font-size:13px;color:var(--muted)">Senast inloggad: ${user.last_login ? new Date(user.last_login).toLocaleDateString("sv-SE") : "Aldrig"}</div>
         <div style="font-size:13px;color:var(--muted);margin-top:4px">Skapad: ${user.created_at ? new Date(user.created_at).toLocaleDateString("sv-SE") : "Okänt"}</div>
       </div>
+      ${currentUser.role === "admin" && user.role !== "admin" ? `<div class="settings-section">
+        <div class="settings-section-title">Biblioteksbehörigheter</div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Välj vilka bibliotek användaren har tillgång till.</div>
+        <div id="lib-access-list" style="display:flex;flex-direction:column;gap:8px"></div>
+        <button class="s-btn primary" style="margin-top:12px" onclick="saveLibraryAccess('${user.id}')">Spara behörigheter</button>
+      </div>` : ""}
       <div class="settings-section">
         <div class="settings-section-title">Byt lösenord</div>
         <div style="display:flex;flex-direction:column;gap:10px;max-width:320px">
@@ -1802,6 +1834,34 @@ async function renderUserPage(user) {
       </div>
     </div>
   `;
+  // Load library access checkboxes
+  if (currentUser.role === "admin" && user.role !== "admin") {
+    loadLibraryAccessUI(user);
+  }
+}
+
+async function loadLibraryAccessUI(user) {
+  const libs = await API.get("/libraries");
+  const token = localStorage.getItem("sv_token") || API._token || "";
+  const allLibs = await fetch("/api/libraries-all", { headers: { Authorization: "Bearer " + token } }).then(r => r.json()).catch(() => libs);
+  const container = document.getElementById("lib-access-list");
+  if (!container) return;
+  const userLibIds = user.library_ids || [];
+  container.innerHTML = (allLibs.length ? allLibs : libs).map(lib => `
+    <div style="display:flex;align-items:center;gap:8px;font-size:13px">
+      <input type="checkbox" value="${lib.id}" ${userLibIds.length === 0 || userLibIds.includes(lib.id) ? "checked" : ""} style="width:16px;height:16px;cursor:pointer">
+      <span>${esc(lib.name)}</span> <span style="color:var(--muted);font-size:11px">(${lib.type})</span>
+    </div>
+  `).join("");
+}
+
+async function saveLibraryAccess(userId) {
+  const checkboxes = document.querySelectorAll("#lib-access-list input[type=checkbox]");
+  const library_ids = [...checkboxes].filter(c => c.checked).map(c => c.value);
+  try {
+    await API.patch("/users/" + userId + "/library-access", { library_ids });
+    toast("Behörigheter sparade!", "success");
+  } catch(e) { toast(e.message, "error"); }
 }
 
 async function changeUserPassword(userId) {

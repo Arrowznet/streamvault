@@ -16,10 +16,16 @@ const { v4: uuidv4 } = require("uuid");
 // Subtitle pre-cache queue
 const _subtitleCacheQueue = [];
 let _subtitleCacheRunning = false;
-let _subtitleCacheTotal = 0;   // total films queued
-let _subtitleCacheWithSwe = 0; // films with Swedish subtitles found
-let _subtitleCacheDone = 0;    // films successfully extracted
-let _subtitleCacheErrors = 0;  // films that failed
+let _subtitleCacheTotal = 0;       // total movies queued
+let _subtitleCacheTotalEps = 0;    // total episodes queued
+let _subtitleCacheWithSwe = 0;        // movies with embedded Swedish
+let _subtitleCacheWithEng = 0;        // movies with embedded English
+let _subtitleCacheWithExtSrt = 0;     // movies with external SRT
+let _subtitleCacheWithSweEps = 0;     // episodes with embedded Swedish
+let _subtitleCacheWithEngEps = 0;     // episodes with embedded English
+let _subtitleCacheWithExtSrtEps = 0;  // episodes with external SRT
+let _subtitleCacheDone = 0;           // items successfully extracted
+let _subtitleCacheErrors = 0;         // items that failed
 
 const DATA_DIR = process.env.STREAMVAULT_DATA
   ? path.join(process.env.STREAMVAULT_DATA, "data")
@@ -79,6 +85,14 @@ function generateTokens(userId) {
     accessToken: jwt.sign({ userId, type: "access" }, config.jwt_secret, { expiresIn: "24h" }),
     refreshToken: jwt.sign({ userId, type: "refresh" }, config.jwt_secret, { expiresIn: "30d" })
   };
+}
+
+function userHasLibraryAccess(user, libraryId) {
+  // Admin always has access to all libraries
+  if (user.role === "admin") return true;
+  // If user has no library restrictions, they have access to all
+  if (!user.library_ids || user.library_ids.length === 0) return true;
+  return user.library_ids.includes(libraryId);
 }
 
 function requireAuth(req, res, next) {
@@ -168,6 +182,15 @@ app.post("/api/auth/logout", requireAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
+app.get("/api/me", requireAuth, async (req, res) => {
+  try {
+    const user = await dbFindOne(db.users, { _id: req.user._id });
+    if (!user) return res.status(404).json({ error: "Användare hittades inte" });
+    const { password, ...safeUser } = user;
+    res.json(safeUser);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get("/api/users", requireAdmin, async (req, res) => {
   const users = await dbFind(db.users, { is_active: true });
   res.json(users.map(u => ({ id: u._id, username: u.username, role: u.role, created_at: u.created_at, last_login: u.last_login })));
@@ -191,6 +214,14 @@ app.delete("/api/users/:id", requireAdmin, async (req, res) => {
   res.json({ ok: true });
 });
 
+app.patch("/api/users/:id/library-access", requireAdmin, async (req, res) => {
+  try {
+    const { library_ids } = req.body;
+    await dbUpdate(db.users, { _id: req.params.id }, { $set: { library_ids: library_ids || [] } });
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 app.patch("/api/users/:id/password", requireAuth, async (req, res) => {
   if (req.params.id !== req.user._id && req.user.role !== "admin") return res.status(403).json({ error: "Ej tillåtet" });
   const { password } = req.body;
@@ -200,7 +231,12 @@ app.patch("/api/users/:id/password", requireAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
-app.get("/api/libraries", requireAuth, (req, res) => res.json(config.libraries || []));
+app.get("/api/libraries", requireAuth, (req, res) => {
+  const libs = config.libraries || [];
+  if (req.user.role === "admin") return res.json(libs);
+  const allowed = libs.filter(l => userHasLibraryAccess(req.user, l.id));
+  res.json(allowed);
+});
 
 app.get("/api/version", (req, res) => {
   res.json({ version: STREAMVAULT_VERSION, repo: GITHUB_REPO });
@@ -296,6 +332,8 @@ app.post("/api/updates/install", requireAdmin, async (req, res) => {
   }, 500);
 });
 
+app.get("/api/libraries-all", requireAdmin, (req, res) => res.json(config.libraries || []));
+
 app.post("/api/libraries", requireAdmin, (req, res) => {
   const { name, type, path: libPath } = req.body;
   if (!name || !type || !libPath) return res.status(400).json({ error: "Saknar fält" });
@@ -361,7 +399,7 @@ async function getTVMeta(title) {
   if(metaCache.has(key)) return metaCache.get(key);
   const data = await tmdbFetch(`/search/tv?query=${encodeURIComponent(title)}`);
   const m = data?.results?.[0];
-  const meta = m ? { tmdb_id:m.id, overview:m.overview||"", poster_url:m.poster_path?`https://image.tmdb.org/t/p/w500${m.poster_path}`:null, backdrop_url:m.backdrop_path?`https://image.tmdb.org/t/p/w1280${m.backdrop_path}`:null, rating:m.vote_average||null } : null;
+  const meta = m ? { tmdb_id:m.id, overview:m.overview||"", poster_url:m.poster_path?`https://image.tmdb.org/t/p/w500${m.poster_path}`:null, backdrop_url:m.backdrop_path?`https://image.tmdb.org/t/p/w1280${m.backdrop_path}`:null, rating:m.vote_average||null, status:m.status||null } : null;
   metaCache.set(key, meta);
   return meta;
 }
@@ -407,7 +445,7 @@ async function scanLibraries() {
             const meta=await getTVMeta(cleanName);
             if (!meta) console.log(`[SCAN] No TMDB match for TV show: "${cleanName}"`);
             else console.log(`[SCAN] Matched TV show: "${cleanName}" → "${meta.title || cleanName}" (TMDB ${meta.tmdb_id})`);
-            await dbInsert(db.media,{_id:showId,library_id:lib.id,type:"tvshow",title:cleanName,file_path:showPath,tmdb_id:meta?.tmdb_id||null,poster_url:meta?.poster_url||null,backdrop_url:meta?.backdrop_url||null,overview:meta?.overview||null,rating:meta?.rating||null,added_at:new Date().toISOString()});
+            await dbInsert(db.media,{_id:showId,library_id:lib.id,type:"tvshow",title:cleanName,file_path:showPath,tmdb_id:meta?.tmdb_id||null,poster_url:meta?.poster_url||null,backdrop_url:meta?.backdrop_url||null,overview:meta?.overview||null,rating:meta?.rating||null,status:meta?.status||null,added_at:new Date().toISOString()});
             added++;
           }
           await scanEpisodes(showPath,showId,lib.id);
@@ -423,7 +461,8 @@ async function scanLibraries() {
 // Subtitle pre-cache queue - processes one film at a time to avoid CPU contention
 function queueSubtitleCache(item) {
   _subtitleCacheQueue.push(item);
-  _subtitleCacheTotal++;
+  if (item.type === "episode") _subtitleCacheTotalEps++;
+  else _subtitleCacheTotal++;
   if (!_subtitleCacheRunning) {
     _subtitleCacheRunning = true;
     setTimeout(processSubtitleCacheQueue, 100);
@@ -471,6 +510,44 @@ function preCacheSubtitles(item) {
             const title = (s.tags?.title || "").toLowerCase();
             return lang === "swe" || lang === "sv" || title.includes("svenska") || title.includes("swedish");
           });
+          // Count English embedded subtitles for statistics
+          const engStream = streams.find(s => {
+            const lang = (s.tags?.language || "").toLowerCase();
+            return lang === "eng" || lang === "en";
+          });
+          if (engStream && !sweStream) {
+            if (item.type === "episode") _subtitleCacheWithEngEps++;
+            else _subtitleCacheWithEng++;
+          }
+          // Check for external SRT file next to the video file
+          const videoDir = path.dirname(item.file_path);
+          const videoBase = path.basename(item.file_path, path.extname(item.file_path));
+          const externalSrt = [
+            path.join(videoDir, videoBase + ".srt"),
+            path.join(videoDir, videoBase + ".sv.srt"),
+            path.join(videoDir, videoBase + ".swe.srt"),
+            path.join(videoDir, videoBase + ".Swedish.srt"),
+          ].find(f => fs.existsSync(f));
+
+          if (!sweStream && externalSrt) {
+            // Use external SRT directly
+            const cacheDir = path.join(DATA_DIR, "subtitle-cache");
+            if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir, { recursive: true });
+            // Use short hash to avoid Windows MAX_PATH issues
+            const shortId = require("crypto").createHash("md5").update(item._id).digest("hex");
+            const cacheFile = path.join(cacheDir, shortId + "_ext.srt");
+            if (!fs.existsSync(cacheFile)) {
+              try {
+                fs.copyFileSync(externalSrt, cacheFile);
+                if (item.type === "episode") _subtitleCacheWithExtSrtEps++;
+                else _subtitleCacheWithExtSrt++;
+                _subtitleCacheDone++;
+                console.log("[SUBTITLES] Found external SRT for:", item.title);
+              } catch(e) {}
+            }
+            return resolve();
+          }
+
           if (!sweStream) return resolve(); // No Swedish subtitle found, skip silently
           // Use subtitle-relative index for -map 0:s:N
           const subIdx = streams.indexOf(sweStream);
@@ -487,7 +564,8 @@ function preCacheSubtitles(item) {
           }
 
           const ffmpegPathNow = getFfmpegPath();
-          _subtitleCacheWithSwe++;
+          if (item.type === "episode") _subtitleCacheWithSweEps++;
+          else _subtitleCacheWithSwe++;
           console.log("[SUBTITLES] Pre-caching swe for:", item.title);
           execFile(ffmpegPathNow, [
             "-y", "-i", item.file_path,
@@ -519,6 +597,50 @@ function preCacheSubtitles(item) {
       });
     } catch(e) { resolve(); }
   });
+}
+
+// Search OpenSubtitles for a subtitle and cache it
+async function fetchOpenSubtitlesForItem(item) {
+  if (!config.opensubtitles_api_key) return;
+  const cacheDir = path.join(DATA_DIR, "subtitle-cache");
+  const cacheFile = path.join(cacheDir, item._id + "_os.srt");
+  if (fs.existsSync(cacheFile)) return; // already cached
+  try {
+    // Try hash first
+    let results = [];
+    try {
+      const hash = await calcOpenSubtitlesHash(item.file_path);
+      const hashData = await new Promise((resolve, reject) => {
+        const params = new URLSearchParams({ languages: "sv", moviehash: hash });
+        https.get({
+          hostname: "api.opensubtitles.com",
+          path: "/api/v1/subtitles?" + params.toString(),
+          headers: { "Api-Key": config.opensubtitles_api_key, "User-Agent": "StreamVault/" + STREAMVAULT_VERSION, "Accept": "application/json" }
+        }, r => { let d=""; r.on("data",c=>d+=c); r.on("end",()=>{ try{resolve(JSON.parse(d))}catch{reject()} }); }).on("error", reject);
+      });
+      if (hashData.data?.length) results = hashData.data;
+    } catch(e) {}
+
+    // Fallback to name search
+    if (!results.length) {
+      const query = item.type === "episode" ?
+        `${item.title} S${String(item.season).padStart(2,"0")}E${String(item.episode).padStart(2,"0")}` :
+        item.title;
+      const nameData = await new Promise((resolve, reject) => {
+        const params = new URLSearchParams({ languages: "sv", query });
+        https.get({
+          hostname: "api.opensubtitles.com",
+          path: "/api/v1/subtitles?" + params.toString(),
+          headers: { "Api-Key": config.opensubtitles_api_key, "User-Agent": "StreamVault/" + STREAMVAULT_VERSION, "Accept": "application/json" }
+        }, r => { let d=""; r.on("data",c=>d+=c); r.on("end",()=>{ try{resolve(JSON.parse(d))}catch{reject()} }); }).on("error", reject);
+      });
+      if (nameData.data?.length) results = nameData.data;
+    }
+
+    if (!results.length) return;
+    // TODO: auto-download best match - for now just log that we found results
+    console.log(`[SUBTITLES] OpenSubtitles found ${results.length} results for: ${item.title}`);
+  } catch(e) {}
 }
 
 // Fetch TMDB episode info in background after scan
@@ -595,6 +717,7 @@ async function scanEpisodes(showPath,showId,libId,depth=0) {
     const newEp = {_id:id,library_id:libId,type:"episode",title:path.parse(entry.name).name,file_path:fullPath,file_size:fs.statSync(fullPath).size,parent_id:showId,season:emSeason,episode:emEpisode,added_at:new Date().toISOString()};
     await dbInsert(db.media, newEp);
     queueEpisodeEnrich(newEp); // fetch episode title from TMDB in background
+    queueSubtitleCache(newEp); // queue subtitle pre-cache (external SRT + OpenSubtitles)
     newEpisodes++;
   }
   if (depth === 0 && newEpisodes > 0) console.log(`[SCAN] Added ${newEpisodes} new episodes from "${path.basename(showPath)}"`);
@@ -619,7 +742,12 @@ app.get("/api/media", requireAuth, async (req, res) => {
     const {type,library_id,search,limit=200} = req.query;
     const query={};
     if (type) query.type=type;
-    if (library_id) query.library_id=library_id;
+    if (library_id) {
+      if (!userHasLibraryAccess(req.user, library_id)) return res.json([]);
+      query.library_id=library_id;
+    } else if (req.user.role !== "admin" && req.user.library_ids?.length > 0) {
+      query.library_id = { $in: req.user.library_ids };
+    }
     if (search) query.title=new RegExp(search,"i");
     const items = await dbFind(db.media,query);
     const sorted = items.sort((a,b)=>(a.title||"").localeCompare(b.title||"")).slice(0,parseInt(limit)).map(safe);
@@ -639,6 +767,7 @@ app.get("/api/libraries/:id/contents", requireAuth, async (req, res) => {
   try {
     const lib=(config.libraries||[]).find(l=>l.id===req.params.id);
     if (!lib) return res.status(404).json({error:"Bibliotek hittades inte"});
+    if (!userHasLibraryAccess(req.user, req.params.id)) return res.json({library:lib,items:[],count:0});
     const items = await dbFind(db.media,{library_id:req.params.id,type:{$in:["movie","tvshow","music"]}});
     res.json({library:lib,items:items.sort((a,b)=>(a.title||"").localeCompare(b.title||"")).map(safe),count:items.length});
   } catch(e){res.status(500).json({error:e.message});}
@@ -683,8 +812,23 @@ app.get("/api/continue-watching", requireAuth, async (req, res) => {
 
 app.get("/api/recently-added", requireAuth, async (req, res) => {
   try {
-    const items = await dbFind(db.media,{type:{$in:["movie","tvshow","music"]}});
+    const { type } = req.query;
+    const query = type ? { type } : { type: { $in: ["movie","tvshow","music"] } };
+    // Filter by user library access
+    if (req.user.role !== "admin" && req.user.library_ids?.length > 0) {
+      query.library_id = { $in: req.user.library_ids };
+    }
+    const items = await dbFind(db.media, query);
     res.json(items.sort((a,b)=>new Date(b.added_at)-new Date(a.added_at)).slice(0,24).map(safe));
+  } catch(e){res.status(500).json({error:e.message});}
+});
+
+app.get("/api/ongoing-shows", requireAuth, async (req, res) => {
+  try {
+    // Shows that are marked as ongoing (no end date or status = ongoing)
+    const shows = await dbFind(db.media, { type: "tvshow" });
+    const ongoing = shows.filter(s => s.status === "ongoing" || s.status === "Returning Series" || (!s.ended && s.tmdb_id));
+    res.json(ongoing.sort((a,b)=>new Date(b.added_at)-new Date(a.added_at)).slice(0,24).map(safe));
   } catch(e){res.status(500).json({error:e.message});}
 });
 
@@ -1879,15 +2023,28 @@ app.post("/api/scan", requireAdmin, (req, res) => {
   scanLibraries().catch(console.error);
 });
 
-app.get("/api/subtitles/cache-status", requireAuth, (req, res) => {
+app.get("/api/subtitles/cache-status", requireAuth, async (req, res) => {
   const cacheDir = path.join(DATA_DIR, "subtitle-cache");
   let cached = 0;
   try {
     cached = fs.readdirSync(cacheDir).filter(f => f.endsWith(".srt") && !f.startsWith("test")).length;
   } catch {}
+  // Count unique shows
+  let totalShows = 0;
+  try {
+    const shows = await dbFind(db.media, { type: "tvshow" });
+    totalShows = shows.length;
+  } catch {}
   res.json({
     total: _subtitleCacheTotal,
+    totalEps: _subtitleCacheTotalEps,
+    totalShows,
     withSwe: _subtitleCacheWithSwe,
+    withEng: _subtitleCacheWithEng,
+    withExtSrt: _subtitleCacheWithExtSrt,
+    withSweEps: _subtitleCacheWithSweEps,
+    withEngEps: _subtitleCacheWithEngEps,
+    withExtSrtEps: _subtitleCacheWithExtSrtEps,
     done: _subtitleCacheDone,
     errors: _subtitleCacheErrors,
     cached: cached,
