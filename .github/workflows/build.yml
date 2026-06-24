@@ -7,10 +7,10 @@ on:
 jobs:
   build:
     runs-on: windows-2025
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
       - uses: actions/checkout@v4
-        env:
-          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       - name: Install Inno Setup
         run: choco install innosetup --yes --no-progress
         shell: powershell
