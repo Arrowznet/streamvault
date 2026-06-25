@@ -6,6 +6,8 @@ const fs = require("fs");
 const path = require("path");
 const cors = require("cors");
 const https = require("https");
+let musicMetadata;
+try { musicMetadata = require("music-metadata"); } catch(e) { console.log("[MUSIC] music-metadata not installed, using folder names"); }
 const http = require("http");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
@@ -723,15 +725,57 @@ async function scanEpisodes(showPath,showId,libId,depth=0) {
   if (depth === 0 && newEpisodes > 0) console.log(`[SCAN] Added ${newEpisodes} new episodes from "${path.basename(showPath)}"`);
 }
 
-async function scanMusic(dir,libId,depth=0) {
-  if (!fs.existsSync(dir)||depth>4) return;
-  for (const entry of fs.readdirSync(dir,{withFileTypes:true})) {
-    const fullPath=path.join(dir,entry.name);
-    if (entry.isDirectory()) { await scanMusic(fullPath,libId,depth+1); continue; }
-    if (!AUDIO_EXT.has(path.extname(entry.name).toLowerCase())) continue;
-    const id=Buffer.from(fullPath).toString("base64url");
-    if (await dbFindOne(db.media,{_id:id})) continue;
-    await dbInsert(db.media,{_id:id,library_id:libId,type:"music",title:path.parse(entry.name).name,file_path:fullPath,file_size:fs.statSync(fullPath).size,extra_data:JSON.stringify({artist:path.basename(path.dirname(path.dirname(fullPath))),album:path.basename(path.dirname(fullPath))}),added_at:new Date().toISOString()});
+async function scanMusic(rootDir, libId) {
+  if (!fs.existsSync(rootDir)) return;
+  // Scan root level folders only
+  for (const entry of fs.readdirSync(rootDir, {withFileTypes: true})) {
+    if (!entry.isDirectory()) continue;
+    const folderPath = path.join(rootDir, entry.name);
+    const folderId = Buffer.from(folderPath).toString("base64url");
+    // Check if this folder has subfolders (= artist with albums) or just files (= standalone album/mix)
+    const subEntries = fs.readdirSync(folderPath, {withFileTypes: true});
+    const hasSubFolders = subEntries.some(e => e.isDirectory());
+    if (hasSubFolders) {
+      // Artist folder with album subfolders
+      if (!await dbFindOne(db.media, {_id: folderId})) {
+        await dbInsert(db.media, {_id: folderId, library_id: libId, type: "music", title: entry.name,
+          file_path: folderPath, file_size: 0, extra_data: JSON.stringify({isArtist: true}), added_at: new Date().toISOString()});
+      }
+      // Scan album subfolders
+      for (const albumEntry of subEntries.filter(e => e.isDirectory())) {
+        const albumPath = path.join(folderPath, albumEntry.name);
+        const albumId = Buffer.from(albumPath).toString("base64url");
+        if (!await dbFindOne(db.media, {_id: albumId})) {
+          await dbInsert(db.media, {_id: albumId, library_id: libId, type: "music", title: albumEntry.name,
+            file_path: albumPath, file_size: 0, extra_data: JSON.stringify({isAlbum: true, artistId: folderId, artistName: entry.name}), added_at: new Date().toISOString()});
+        }
+        // Scan tracks in album
+        for (const trackEntry of fs.readdirSync(albumPath, {withFileTypes: true}).filter(e => e.isFile() && AUDIO_EXT.has(path.extname(e.name).toLowerCase()))) {
+          const trackPath = path.join(albumPath, trackEntry.name);
+          const trackId = Buffer.from(trackPath).toString("base64url");
+          if (await dbFindOne(db.media, {_id: trackId})) continue;
+          let title = path.parse(trackEntry.name).name;
+          if (musicMetadata) { try { const m = await musicMetadata.parseFile(trackPath, {duration:false}); if (m.common.title) title = m.common.title; } catch {} }
+          await dbInsert(db.media, {_id: trackId, library_id: libId, type: "music", title,
+            file_path: trackPath, file_size: fs.statSync(trackPath).size, extra_data: JSON.stringify({isTrack: true, albumId, albumName: albumEntry.name, artistName: entry.name}), added_at: new Date().toISOString()});
+        }
+      }
+    } else {
+      // Standalone folder with just files (mix/compilation)
+      if (!await dbFindOne(db.media, {_id: folderId})) {
+        await dbInsert(db.media, {_id: folderId, library_id: libId, type: "music", title: entry.name,
+          file_path: folderPath, file_size: 0, extra_data: JSON.stringify({isAlbum: true, artistName: entry.name}), added_at: new Date().toISOString()});
+      }
+      for (const trackEntry of subEntries.filter(e => e.isFile() && AUDIO_EXT.has(path.extname(e.name).toLowerCase()))) {
+        const trackPath = path.join(folderPath, trackEntry.name);
+        const trackId = Buffer.from(trackPath).toString("base64url");
+        if (await dbFindOne(db.media, {_id: trackId})) continue;
+        let title = path.parse(trackEntry.name).name;
+        if (musicMetadata) { try { const m = await musicMetadata.parseFile(trackPath, {duration:false}); if (m.common.title) title = m.common.title; } catch {} }
+        await dbInsert(db.media, {_id: trackId, library_id: libId, type: "music", title,
+          file_path: trackPath, file_size: fs.statSync(trackPath).size, extra_data: JSON.stringify({isTrack: true, albumId: folderId, albumName: entry.name, artistName: entry.name}), added_at: new Date().toISOString()});
+      }
+    }
   }
 }
 

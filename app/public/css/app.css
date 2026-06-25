@@ -189,11 +189,11 @@ main#appMain {
 }
 .row-count { font-size: 13px; color: var(--muted); }
 .row-scroll {
-  display: flex; gap: 12px; overflow-x: auto;
-  padding-bottom: 8px; scroll-snap-type: x mandatory;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 12px;
+  padding-bottom: 8px;
 }
-.row-scroll::-webkit-scrollbar { height: 3px; }
-.row-scroll::-webkit-scrollbar-thumb { background: var(--border); }
 
 /* ── MEDIA CARD ── */
 .mcard {

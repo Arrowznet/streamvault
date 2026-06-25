@@ -360,35 +360,141 @@ function filterMediaSection(sectionType) {
 }
 
 // ── MUSIC ─────────────────────────────────────────────────────────────────────
+var _musicData = null; // cache music data
+
 async function loadMusicPage() {
   const sec = document.getElementById("sec-music");
   sec.innerHTML = `<div class="spinner-wrap"><div class="spinner"></div></div>`;
   try {
-    const data = await API.get("/media?type=music&limit=500");
+    const data = await API.get("/media?type=music&limit=2000");
     if (!data.items.length) {
       sec.innerHTML = `<div class="empty"><div class="empty-icon">🎵</div><h3>Ingen musik hittad</h3></div>`;
       return;
     }
+    // Build structure in 3 passes to avoid ordering issues
     const byArtist = {};
+    const albumMap = {};
+
+    // Pass 1: Artists
     data.items.forEach(t => {
       let meta = {};
       try { meta = JSON.parse(t.extra_data || "{}"); } catch {}
-      const artist = meta.artist || "Okänd artist";
-      if (!byArtist[artist]) byArtist[artist] = [];
-      byArtist[artist].push({ ...t, _artist: artist, _album: meta.album || "" });
+      if (meta.isArtist) {
+        byArtist[t.id] = { name: t.title, albums: {}, totalTracks: 0 };
+      }
     });
-    let html = `<div style="padding:28px">`;
-    Object.entries(byArtist).forEach(([artist, tracks]) => {
-      html += `<div class="section" style="margin-bottom:28px">
-        <div class="row-header"><span class="row-title">🎤 ${esc(artist)}</span><span class="row-count">${tracks.length} låtar</span></div>
-        <div>${tracks.map(t => buildMusicRow(t)).join("")}</div>
-      </div>`;
+
+    // Pass 2: Albums
+    data.items.forEach(t => {
+      let meta = {};
+      try { meta = JSON.parse(t.extra_data || "{}"); } catch {}
+      if (meta.isAlbum) {
+        albumMap[t.id] = { name: t.title, artistId: meta.artistId || null, artistName: meta.artistName || t.title, tracks: [] };
+        if (meta.artistId && byArtist[meta.artistId]) {
+          byArtist[meta.artistId].albums[t.id] = albumMap[t.id];
+        } else {
+          // Standalone album/folder
+          byArtist[t.id] = { name: t.title, albums: { [t.id]: albumMap[t.id] }, totalTracks: 0, isStandalone: true };
+        }
+      }
     });
-    html += "</div>";
-    sec.innerHTML = html;
+
+    // Pass 3: Tracks
+    data.items.forEach(t => {
+      let meta = {};
+      try { meta = JSON.parse(t.extra_data || "{}"); } catch {}
+      if (meta.isTrack && meta.albumId && albumMap[meta.albumId]) {
+        albumMap[meta.albumId].tracks.push(t);
+        const artistId = albumMap[meta.albumId].artistId || meta.albumId;
+        if (byArtist[artistId]) byArtist[artistId].totalTracks++;
+      }
+    });
+    _musicData = byArtist;
+    // Render artist cards
+    renderArtistGrid(byArtist);
   } catch (e) {
     sec.innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><h3>${e.message}</h3></div>`;
   }
+}
+
+function renderArtistGrid(byArtist) {
+  const sec = document.getElementById("sec-music");
+  const artists = Object.entries(byArtist).sort((a,b) => a[1].name.localeCompare(b[1].name));
+  let html = `<div style="padding:28px">
+    <div class="row-header" style="margin-bottom:20px"><span class="row-title">Musik</span><span class="row-count">${artists.length} artister / mappar</span></div>
+    <div class="row-scroll">`;
+  artists.forEach(([id, data]) => {
+    const albumCount = Object.keys(data.albums).length;
+    const safeId = encodeURIComponent(id);
+    const icon = data.isStandalone ? "💿" : "🎤";
+    html += `<div class="mcard" onclick="openArtistById('${safeId}')">
+      <div style="position:relative">
+        <div class="mcard-poster-ph"><span>${icon}</span><span>${esc(data.name.slice(0,14))}</span></div>
+        <div class="mcard-overlay"><span class="mcard-play">▶</span></div>
+      </div>
+      <div class="mcard-info">
+        <div class="mcard-title">${esc(data.name)}</div>
+        <div class="mcard-meta">${data.isStandalone ? data.totalTracks + " låtar" : albumCount + " album · " + data.totalTracks + " låtar"}</div>
+      </div>
+    </div>`;
+  });
+  html += `</div></div>`;
+  sec.innerHTML = html;
+}
+
+function openArtistById(safeId) {
+  const id = decodeURIComponent(safeId);
+  if (!_musicData || !_musicData[id]) return;
+  const data = _musicData[id];
+  const sec = document.getElementById("sec-music");
+  // If standalone album - go directly to tracks
+  if (data.isStandalone) {
+    const albumData = Object.values(data.albums)[0];
+    if (albumData) openAlbumById(id, id);
+    return;
+  }
+  const albums = Object.entries(data.albums).sort((a,b) => a[1].name.localeCompare(b[1].name));
+  let html = `<div style="padding:28px">
+    <button class="s-btn" onclick="renderArtistGrid(_musicData)" style="margin-bottom:20px">← Alla artister</button>
+    <div class="row-header" style="margin-bottom:20px">
+      <span class="row-title">🎤 ${esc(data.name)}</span>
+      <span class="row-count">${albums.length} album</span>
+    </div>
+    <div class="row-scroll">`;
+  albums.forEach(([albumId, albumData]) => {
+    const safeArtistId = encodeURIComponent(id);
+    const safeAlbumId = encodeURIComponent(albumId);
+    html += `<div class="mcard" onclick="openAlbumById('${safeArtistId}', '${safeAlbumId}')">
+      <div style="position:relative">
+        <div class="mcard-poster-ph"><span>💿</span><span>${esc(albumData.name.slice(0,14))}</span></div>
+        <div class="mcard-overlay"><span class="mcard-play">▶</span></div>
+      </div>
+      <div class="mcard-info">
+        <div class="mcard-title">${esc(albumData.name)}</div>
+        <div class="mcard-meta">${albumData.tracks.length} låtar</div>
+      </div>
+    </div>`;
+  });
+  html += `</div></div>`;
+  sec.innerHTML = html;
+}
+
+function openAlbumById(safeArtistId, safeAlbumId) {
+  const artistId = decodeURIComponent(safeArtistId);
+  const albumId = decodeURIComponent(safeAlbumId);
+  if (!_musicData?.[artistId]?.albums?.[albumId]) return;
+  const sec = document.getElementById("sec-music");
+  const albumData = _musicData[artistId].albums[albumId];
+  const artistData = _musicData[artistId];
+  let html = `<div style="padding:28px">
+    <button class="s-btn" onclick="openArtistById('${safeArtistId}')" style="margin-bottom:20px">← ${esc(artistData.name)}</button>
+    <div class="row-header" style="margin-bottom:20px">
+      <span class="row-title">💿 ${esc(albumData.name)}</span>
+      <span class="row-count">${albumData.tracks.length} låtar</span>
+    </div>
+    <div>${albumData.tracks.map(t => buildMusicRow(t)).join("")}</div>
+  </div>`;
+  sec.innerHTML = html;
 }
 
 function buildMusicRow(t) {
