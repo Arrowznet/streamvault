@@ -754,10 +754,11 @@ async function scanMusic(rootDir, libId) {
           const trackPath = path.join(albumPath, trackEntry.name);
           const trackId = Buffer.from(trackPath).toString("base64url");
           if (await dbFindOne(db.media, {_id: trackId})) continue;
-          let title = path.parse(trackEntry.name).name;
+          const fileTitle = path.parse(trackEntry.name).name;
+          let title = fileTitle;
           if (musicMetadata) { try { const m = await musicMetadata.parseFile(trackPath, {duration:false}); if (m.common.title) title = m.common.title; } catch {} }
           await dbInsert(db.media, {_id: trackId, library_id: libId, type: "music", title,
-            file_path: trackPath, file_size: fs.statSync(trackPath).size, extra_data: JSON.stringify({isTrack: true, albumId, albumName: albumEntry.name, artistName: entry.name}), added_at: new Date().toISOString()});
+            file_path: trackPath, file_size: fs.statSync(trackPath).size, extra_data: JSON.stringify({isTrack: true, albumId, albumName: albumEntry.name, artistName: entry.name, fileName: fileTitle}), added_at: new Date().toISOString()});
         }
       }
     } else {
@@ -770,10 +771,11 @@ async function scanMusic(rootDir, libId) {
         const trackPath = path.join(folderPath, trackEntry.name);
         const trackId = Buffer.from(trackPath).toString("base64url");
         if (await dbFindOne(db.media, {_id: trackId})) continue;
-        let title = path.parse(trackEntry.name).name;
+        const fileTitle = path.parse(trackEntry.name).name;
+        let title = fileTitle;
         if (musicMetadata) { try { const m = await musicMetadata.parseFile(trackPath, {duration:false}); if (m.common.title) title = m.common.title; } catch {} }
         await dbInsert(db.media, {_id: trackId, library_id: libId, type: "music", title,
-          file_path: trackPath, file_size: fs.statSync(trackPath).size, extra_data: JSON.stringify({isTrack: true, albumId: folderId, albumName: entry.name, artistName: entry.name}), added_at: new Date().toISOString()});
+          file_path: trackPath, file_size: fs.statSync(trackPath).size, extra_data: JSON.stringify({isTrack: true, albumId: folderId, albumName: entry.name, artistName: entry.name, fileName: fileTitle}), added_at: new Date().toISOString()});
       }
     }
   }

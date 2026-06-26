@@ -303,7 +303,7 @@ async function loadMediaSection(sectionType) {
             <span class="row-count">${data.items.length} ${sectionType === "movies" ? "titlar" : "serier"}</span>
           </div>
           <div class="media-grid lib-grid-${lib.id}" data-items='${JSON.stringify(data.items.map(i => ({ id: i.id, title: i.title, year: i.year, rating: i.rating, poster_url: i.poster_url, type: i.type, added_at: i.added_at })))}'>
-            ${data.items.map(i => buildCard(i, sectionType === "tvshows")).join("")}
+            ${data.items.map(i => buildCard(i)).join("")}
           </div>
         </div>`;
     }
@@ -352,7 +352,7 @@ function filterMediaSection(sectionType) {
     if (sort === "title") items.sort((a, b) => a.title.localeCompare(b.title));
     else if (sort === "year") items.sort((a, b) => (b.year || 0) - (a.year || 0));
     else if (sort === "rating") items.sort((a, b) => (b.rating || 0) - (a.rating || 0));
-    grid.innerHTML = items.map(i => buildCard(i, sectionType === "tvshows")).join("") ||
+    grid.innerHTML = items.map(i => buildCard(i)).join("") ||
       `<div style="color:var(--muted);font-size:14px;padding:20px 0">Inga träffar</div>`;
     // Show/hide the group based on results
     group.style.display = q && !items.length ? "none" : "block";
@@ -487,7 +487,7 @@ function openAlbumById(safeArtistId, safeAlbumId) {
   const albumData = _musicData[artistId].albums[albumId];
   const artistData = _musicData[artistId];
   let html = `<div style="padding:28px">
-    <button class="s-btn" onclick="openArtistById('${safeArtistId}')" style="margin-bottom:20px">← ${esc(artistData.name)}</button>
+    <button class="s-btn" onclick="${artistData.isStandalone ? 'renderArtistGrid(_musicData)' : 'openArtistById(\'' + safeArtistId + '\')'}" style="margin-bottom:20px">← ${artistData.isStandalone ? "Alla artister" : esc(artistData.name)}</button>
     <div class="row-header" style="margin-bottom:20px">
       <span class="row-title">💿 ${esc(albumData.name)}</span>
       <span class="row-count">${albumData.tracks.length} låtar</span>
@@ -499,10 +499,13 @@ function openAlbumById(safeArtistId, safeAlbumId) {
 
 function buildMusicRow(t) {
   const playing = nowPlayingId === t.id;
-  return `<div class="music-track${playing ? " now-playing" : ""}" onclick='playMusic("${t.id}","${esc(t.title)}","${esc(t._artist)}")'>
+  let meta = {};
+  try { meta = JSON.parse(t.extra_data || "{}"); } catch {}
+  // Use fileName from extra_data, fall back to ID3 title
+  const displayTitle = meta.fileName || t.title || "Okänd låt";
+  return `<div class="music-track${playing ? " now-playing" : ""}" onclick='playMusic("${t.id}","${esc(displayTitle)}","${esc(meta.artistName||"")}")'>
     <span class="mt-icon">${playing ? "🎵" : "♪"}</span>
-    <div class="mt-info"><div class="mt-title">${esc(t.title)}</div><div class="mt-artist">${esc(t._artist)}</div></div>
-    <div class="mt-album">${esc(t._album)}</div>
+    <div class="mt-info"><div class="mt-title">${esc(displayTitle)}</div><div class="mt-artist">${esc(meta.artistName||"")}</div></div>
   </div>`;
 }
 
@@ -532,7 +535,7 @@ function buildRow(title, items) {
   if (!items?.length) return "";
   return `<div class="row-section">
     <div class="row-header"><span class="row-title">${esc(title)}</span><span class="row-count">${items.length}</span></div>
-    <div class="row-scroll">${items.map(i => buildCard(i, i.type === "tvshow")).join("")}</div>
+    <div class="row-scroll">${items.map(i => buildCard(i)).join("")}</div>
   </div>`;
 }
 
