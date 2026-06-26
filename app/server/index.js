@@ -2100,8 +2100,11 @@ app.get("/api/subtitles/cache-status", requireAuth, async (req, res) => {
 });
 
 app.get("/api/scan/status", requireAuth, async (req, res) => {
-  const [movies,tvshows,music] = await Promise.all([dbCount(db.media,{type:"movie"}),dbCount(db.media,{type:"tvshow"}),dbCount(db.media,{type:"music"})]);
-  res.json({scanning:isScanning,counts:[{type:"movie",c:movies},{type:"tvshow",c:tvshows},{type:"music",c:music}]});
+  const allMusic = await dbFind(db.media, {type:"music"});
+  const musicTracks = allMusic.filter(m => { try { return JSON.parse(m.extra_data||"{}").isTrack; } catch { return false; } }).length;
+  const musicAlbums = allMusic.filter(m => { try { return JSON.parse(m.extra_data||"{}").isAlbum; } catch { return false; } }).length;
+  const [movies,tvshows] = await Promise.all([dbCount(db.media,{type:"movie"}),dbCount(db.media,{type:"tvshow"})]);
+  res.json({scanning:isScanning,counts:[{type:"movie",c:movies},{type:"tvshow",c:tvshows},{type:"music",c:musicTracks,albums:musicAlbums}]});
 });
 
 app.get("/api/config", requireAdmin, (req, res) => {

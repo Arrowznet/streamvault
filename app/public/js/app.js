@@ -1712,6 +1712,8 @@ async function loadSettings() {
       API.get("/subtitles/cache-status").catch(() => null)
     ]);
     const counts = Object.fromEntries((scanStatus.counts || []).map(c => [c.type, c.c]));
+    const musicData = (scanStatus.counts || []).find(c => c.type === "music");
+    if (musicData) counts.albums = musicData.albums || 0;
     // Auto-refresh cache status while queue is running
     if (cacheStatus && (cacheStatus.running || cacheStatus.queued > 0)) {
       startCacheStatusPolling();
@@ -1734,8 +1736,8 @@ async function loadSettings() {
             <div style="font-size:12px;color:var(--muted)">Serier</div>
           </div>
           <div style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:14px 20px;text-align:center">
-            <div style="font-size:22px;font-weight:600">${counts.music || 0}</div>
-            <div style="font-size:12px;color:var(--muted)">Låtar</div>
+            <div style="font-size:22px;font-weight:600">${counts.albums || 0}</div>
+            <div style="font-size:12px;color:var(--muted)">Album · ${counts.music || 0} låtar</div>
           </div>
         </div>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
