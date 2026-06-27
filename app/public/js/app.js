@@ -47,33 +47,74 @@ function logout() {
   closePlayer();
 }
 
-function showApp() {
+async function showApp() {
   document.getElementById("login-screen").style.display = "none";
-  document.getElementById("main-app").style.display = "block";
+  document.getElementById("main-app").style.display = "flex";
   document.getElementById("userAvatar").textContent = (currentUser.username || "?")[0].toUpperCase();
   document.getElementById("userName").textContent = currentUser.username;
-
-  // Fix topnav - make logo clickable and remove Hem tab
-  var logo = document.querySelector(".nav-logo");
-  if (logo) {
-    logo.style.cursor = "pointer";
-    logo.onclick = function() { switchSection("home"); };
-  }
-  var navTabs = document.getElementById("navTabs");
-  if (navTabs) {
-    navTabs.innerHTML = [
-      '<button class="ntab active" onclick="switchSection(&quot;movies&quot;)">Filmer</button>',
-      '<button class="ntab" onclick="switchSection(&quot;tvshows&quot;)">Serier</button>',
-      '<button class="ntab" onclick="switchSection(&quot;music&quot;)">Musik</button>',
-      '<button class="ntab" onclick="switchSection(&quot;search&quot;)">Sök</button>'
-    ].join("");
-  }
-
+  loadSidebarLibraries();
   loadHome();
   if (currentUser.role === "admin") checkForUpdates();
 }
 
+async function loadSidebarLibraries() {
+  try {
+    const libs = await API.get("/libraries");
+    allLibraries = libs;
+    const container = document.getElementById("sb-libraries");
+    if (!container) return;
+    const icons = { movies: "🎬", tvshows: "📺", music: "🎵" };
+    container.innerHTML = libs.map(lib => `
+      <div class="sb-item" id="sb-lib-${lib.id}" onclick="switchToLibrary('${lib.id}', '${lib.name.replace(/'/g, "\'")}', '${lib.type}')">
+        <span class="sb-icon">${icons[lib.type] || "📁"}</span>
+        <span>${esc(lib.name)}</span>
+      </div>
+    `).join("");
+  } catch {}
+}
+
+
 // ── UPDATE CHECK ──────────────────────────────────────────────────────────────
+function switchSection(name) {
+  document.querySelectorAll(".section").forEach(s => s.classList.remove("active"));
+  document.querySelectorAll(".sb-item").forEach(b => b.classList.remove("active"));
+  const sec = document.getElementById("sec-" + name);
+  if (sec) sec.classList.add("active");
+  const sbEl = document.getElementById("sb-" + name);
+  if (sbEl) sbEl.classList.add("active");
+  if (name === "home") loadHome();
+  else if (name === "movies") loadMediaSection("movies");
+  else if (name === "tvshows") loadMediaSection("tvshows");
+  else if (name === "music") loadMusicPage();
+  else if (name === "search") loadSearchPage();
+  else if (name === "settings") loadSettings();
+  const userMenu = document.getElementById("userMenu");
+  if (userMenu) userMenu.style.display = "none";
+}
+
+function switchToLibrary(libId, libName, libType) {
+  document.querySelectorAll(".section").forEach(s => s.classList.remove("active"));
+  document.querySelectorAll(".sb-item").forEach(b => b.classList.remove("active"));
+  const sec = document.getElementById("sec-library");
+  if (sec) sec.classList.add("active");
+  const sbEl = document.getElementById("sb-lib-" + libId);
+  if (sbEl) sbEl.classList.add("active");
+  loadLibraryView(libId, libName, libType);
+  const userMenu = document.getElementById("userMenu");
+  if (userMenu) userMenu.style.display = "none";
+}
+
+function toggleUserMenu() {
+  const m = document.getElementById("userMenu");
+  if (m) m.style.display = m.style.display === "none" ? "block" : "none";
+}
+document.addEventListener("click", e => {
+  if (!e.target.closest(".sb-user")) {
+    const m = document.getElementById("userMenu");
+    if (m) m.style.display = "none";
+  }
+});
+
 async function checkForUpdates() {
   try {
     var data = await API.get("/updates/check");
@@ -206,32 +247,54 @@ async function startUpdate(version, downloadUrl, banner) {
 
 
 
-async function switchSection(name, extra) {
-  document.querySelectorAll(".section").forEach(s => s.classList.remove("active"));
-  document.querySelectorAll(".ntab").forEach(b => b.classList.remove("active"));
-  document.getElementById("sec-" + name).classList.add("active");
-  const tabs = ["movies","tvshows","music","search"];
-  const idx = tabs.indexOf(name);
-  if (idx >= 0) document.querySelectorAll(".ntab")[idx]?.classList.add("active");
-  if (name === "home") loadHome();
-  else if (name === "movies") loadMediaSection("movies");
-  else if (name === "tvshows") loadMediaSection("tvshows");
-  else if (name === "music") loadMusicPage();
-  else if (name === "search") loadSearchPage();
-  else if (name === "settings") loadSettings();
-
-  document.getElementById("userMenu").style.display = "none";
+async function loadLibraryView(libId, libName, libType) {
+  const sec = document.getElementById("sec-library");
+  sec.innerHTML = `<div class="spinner-wrap"><div class="spinner"></div></div>`;
+  try {
+    if (libType === "music") {
+      // Music uses its own page
+      document.querySelectorAll(".section").forEach(s => s.classList.remove("active"));
+      document.getElementById("sec-music").classList.add("active");
+      loadMusicPage();
+      return;
+    }
+    const data = await API.get(`/libraries/${libId}/contents`);
+    const items = data.items || [];
+    sec.innerHTML = `
+      <div class="grid-wrap">
+        <div class="filter-bar">
+          <h2 style="font-size:22px;font-weight:700;margin:0;flex:1">${esc(libName)}</h2>
+          <input class="filter-input" type="text" placeholder="Sök i ${esc(libName)}..." id="lib-filter-q" oninput="filterLibraryView()"/>
+          <select class="filter-select" id="lib-filter-sort" onchange="filterLibraryView()">
+            <option value="title">A–Ö</option>
+            <option value="year">År (nyast)</option>
+            <option value="rating">Betyg</option>
+          </select>
+        </div>
+        <div class="media-grid" id="lib-grid">
+          ${items.length ? items.map(i => buildCard(i)).join("") : '<div class="empty"><div class="empty-icon">📭</div><h3>Tomt bibliotek</h3></div>'}
+        </div>
+      </div>`;
+    sec.dataset.items = JSON.stringify(items);
+  } catch(e) {
+    sec.innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><h3>Kunde inte ladda</h3><p>${e.message}</p></div>`;
+  }
 }
 
-function toggleUserMenu() {
-  const m = document.getElementById("userMenu");
-  m.style.display = m.style.display === "none" ? "block" : "none";
+function filterLibraryView() {
+  const sec = document.getElementById("sec-library");
+  const q = (document.getElementById("lib-filter-q")?.value || "").toLowerCase();
+  const sort = document.getElementById("lib-filter-sort")?.value || "title";
+  let items = JSON.parse(sec.dataset.items || "[]");
+  if (q) items = items.filter(m => (m.title||"").toLowerCase().includes(q) || String(m.year||"").includes(q));
+  if (sort === "title") items.sort((a,b) => (a.title||"").localeCompare(b.title||""));
+  else if (sort === "year") items.sort((a,b) => (b.year||0)-(a.year||0));
+  else if (sort === "rating") items.sort((a,b) => (b.rating||0)-(a.rating||0));
+  document.getElementById("lib-grid").innerHTML = items.length
+    ? items.map(i => buildCard(i)).join("")
+    : '<div style="color:var(--muted);font-size:14px;padding:20px 0">Inga träffar</div>';
 }
-document.addEventListener("click", e => {
-  if (!e.target.closest(".nav-user")) document.getElementById("userMenu").style.display = "none";
-});
 
-// ── HOME ──────────────────────────────────────────────────────────────────────
 async function loadHome() {
   const sec = document.getElementById("sec-home");
   sec.innerHTML = `<div class="spinner-wrap"><div class="spinner"></div></div>`;
@@ -558,6 +621,77 @@ function buildCard(item, wide = false) {
 }
 
 // ── DETAIL ────────────────────────────────────────────────────────────────────
+async function openTmdbDetail(tmdbId) {
+  document.querySelectorAll(".section").forEach(s => s.classList.remove("active"));
+  const sec = document.getElementById("sec-detail") || (() => {
+    const s = document.createElement("section");
+    s.id = "sec-detail"; s.className = "section";
+    document.getElementById("appMain").appendChild(s);
+    return s;
+  })();
+  sec.classList.add("active");
+  sec.innerHTML = `<div class="spinner-wrap" style="height:60vh"><div class="spinner"></div></div>`;
+  try {
+    const item = await API.get("/tmdb/movie/" + tmdbId);
+    const runtime = item.runtime ? `${Math.floor(item.runtime/60)}h ${item.runtime%60}m` : "";
+    const genresHtml = (item.genres||[]).map(g => `<span class="detail-genre">${esc(g)}</span>`).join("");
+    const directors = (item.crew||[]).filter(c => c.job === "Director").map(c => esc(c.name)).join(", ");
+    const castHtml = (item.cast||[]).length ? `
+      <div class="detail-section">
+        <h3 class="detail-section-title">Skådespelare</h3>
+        <div class="cast-scroll">
+          ${(item.cast||[]).map(p => `
+            <div class="cast-card" onclick="openPersonDetail(${p.id})">
+              ${p.profile_url ? `<img class="cast-photo" src="${p.profile_url}" alt="" loading="lazy">` : `<div class="cast-photo-ph">👤</div>`}
+              <div class="cast-name">${esc(p.name)}</div>
+              <div class="cast-char">${esc(p.character||"")}</div>
+            </div>`).join("")}
+        </div>
+      </div>` : "";
+    sec.innerHTML = `
+      <div class="detail-page">
+        <div class="detail-hero" ${item.backdrop_url ? `style="background-image:url('${item.backdrop_url}')"` : ""}>
+          <div class="detail-hero-overlay"></div>
+          <button class="detail-back" onclick="closeDetail()">← Tillbaka</button>
+        </div>
+        <div class="detail-content">
+          <div class="detail-main">
+            <div class="detail-poster-col">
+              ${item.poster_url ? `<img class="detail-poster" src="${item.poster_url}" alt="">` : `<div class="detail-poster-ph">🎬</div>`}
+            </div>
+            <div class="detail-info-col">
+              <h1 class="detail-page-title">${esc(item.title)}</h1>
+              <div class="detail-meta-row">
+                ${item.rating ? `<span class="detail-rating">⭐ ${parseFloat(item.rating).toFixed(1)}</span>` : ""}
+                ${item.year ? `<span class="detail-meta-item">${item.year}</span>` : ""}
+                ${runtime ? `<span class="detail-meta-item">${runtime}</span>` : ""}
+                ${directors ? `<span class="detail-meta-item">🎬 ${directors}</span>` : ""}
+              </div>
+              ${genresHtml ? `<div class="detail-genres">${genresHtml}</div>` : ""}
+              ${item.overview ? `<p class="detail-page-overview">${esc(item.overview)}</p>` : ""}
+              <div class="wtw-section">
+                <div class="wtw-title">Var kan du se den?</div>
+                <div class="wtw-providers" id="wtw-tmdb-${tmdbId}"><span style="font-size:13px;color:var(--muted)">Hämtar...</span></div>
+              </div>
+            </div>
+          </div>
+          ${castHtml}
+        </div>
+      </div>`;
+    API.get("/watch-providers/" + tmdbId).then(data => {
+      const el = document.getElementById("wtw-tmdb-" + tmdbId);
+      if (!el) return;
+      const flat = new Set((data.flatrate||[]).map(p => p.provider_name));
+      const providers = [...new Set([...(data.flatrate||[]),...(data.rent||[])].map(p => p.provider_name))];
+      el.innerHTML = providers.length
+        ? providers.map(n => `<span class="wtw-pill ${flat.has(n)?"stream":"rent"}">${esc(n)}</span>`).join("")
+        : `<span style="font-size:13px;color:var(--muted)">Ej tillgänglig på streaming i Sverige</span>`;
+    }).catch(()=>{});
+  } catch(e) {
+    sec.innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><h3>${e.message}</h3></div>`;
+  }
+}
+
 async function openDetailByTmdb(tmdbId) {
   try {
     const libs = await API.get("/libraries");
@@ -570,74 +704,327 @@ async function openDetailByTmdb(tmdbId) {
 }
 
 async function openDetail(id) {
-  const ov = document.getElementById("detail-overlay");
-  ov.style.display = "flex";
-  ov.innerHTML = `<div class="detail-box"><div class="spinner-wrap"><div class="spinner"></div></div></div>`;
+  document.querySelectorAll(".section").forEach(s => s.classList.remove("active"));
+  const sec = document.getElementById("sec-detail") || (() => {
+    const s = document.createElement("section");
+    s.id = "sec-detail"; s.className = "section";
+    document.getElementById("appMain").appendChild(s);
+    return s;
+  })();
+  sec.classList.add("active");
+  sec.dataset.fromId = id;
+  sec.innerHTML = `<div class="spinner-wrap" style="height:60vh"><div class="spinner"></div></div>`;
   try {
-    const [item, progress] = await Promise.all([API.get("/media/" + id), API.get("/media/" + id + "/progress")]);
+    const [item, progress, details] = await Promise.all([
+      API.get("/media/" + id),
+      API.get("/media/" + id + "/progress"),
+      API.get("/media/" + id + "/details").catch(() => ({}))
+    ]);
     const pct = progress?.duration ? Math.round((progress.position / progress.duration) * 100) : 0;
     const playLabel = pct > 5 && pct < 95 ? `▶ Fortsätt (${pct}%)` : "▶ Spela";
+    const runtime = details.runtime ? `${Math.floor(details.runtime/60)}h ${details.runtime%60}m` : "";
+    const genresHtml = (details.genres||[]).map(g => `<span class="detail-genre">${esc(g)}</span>`).join("");
+    const directors = (details.crew||[]).filter(c => c.job === "Director").map(c => esc(c.name)).join(", ");
+    const castHtml = (details.cast||[]).length ? `
+      <div class="detail-section">
+        <h3 class="detail-section-title">Skådespelare</h3>
+        <div class="cast-scroll">
+          ${(details.cast||[]).map(p => `
+            <div class="cast-card" onclick="openPersonDetail(${p.id})">
+              ${p.profile_url ? `<img class="cast-photo" src="${p.profile_url}" alt="" loading="lazy">` : `<div class="cast-photo-ph">👤</div>`}
+              <div class="cast-name">${esc(p.name)}</div>
+              <div class="cast-char">${esc(p.character||"")}</div>
+            </div>`).join("")}
+        </div>
+      </div>` : "";
     let episodesHtml = "";
     if (item.type === "tvshow" && item.episodes?.length) {
-      episodesHtml = `<div style="margin-top:20px"><div class="wtw-title">Avsnitt (${item.episodes.length})</div>
+      episodesHtml = `<div class="detail-section">
+        <h3 class="detail-section-title">Avsnitt (${item.episodes.length})</h3>
         <div class="episode-list">${item.episodes.map(ep => {
           const label = ep.season && ep.episode ? `S${String(ep.season).padStart(2,"0")} E${String(ep.episode).padStart(2,"0")}` : "Avsnitt";
-          return `<div class="ep-item" onclick='playItem("${ep.id}","${esc(item.title)} · ${label}"); closeDetail()'>
-            <span class="ep-num">${label}</span><span class="ep-name">${esc(ep.title || "")}</span><span>▶</span>
+          return `<div class="ep-item" onclick='playItem("${ep.id}","${esc(item.title)} · ${label}")'>
+            <span class="ep-num">${label}</span><span class="ep-name">${esc(ep.title||"")}</span><span>▶</span>
           </div>`;
         }).join("")}</div></div>`;
     }
-    let wtwHtml = "";
-    if (item.tmdb_id && item.type === "movie") {
-      wtwHtml = `<div class="wtw-section"><div class="wtw-title">Var kan du se den?</div>
-        <div class="wtw-providers" id="wtw-${id}"><span style="font-size:13px;color:var(--muted)">Hämtar...</span></div></div>`;
-    }
-    ov.innerHTML = `<div class="detail-box">
-      ${item.backdrop_url ? `<img class="detail-backdrop" src="${item.backdrop_url}" alt=""/>` : `<div class="detail-backdrop-ph">${item.type === "tvshow" ? "📺" : "🎬"}</div>`}
-      <button class="detail-close" onclick="closeDetail()">✕</button>
-      <div class="detail-body">
-        <div class="detail-title">${esc(item.title)}</div>
-        <div class="detail-meta">
-          ${item.rating ? `<span class="detail-rating">⭐ ${parseFloat(item.rating).toFixed(1)}</span>` : ""}
-          ${item.year ? `<span>${item.year}</span>` : ""}
-          ${item.type === "tvshow" ? `<span>${item.episodes?.length || 0} avsnitt</span>` : ""}
+    sec.innerHTML = `
+      <div class="detail-page">
+        <div class="detail-hero" ${item.backdrop_url ? `style="background-image:url('${item.backdrop_url}')"` : ""}>
+          <div class="detail-hero-overlay"></div>
+          <button class="detail-back" onclick="closeDetail()">← Tillbaka</button>
         </div>
-        ${item.overview ? `<div class="detail-overview">${esc(item.overview)}</div>` : ""}
-        <div class="detail-actions">
-          ${item.type !== "tvshow" ? `<button class="btn-play" onclick='playItem("${item.id}","${esc(item.title)}"); closeDetail()'>${playLabel}</button>` : ""}
-          <button class="btn-fav" onclick="toggleFav('${item.id}',this)">♡ Favorit</button>
-          <button class="btn-fav" onclick='openFixMeta("${item.id}","${esc(item.title)}","${item.type === "tvshow" ? "tv" : "movie"}")'>🔍 Fixa info</button>
-          <button class="btn-fav" onclick='openSubtitles("${item.id}","${esc(item.title)}")'>🔤 Undertexter</button>
-          ${progress?.completed
-            ? `<button class="btn-fav" id="watched-btn-${item.id}" onclick="markUnwatched('${item.id}')">↺ Markera som osedd</button>`
-            : `<button class="btn-fav" id="watched-btn-${item.id}" onclick="markWatched('${item.id}', ${Math.floor(progress?.duration||0)})">✓ Markera som sedd</button>`
-          }
+        <div class="detail-content">
+          <div class="detail-main">
+            <div class="detail-poster-col">
+              ${item.poster_url ? `<img class="detail-poster" src="${item.poster_url}" alt="">` : `<div class="detail-poster-ph">${item.type==="tvshow"?"📺":"🎬"}</div>`}
+            </div>
+            <div class="detail-info-col">
+              <h1 class="detail-page-title">${esc(item.title)}</h1>
+              <div class="detail-meta-row">
+                ${item.rating ? `<span class="detail-rating">⭐ ${parseFloat(item.rating).toFixed(1)}</span>` : ""}
+                ${item.year ? `<span class="detail-meta-item">${item.year}</span>` : ""}
+                ${runtime ? `<span class="detail-meta-item">${runtime}</span>` : ""}
+                ${directors ? `<span class="detail-meta-item">🎬 ${directors}</span>` : ""}
+              </div>
+              ${genresHtml ? `<div class="detail-genres">${genresHtml}</div>` : ""}
+              ${item.overview ? `<p class="detail-page-overview">${esc(item.overview)}</p>` : ""}
+              <div class="detail-actions">
+                <button class="btn-play" onclick='playItem("${item.id}","${esc(item.title)}")'>${playLabel}</button>
+                <button class="btn-fav" onclick="toggleFav('${item.id}',this)">♡ Favorit</button>
+                <button class="btn-fav" onclick='openFixMeta("${item.id}","${esc(item.title)}","${item.type==="tvshow"?"tv":"movie"}")'>🔍 Fixa info</button>
+                <button class="btn-fav" onclick='openEditMedia("${item.id}")'>✏ Redigera</button>
+                <button class="btn-fav" onclick='openSubtitles("${item.id}","${esc(item.title)}")'>🔤 Undertexter</button>
+                ${currentUser?.role === "admin" ? `<button class="btn-fav" onclick='openMediaInfo("${item.id}")'>ℹ Filinfo</button>` : ""}
+                ${progress?.completed
+                  ? `<button class="btn-fav" id="watched-btn-${item.id}" onclick="markUnwatched('${item.id}')">↺ Osedd</button>`
+                  : `<button class="btn-fav" id="watched-btn-${item.id}" onclick="markWatched('${item.id}', ${Math.floor(progress?.duration||0)})">✓ Sedd</button>`}
+              </div>
+              <div class="wtw-section">
+                <div class="wtw-title">Var kan du se den?</div>
+                <div class="wtw-providers" id="wtw-${id}">
+                  <span class="wtw-pill stream">✓ ${esc((allLibraries.find(l => l.id === item.library_id)||{}).name || "Ditt bibliotek")}</span>
+                  ${item.tmdb_id && item.type === "movie" ? `<span style="font-size:13px;color:var(--muted)">Hämtar streaming...</span>` : ""}
+                </div>
+              </div>
+            </div>
+          </div>
+          ${castHtml}
+          ${episodesHtml}
         </div>
-        ${wtwHtml}${episodesHtml}
-      </div>
-    </div>`;
+      </div>`;
     if (item.tmdb_id && item.type === "movie") {
       API.get("/watch-providers/" + item.tmdb_id).then(data => {
         const el = document.getElementById("wtw-" + id);
         if (!el) return;
-        const flat = new Set((data.flatrate || []).map(p => p.provider_name));
-        const providers = [...new Set([...(data.flatrate || []), ...(data.rent || [])].map(p => p.provider_name))];
-        // Always show "I ditt bibliotek" first since user opened this from their library
-        const libraryPill = `<span class="wtw-pill stream" style="background:#1a3a2a;border-color:#2ecc71;color:#2ecc71">✓ I ditt bibliotek</span>`;
-        el.innerHTML = libraryPill + (providers.length
-          ? providers.map(n => `<span class="wtw-pill ${flat.has(n) ? "stream" : "rent"}">${esc(n)}</span>`).join("")
-          : "");
-      }).catch(() => {});
+        const flat = new Set((data.flatrate||[]).map(p => p.provider_name));
+        const providers = [...new Set([...(data.flatrate||[]),...(data.rent||[])].map(p => p.provider_name))];
+        const lib = allLibraries.find(l => l.id === item?.library_id);
+        const libraryPill = `<span class="wtw-pill stream">✓ ${esc(lib?.name || "Ditt bibliotek")}</span>`;
+        el.innerHTML = libraryPill + (providers.length ? providers.map(n => `<span class="wtw-pill ${flat.has(n)?"stream":"rent"}">${esc(n)}</span>`).join("") : "");
+      }).catch(()=>{});
     }
-  } catch (e) {
-    ov.innerHTML = `<div class="detail-box" style="padding:40px;text-align:center;color:var(--muted)">${e.message}</div>`;
+  } catch(e) {
+    sec.innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><h3>${e.message}</h3></div>`;
   }
 }
 
 function closeDetail() {
-  const ov = document.getElementById("detail-overlay");
-  ov.style.display = "none";
-  ov.innerHTML = "";
+  const sec = document.getElementById("sec-detail");
+  if (sec) sec.classList.remove("active");
+  // Return to previous section - home as default
+  document.getElementById("sec-home")?.classList.add("active");
+  document.querySelectorAll(".sb-item").forEach(b => b.classList.remove("active"));
+}
+
+
+
+async function openPersonDetail(tmdbPersonId) {
+  document.querySelectorAll(".section").forEach(s => s.classList.remove("active"));
+  const sec = document.getElementById("sec-detail");
+  if (sec) { sec.classList.add("active"); sec.innerHTML = `<div class="spinner-wrap" style="height:60vh"><div class="spinner"></div></div>`; }
+  try {
+    const data = await API.get("/person/" + tmdbPersonId);
+    const inLib = data.credits.filter(c => c.in_library);
+    const notLib = data.credits.filter(c => !c.in_library);
+    sec.innerHTML = `
+      <div class="detail-page">
+        <div class="person-hero">
+          <button class="detail-back" onclick="closeDetail()">← Tillbaka</button>
+          <div class="person-info">
+            ${data.profile_url ? `<img class="person-photo" src="${data.profile_url}" alt="">` : `<div class="person-photo-ph">👤</div>`}
+            <div>
+              <h1 class="detail-page-title">${esc(data.name)}</h1>
+              <div class="detail-meta-row">
+                ${data.known_for ? `<span class="detail-meta-item">${esc(data.known_for)}</span>` : ""}
+                ${data.birthday ? `<span class="detail-meta-item">Född ${data.birthday}</span>` : ""}
+              </div>
+              ${data.biography ? `<p class="person-bio">${esc(data.biography.substring(0,400))}${data.biography.length>400?"...":""}</p>` : ""}
+            </div>
+          </div>
+        </div>
+        <div class="detail-content">
+          ${inLib.length ? `
+          <div class="detail-section">
+            <h3 class="detail-section-title">I ditt bibliotek</h3>
+            <div class="cast-scroll">
+              ${[...new Map(inLib.map(m => [m.tmdb_id, m])).values()].map(m => `
+                <div class="lib-film-card" onclick="findAndOpenByTmdb(${m.tmdb_id})">
+                  <img class="lib-film-poster" src="${m.poster_url}" alt="" loading="lazy">
+                  <div class="cast-name">${esc(m.title)}</div>
+                  <div class="cast-char">${m.year||""}</div>
+                </div>`).join("")}
+            </div>
+          </div>` : ""}
+          ${notLib.length ? `
+          <div class="detail-section">
+            <h3 class="detail-section-title">Mer från ${esc(data.name)}</h3>
+            <div class="cast-scroll">
+              ${notLib.slice(0,15).map(m => `
+                <div class="cast-card" style="cursor:default;opacity:0.6">
+                  <img class="cast-photo" src="${m.poster_url}" alt="" loading="lazy">
+                  <div class="cast-name">${esc(m.title)}</div>
+                  <div class="cast-char">${m.year||""}</div>
+                </div>`).join("")}
+            </div>
+          </div>` : ""}
+        </div>
+      </div>`;
+  } catch(e) {
+    if(sec) sec.innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><h3>${e.message}</h3></div>`;
+  }
+}
+
+async function findAndOpenByTmdb(tmdbId) {
+  try {
+    const libs = await API.get("/libraries");
+    for (const lib of libs) {
+      const data = await API.get(`/libraries/${lib.id}/contents`);
+      const match = data.items.find(i => String(i.tmdb_id) === String(tmdbId));
+      if (match) { openDetail(match.id); return; }
+    }
+  } catch(e) { console.error(e); }
+}
+
+async function openEditMedia(id) {
+  try {
+    const item = await API.get("/media/" + id);
+    let images = { posters: [], backdrops: [] };
+    if (item.tmdb_id) {
+      try { images = await API.get("/media/" + id + "/images"); } catch {}
+    }
+    const modal = document.createElement("div");
+    modal.id = "edit-media-modal";
+    modal.style.cssText = "position:fixed;inset:0;z-index:500;background:rgba(0,0,0,0.88);display:flex;align-items:center;justify-content:center;padding:24px;";
+    const posterGrid = images.posters.length ? `
+      <div>
+        <div class="info-section-title">Välj poster (${images.posters.length} tillgängliga)</div>
+        <div style="display:flex;gap:8px;overflow-x:auto;padding-bottom:8px;scrollbar-width:thin">
+          ${images.posters.map(p => `<img src="${p.url}" onclick="selectEditImage('poster','${p.full}',this)" style="height:120px;border-radius:6px;cursor:pointer;flex-shrink:0;border:2px solid transparent;transition:border-color 0.2s;opacity:0.8" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.8">`).join("")}
+        </div>
+      </div>` : "";
+    const backdropGrid = images.backdrops.length ? `
+      <div>
+        <div class="info-section-title">Välj bakgrund (${images.backdrops.length} tillgängliga)</div>
+        <div style="display:flex;gap:8px;overflow-x:auto;padding-bottom:8px;scrollbar-width:thin">
+          ${images.backdrops.map(b => `<img src="${b.url}" onclick="selectEditImage('backdrop','${b.full}',this)" style="height:70px;border-radius:6px;cursor:pointer;flex-shrink:0;border:2px solid transparent;transition:border-color 0.2s;opacity:0.8" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.8">`).join("")}
+        </div>
+      </div>` : "";
+    modal.innerHTML = `
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:14px;width:100%;max-width:720px;max-height:90vh;overflow-y:auto;">
+        <div style="padding:18px 24px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px;position:sticky;top:0;background:var(--surface);z-index:1">
+          <span style="font-size:18px">✏</span>
+          <span style="font-weight:700;font-size:16px">Redigera – ${esc(item.title||"")}</span>
+          <button onclick="document.getElementById('edit-media-modal').remove()" style="margin-left:auto;background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer">✕</button>
+        </div>
+        <div style="padding:24px;display:flex;flex-direction:column;gap:20px">
+          ${editField("edit-title","Titel",item.title||"")}
+          ${editField("edit-year","År",item.year||"")}
+          ${editField("edit-rating","Betyg (0–10)",item.rating||"")}
+          ${editField("edit-overview","Beskrivning",item.overview||"",true)}
+          ${posterGrid}
+          <div>
+            <div class="info-section-title">Poster URL</div>
+            <input id="edit-poster" type="text" value="${esc(item.poster_url||"")}" style="width:100%;background:var(--card2);border:1px solid var(--border);color:var(--text);font-family:'DM Sans',sans-serif;font-size:13px;padding:9px 12px;border-radius:8px;outline:none;box-sizing:border-box">
+          </div>
+          ${backdropGrid}
+          <div>
+            <div class="info-section-title">Backdrop URL</div>
+            <input id="edit-backdrop" type="text" value="${esc(item.backdrop_url||"")}" style="width:100%;background:var(--card2);border:1px solid var(--border);color:var(--text);font-family:'DM Sans',sans-serif;font-size:13px;padding:9px 12px;border-radius:8px;outline:none;box-sizing:border-box">
+          </div>
+        </div>
+        <div style="padding:16px 24px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:10px;position:sticky;bottom:0;background:var(--surface)">
+          <button onclick="document.getElementById('edit-media-modal').remove()" class="btn-fav">Avbryt</button>
+          <button onclick="saveEditMedia('${id}')" class="btn-play" style="padding:10px 24px">Spara ändringar</button>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+    modal.addEventListener("click", e => { if (e.target === modal) modal.remove(); });
+  } catch(e) { toast("Kunde inte öppna redigera: " + e.message, "error"); }
+}
+
+function selectEditImage(type, fullUrl, el) {
+  el.parentElement.querySelectorAll("img").forEach(i => i.style.borderColor = "transparent");
+  el.style.borderColor = "var(--accent)";
+  document.getElementById("edit-" + type).value = fullUrl;
+}
+
+function editField(id, label, value, textarea = false) {
+  value = value == null ? "" : String(value);
+  const inputStyle = "width:100%;background:var(--card2);border:1px solid var(--border);color:var(--text);font-family:'DM Sans',sans-serif;font-size:14px;padding:10px 12px;border-radius:8px;outline:none;box-sizing:border-box;";
+  return `<div>
+    <div class="info-section-title">${label}</div>
+    ${textarea ? `<textarea id="${id}" style="${inputStyle}min-height:100px;resize:vertical">${esc(value)}</textarea>` : `<input id="${id}" type="text" value="${esc(value)}" style="${inputStyle}">`}
+  </div>`;
+}
+
+async function saveEditMedia(id) {
+  try {
+    const title = document.getElementById("edit-title")?.value?.trim();
+    if (!title) { toast("Titel får inte vara tom", "error"); return; }
+    await API.post("/media/" + id + "/edit", {
+      title,
+      year: document.getElementById("edit-year")?.value?.trim() || undefined,
+      rating: document.getElementById("edit-rating")?.value?.trim() || undefined,
+      overview: document.getElementById("edit-overview")?.value?.trim() || undefined,
+      poster_url: document.getElementById("edit-poster")?.value?.trim() || undefined,
+      backdrop_url: document.getElementById("edit-backdrop")?.value?.trim() || undefined
+    });
+    document.getElementById("edit-media-modal")?.remove();
+    toast("Sparad ✓", "success");
+    openDetail(id);
+  } catch(e) { toast("Kunde inte spara: " + e.message, "error"); }
+}
+
+async function openMediaInfo(id) {
+  try {
+    const item = await API.get("/media/" + id + "/fileinfo");
+    const modal = document.createElement("div");
+    modal.id = "media-info-modal";
+    modal.style.cssText = "position:fixed;inset:0;z-index:500;background:rgba(0,0,0,0.88);display:flex;align-items:center;justify-content:center;padding:24px;";
+    const v = item.video;
+    const audioHtml = (item.audio||[]).map((a,i) => `
+      <div style="background:var(--card2);border-radius:8px;padding:12px;margin-bottom:8px">
+        <div style="font-weight:600;font-size:13px;margin-bottom:6px">🔊 Spår ${i+1} – ${a.language?.toUpperCase()||"UND"} ${a.title?"· "+esc(a.title):""}</div>
+        ${infoRow("Codec",a.codec)} ${infoRow("Kanaler",a.channel_layout||a.channels)} ${infoRow("Bitrate",a.bitrate)}
+      </div>`).join("") || "<p style='color:var(--muted);font-size:13px'>Inga ljudspår hittades</p>";
+    const subHtml = (item.subtitles||[]).length ? (item.subtitles||[]).map((s,i) => `
+      <div style="background:var(--card2);border-radius:8px;padding:12px;margin-bottom:8px">
+        <div style="font-weight:600;font-size:13px;margin-bottom:6px">💬 Spår ${i+1} – ${s.language?.toUpperCase()||"UND"} ${s.title?"· "+esc(s.title):""} ${s.forced?"[Tvingad]":""} ${s.default?"[Standard]":""}</div>
+        ${infoRow("Format",s.codec)}
+      </div>`).join("")
+    : "<p style='color:var(--muted);font-size:13px'>Inga undertextspår</p>";
+    modal.innerHTML = `
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:14px;width:100%;max-width:680px;max-height:85vh;overflow-y:auto;">
+        <div style="padding:18px 24px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px;position:sticky;top:0;background:var(--surface);z-index:1">
+          <span style="font-size:18px">ℹ</span>
+          <span style="font-weight:700;font-size:16px">Mediainformation – ${esc(item.title||"")}</span>
+          <button onclick="document.getElementById('media-info-modal').remove()" style="margin-left:auto;background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer">✕</button>
+        </div>
+        <div style="padding:24px;display:flex;flex-direction:column;gap:24px">
+          <div>
+            <div class="info-section-title">Video</div>
+            ${infoRow("Codec",v?.codec)} ${infoRow("Profil",v?.profile)} ${infoRow("Upplösning",v?.width&&v?.height?v.width+"x"+v.height:"–")} ${infoRow("Bildhastighet",v?.fps?v.fps+"fps":"–")} ${infoRow("Bitdjup",v?.bit_depth?v.bit_depth+" bit":"–")}
+          </div>
+          <div><div class="info-section-title">Ljud</div>${audioHtml}</div>
+          <div><div class="info-section-title">Undertexter</div>${subHtml}</div>
+          <div>
+            <div class="info-section-title">Container</div>
+            ${infoRow("Format",item.container?.format)} ${infoRow("Speltid",item.container?.duration?Math.floor(item.container.duration/3600)+"h "+Math.floor((item.container.duration%3600)/60)+"m":"–")} ${infoRow("Storlek",item.container?.size)} ${infoRow("Bitrate",item.container?.bitrate)}
+          </div>
+          <div><div class="info-section-title">Övrigt</div>${infoRow("Inlagt",item.added_at?new Date(item.added_at).toLocaleDateString("sv-SE"):"–")}</div>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+    modal.addEventListener("click", e => { if (e.target === modal) modal.remove(); });
+  } catch(e) { toast("Kunde inte hämta info: " + e.message, "error"); }
+}
+
+function infoRow(label, value) {
+  return `<div style="display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--border);font-size:13px">
+    <span style="color:var(--muted)">${label}</span>
+    <span style="color:var(--text);font-weight:500;text-align:right;max-width:300px;word-break:break-all">${esc(String(value||"–"))}</span>
+  </div>`;
 }
 
 async function markWatched(id, duration) {
@@ -1603,44 +1990,71 @@ function loadSearchPage() {
   document.getElementById("sec-search").innerHTML = `
   <div class="search-wrap">
     <div class="search-big">Sök</div>
-    <div class="search-input-wrap">
-      <span class="search-ico">🔍</span>
-      <input class="search-big-input" type="text" id="search-q" placeholder="Sök filmer, serier, musik..." oninput="handleSearch()" autofocus/>
-    </div>
     <div id="search-results"></div>
   </div>`;
+  // Focus topbar search
+  const tb = document.getElementById("topbar-search-input");
+  if (tb) { tb.focus(); if (tb.value) handleSearch(tb.value); }
+}
+
+function handleTopbarSearch() {
+  const q = document.getElementById("topbar-search-input")?.value?.trim();
+  // Switch to search section if not already there
+  const sec = document.getElementById("sec-search");
+  if (!sec?.classList.contains("active")) switchSection("search");
+  handleSearch(q);
 }
 
 let searchTimer = null;
-async function handleSearch() {
+async function handleSearch(q) {
   clearTimeout(searchTimer);
-  const q = document.getElementById("search-q")?.value?.trim();
+  if (q === undefined) q = document.getElementById("topbar-search-input")?.value?.trim() || "";
   const res = document.getElementById("search-results");
   if (!q || q.length < 2) { if (res) res.innerHTML = ""; return; }
   searchTimer = setTimeout(async () => {
     res.innerHTML = `<div class="spinner-wrap"><div class="spinner"></div></div>`;
     try {
-      const [local, online] = await Promise.all([
+      const [local, castLocal, online] = await Promise.all([
         API.get("/media?search=" + encodeURIComponent(q) + "&limit=24"),
+        API.get("/search/cast?query=" + encodeURIComponent(q)).catch(() => ({ items: [] })),
         API.get("/search/streaming?query=" + encodeURIComponent(q)).catch(() => ({ results: [] }))
       ]);
       let html = "";
-      if (local.items?.length) {
+      // Merge local results - deduplicate by id
+      const localItems = local.items || [];
+      const castItems = (castLocal.items || []).filter(c => !localItems.find(l => l.id === c.id));
+      const allLocal = [...localItems, ...castItems];
+      if (allLocal.length) {
         html += `<div class="search-results-title">I ditt bibliotek</div>`;
-        html += `<div class="media-grid">${local.items.map(i => buildCard(i, i.type === "tvshow")).join("")}</div>`;
+        html += `<div class="media-grid">${allLocal.map(i => buildCard(i, i.type === "tvshow")).join("")}</div>`;
       }
       if (online.results?.length) {
-        html += `<div class="search-results-title" style="margin-top:28px">Var kan du se det?</div>`;
-        // Check which online results we also have in library
+        const persons = online.results.filter(r => r.type === "person");
+        const media = online.results.filter(r => r.type !== "person");
         const localTmdbIds = new Set((local.items || []).map(i => String(i.tmdb_id)).filter(Boolean));
-        html += `<div class="media-grid">${online.results.slice(0, 8).map(r => {
-          const inLib = localTmdbIds.has(String(r.tmdb_id));
-          return `<div class="mcard" style="cursor:${inLib ? 'pointer' : 'default'}" ${inLib ? `onclick='openDetailByTmdb("${r.tmdb_id}")'` : ''}>
-            ${r.poster ? `<img class="mcard-poster" src="${r.poster}" loading="lazy">` : `<div class="mcard-poster-ph"><span>🎬</span></div>`}
-            ${inLib ? `<div style="position:absolute;top:6px;right:6px;background:var(--accent);color:white;font-size:10px;font-weight:700;padding:3px 7px;border-radius:10px">✓ Bibliotek</div>` : ""}
-            <div class="mcard-info"><div class="mcard-title">${esc(r.title)}</div><div class="mcard-meta">${r.year || ""}</div></div>
-          </div>`;
-        }).join("")}</div>`;
+        if (persons.length) {
+          html += `<div class="search-results-title" style="margin-top:28px">Skådespelare & regissörer</div>`;
+          html += `<div class="cast-scroll" style="padding:8px 0">`;
+          html += persons.map(r => `
+            <div class="cast-card" onclick="openPersonDetail(${r.id})">
+              ${r.poster ? `<img class="cast-photo" src="${r.poster}" alt="" loading="lazy" style="object-fit:cover">` : `<div class="cast-photo-ph">👤</div>`}
+              <div class="cast-name">${esc(r.title)}</div>
+            </div>`).join("");
+          html += `</div>`;
+        }
+        if (media.length) {
+          html += `<div class="search-results-title" style="margin-top:28px">Var kan du se det?</div>`;
+          html += `<div class="media-grid">${media.slice(0, 8).map(r => {
+            const inLib = localTmdbIds.has(String(r.id));
+            const clickFn = inLib ? `openDetailByTmdb("${r.id}")` : `openTmdbDetail(${r.id})`;
+            return `<div class="mcard" onclick='${clickFn}'>
+              ${r.poster ? `<img class="mcard-poster" src="${r.poster}" loading="lazy">` : `<div class="mcard-poster-ph"><span>${r.type==="tv"?"📺":"🎬"}</span></div>`}
+              <div class="mcard-overlay"><span class="mcard-play">▶</span></div>
+              ${inLib ? `<div style="position:absolute;top:6px;right:6px;background:var(--accent);color:white;font-size:10px;font-weight:700;padding:3px 7px;border-radius:10px">✓ Bibliotek</div>` : ""}
+              <div class="mcard-info"><div class="mcard-title">${esc(r.title)}</div><div class="mcard-meta">${r.year || ""}</div></div>
+            </div>`;
+          }).join("")}</div>`;
+        }
       }
       res.innerHTML = html || `<div class="empty"><div class="empty-icon">🔍</div><h3>Inga träffar för "${esc(q)}"</h3></div>`;
     } catch { res.innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><h3>Sökning misslyckades</h3></div>`; }
@@ -2229,13 +2643,7 @@ async function applyFixedMeta(mediaId, tmdbId, type) {
     document.getElementById("fix-meta-overlay")?.remove();
     toast("✓ Filminformation uppdaterad!", "success");
     closeDetail();
-    const activeSection = document.querySelector(".ntab.active");
-    if (activeSection) {
-      const sectionName = ["home","movies","tvshows","music","search"][
-        [...document.querySelectorAll(".ntab")].indexOf(activeSection)
-      ];
-      if (sectionName) setTimeout(() => switchSection(sectionName), 100);
-    }
+    switchSection("home");
     setTimeout(() => openDetail(mediaId), 600);
   } catch(e) { toast(e.message || "Fel vid uppdatering", "error"); }
 }
@@ -2353,13 +2761,7 @@ async function applyFixMeta(mediaId, metaJson) {
     // Close detail, reload current section, then reopen detail
     closeDetail();
     // Reload current section to reflect changes
-    const activeSection = document.querySelector(".ntab.active");
-    if (activeSection) {
-      const sectionName = ["home","movies","tvshows","music","search"][
-        [...document.querySelectorAll(".ntab")].indexOf(activeSection)
-      ];
-      if (sectionName) setTimeout(() => switchSection(sectionName), 100);
-    }
+    switchSection("home");
     setTimeout(() => openDetail(mediaId), 600);
   } catch(e) {
     toast("Fel: " + e.message, "error");

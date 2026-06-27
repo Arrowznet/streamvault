@@ -1640,8 +1640,8 @@ app.post("/api/hls/:id/stop", requireAuth, (req, res) => {
 
 app.get("/api/watch-providers/:tmdb_id", requireAuth, async (req, res) => {
   if (!config.tmdb_api_key) return res.json({});
-  const data = await tmdbFetch(`/movie/${req.params.tmdb_id}/watch/providers?`);
-  res.json(data?.results?.SE||data?.results?.US||{});
+  const data = await tmdbFetch(`/movie/${req.params.tmdb_id}/watch/providers?watch_region=SE`);
+  res.json(data?.results?.SE || {});
 });
 
 // ── SUBTITLES ─────────────────────────────────────────────────────────────────
@@ -2057,11 +2057,45 @@ app.post("/api/subtitles/download", requireAuth, async (req, res) => {
 });
 
 
+// Search local library by cast name via TMDB person search
+app.get("/api/search/cast", requireAuth, async (req, res) => {
+  const { query } = req.query;
+  if (!query || !config.tmdb_api_key) return res.json({ items: [] });
+  try {
+    // Search for person on TMDB
+    const data = await tmdbFetch(`/search/person?query=${encodeURIComponent(query)}`);
+    const persons = (data?.results || []).slice(0, 3);
+    const allMedia = await dbFind(db.media, { type: { $in: ["movie","tvshow"] } });
+    const tmdbIds = new Set(allMedia.filter(m => m.tmdb_id).map(m => String(m.tmdb_id)));
+    // For each person, find their movies in our library
+    const found = [];
+    for (const person of persons) {
+      const credits = await tmdbFetch(`/person/${person.id}?append_to_response=movie_credits`);
+      if (!credits) continue;
+      for (const movie of (credits.movie_credits?.cast || [])) {
+        if (tmdbIds.has(String(movie.id))) {
+          const localItem = allMedia.find(m => String(m.tmdb_id) === String(movie.id));
+          if (localItem && !found.find(f => f.id === localItem._id)) {
+            found.push({ ...localItem, id: localItem._id });
+          }
+        }
+      }
+    }
+    res.json({ items: found.map(i => ({ ...i, file_path: undefined, _id: undefined })) });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get("/api/search/streaming", requireAuth, async (req, res) => {
   const {query}=req.query;
   if (!query||!config.tmdb_api_key) return res.json({results:[]});
   const data = await tmdbFetch(`/search/multi?query=${encodeURIComponent(query)}`);
-  res.json({results:(data?.results||[]).slice(0,10).map(r=>({id:r.id,title:r.title||r.name,type:r.media_type,poster:r.poster_path?`https://image.tmdb.org/t/p/w300${r.poster_path}`:null,year:(r.release_date||r.first_air_date||"").slice(0,4)}))});
+  res.json({results:(data?.results||[]).slice(0,10).map(r=>({
+    id:r.id,
+    title:r.title||r.name,
+    type:r.media_type,
+    poster:r.profile_path?`https://image.tmdb.org/t/p/w185${r.profile_path}`:r.poster_path?`https://image.tmdb.org/t/p/w300${r.poster_path}`:null,
+    year:(r.release_date||r.first_air_date||"").slice(0,4)
+  }))});
 });
 
 app.post("/api/scan", requireAdmin, (req, res) => {
@@ -2122,6 +2156,68 @@ app.patch("/api/config", requireAdmin, (req, res) => {
 
 
 
+// ── TMDB IMAGES ──────────────────────────────────────────────────────────────
+app.get("/api/media/:id/images", requireAuth, async (req, res) => {
+  try {
+    const item = await dbFindOne(db.media, { _id: req.params.id });
+    if (!item || !item.tmdb_id || !config.tmdb_api_key) return res.json({ posters: [], backdrops: [] });
+    const endpoint = item.type === "tvshow"
+      ? `/tv/${item.tmdb_id}/images?include_image_language=en,sv,null`
+      : `/movie/${item.tmdb_id}/images?include_image_language=en,sv,null`;
+    const data = await tmdbFetch(endpoint);
+    if (!data) return res.json({ posters: [], backdrops: [] });
+    const posters = (data.posters||[]).sort((a,b)=>(b.vote_average||0)-(a.vote_average||0)).slice(0,40)
+      .map(p => ({ url: `https://image.tmdb.org/t/p/w342${p.file_path}`, full: `https://image.tmdb.org/t/p/original${p.file_path}`, lang: p.iso_639_1, rating: p.vote_average }));
+    const backdrops = (data.backdrops||[]).sort((a,b)=>(b.vote_average||0)-(a.vote_average||0)).slice(0,20)
+      .map(b => ({ url: `https://image.tmdb.org/t/p/w780${b.file_path}`, full: `https://image.tmdb.org/t/p/original${b.file_path}`, rating: b.vote_average }));
+    res.json({ posters, backdrops });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── FILE INFO (ffprobe) ───────────────────────────────────────────────────────
+app.get("/api/media/:id/fileinfo", requireAdmin, async (req, res) => {
+  try {
+    const item = await dbFindOne(db.media, { _id: req.params.id });
+    if (!item) return res.status(404).json({ error: "Hittades inte" });
+    let probe = null;
+    try {
+      const { execSync } = require("child_process");
+      const ffprobePath = getFfprobePath();
+      const cmd = `"${ffprobePath}" -v quiet -print_format json -show_streams -show_format "${item.file_path.replace(/"/g, '')}"`;
+      probe = JSON.parse(execSync(cmd, { timeout: 15000 }).toString());
+    } catch {}
+    const videoStream = probe?.streams?.find(s => s.codec_type === "video");
+    const audioStreams = probe?.streams?.filter(s => s.codec_type === "audio") || [];
+    const subtitleStreams = probe?.streams?.filter(s => s.codec_type === "subtitle") || [];
+    const fmt = probe?.format || {};
+    res.json({
+      title: item.title, file_size: item.file_size, tmdb_id: item.tmdb_id,
+      library_id: item.library_id, added_at: item.added_at, year: item.year, type: item.type, rating: item.rating,
+      video: videoStream ? {
+        codec: videoStream.codec_name?.toUpperCase(), profile: videoStream.profile,
+        width: videoStream.width, height: videoStream.height,
+        fps: videoStream.r_frame_rate ? Math.round(eval(videoStream.r_frame_rate)) : null,
+        bitrate: videoStream.bit_rate ? Math.round(videoStream.bit_rate/1000)+" kbps" : null,
+        bit_depth: videoStream.bits_per_raw_sample || null, color_space: videoStream.color_space || null
+      } : null,
+      audio: audioStreams.map(a => ({
+        codec: a.codec_name?.toUpperCase(), channels: a.channels, channel_layout: a.channel_layout,
+        language: a.tags?.language || "und", bitrate: a.bit_rate ? Math.round(a.bit_rate/1000)+" kbps" : null, title: a.tags?.title || null
+      })),
+      subtitles: subtitleStreams.map(s => ({
+        codec: s.codec_name?.toUpperCase(), language: s.tags?.language || "und",
+        title: s.tags?.title || null, forced: s.disposition?.forced === 1, default: s.disposition?.default === 1
+      })),
+      container: {
+        format: fmt.format_long_name || fmt.format_name,
+        duration: fmt.duration ? Math.round(parseFloat(fmt.duration)) : null,
+        bitrate: fmt.bit_rate ? Math.round(fmt.bit_rate/1000)+" kbps" : null,
+        size: fmt.size ? (fmt.size/1024/1024/1024).toFixed(2)+" GB" : null
+      }
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── MANUAL METADATA SEARCH ────────────────────────────────────────────────────
 app.get("/api/search-meta", requireAuth, async (req, res) => {
   const { query, type = "movie" } = req.query;
@@ -2156,6 +2252,78 @@ app.post("/api/media/:id/fix-meta", requireAdmin, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+
+// ── PERSON DETAILS ───────────────────────────────────────────────────────────
+app.get("/api/person/:tmdb_id", requireAuth, async (req, res) => {
+  try {
+    if (!config.tmdb_api_key) return res.status(503).json({ error: "Ingen TMDB-nyckel" });
+    const data = await tmdbFetch(`/person/${req.params.tmdb_id}?append_to_response=combined_credits,movie_credits`);
+    if (!data) return res.status(404).json({ error: "Hittades inte" });
+    const allMedia = await dbFind(db.media, {});
+    const tmdbToLocalTitle = new Map(allMedia.filter(m => m.tmdb_id).map(m => [String(m.tmdb_id), (m.title||"").toLowerCase()]));
+    function titlesSimilar(t1, t2) {
+      if (!t1 || !t2) return true;
+      const a = t1.toLowerCase().replace(/[^a-z0-9]/g,"");
+      const b = t2.replace(/[^a-z0-9]/g,"");
+      return a.includes(b.substring(0,8)) || b.includes(a.substring(0,8));
+    }
+    const allCast = [...(data.movie_credits?.cast||[]), ...(data.combined_credits?.cast||[])];
+    const seenIds = new Set();
+    const uniqueCast = allCast.filter(m => { if (seenIds.has(m.id)) return false; seenIds.add(m.id); return true; });
+    const credits = uniqueCast.filter(m => m.poster_path).sort((a,b) => (b.popularity||0)-(a.popularity||0)).slice(0,100).map(m => {
+      const tmdbTitle = m.title || m.name;
+      const localTitle = tmdbToLocalTitle.get(String(m.id));
+      const in_library = tmdbToLocalTitle.has(String(m.id)) && titlesSimilar(tmdbTitle, localTitle||"");
+      return { tmdb_id: m.id, title: tmdbTitle, character: m.character, poster_url: `https://image.tmdb.org/t/p/w342${m.poster_path}`, year: (m.release_date||m.first_air_date||"").substring(0,4), in_library };
+    });
+    res.json({
+      name: data.name, biography: data.biography, birthday: data.birthday,
+      profile_url: data.profile_path ? `https://image.tmdb.org/t/p/w342${data.profile_path}` : null,
+      known_for: data.known_for_department, credits
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── TMDB DIRECT LOOKUP (for online search results) ───────────────────────────
+app.get("/api/tmdb/movie/:tmdb_id", requireAuth, async (req, res) => {
+  if (!config.tmdb_api_key) return res.status(503).json({ error: "Ingen TMDB-nyckel" });
+  try {
+    const data = await tmdbFetch(`/movie/${req.params.tmdb_id}?append_to_response=credits,videos`);
+    if (!data) return res.status(404).json({ error: "Hittades inte" });
+    res.json({
+      tmdb_id: data.id,
+      title: data.title,
+      year: data.release_date ? parseInt(data.release_date) : null,
+      overview: data.overview,
+      poster_url: data.poster_path ? `https://image.tmdb.org/t/p/w500${data.poster_path}` : null,
+      backdrop_url: data.backdrop_path ? `https://image.tmdb.org/t/p/w1280${data.backdrop_path}` : null,
+      rating: data.vote_average || null,
+      runtime: data.runtime || null,
+      genres: (data.genres||[]).map(g => g.name),
+      cast: (data.credits?.cast||[]).slice(0,20).map(p => ({
+        id: p.id, name: p.name, character: p.character,
+        profile_url: p.profile_path ? `https://image.tmdb.org/t/p/w185${p.profile_path}` : null
+      })),
+      crew: (data.credits?.crew||[]).filter(p => p.job === "Director").slice(0,3).map(p => ({ id: p.id, name: p.name, job: p.job }))
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── EDIT MEDIA ────────────────────────────────────────────────────────────────
+app.post("/api/media/:id/edit", requireAdmin, async (req, res) => {
+  const { title, year, overview, poster_url, backdrop_url, rating } = req.body;
+  if (!title) return res.status(400).json({ error: "Titel krävs" });
+  try {
+    const updates = { title };
+    if (year !== undefined) updates.year = year ? parseInt(year) : null;
+    if (overview !== undefined) updates.overview = overview;
+    if (poster_url !== undefined) updates.poster_url = poster_url;
+    if (backdrop_url !== undefined) updates.backdrop_url = backdrop_url;
+    if (rating !== undefined) updates.rating = rating;
+    await dbUpdate(db.media, { _id: req.params.id }, { $set: updates });
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
 
 // ── RESCAN ALL (clear + rescan) ────────────────────────────────────────────────
 app.post("/api/scan/full-rescan", requireAdmin, async (req, res) => {
