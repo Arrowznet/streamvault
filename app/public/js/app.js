@@ -64,12 +64,26 @@ async function loadSidebarLibraries() {
     const container = document.getElementById("sb-libraries");
     if (!container) return;
     const icons = { movies: "🎬", tvshows: "📺", music: "🎵" };
-    container.innerHTML = libs.map(lib => `
+    const nonMusicLibs = libs.filter(l => l.type !== "music");
+    const musicLibs = libs.filter(l => l.type === "music");
+    container.innerHTML = nonMusicLibs.map(lib => `
       <div class="sb-item" id="sb-lib-${lib.id}" onclick="switchToLibrary('${lib.id}', '${lib.name.replace(/'/g, "\'")}', '${lib.type}')">
         <span class="sb-icon">${icons[lib.type] || "📁"}</span>
         <span>${esc(lib.name)}</span>
       </div>
-    `).join("");
+    `).join("") + `
+      <div class="sb-item" id="sb-collections" onclick="switchSection('collections')">
+        <span class="sb-icon">🎬</span>
+        <span>Samlingar</span>
+      </div>` +
+    (musicLibs.length ? `
+      <div class="sb-sep">ÖVRIGT</div>
+      <div style="height:1px;background:var(--border);margin:0 18px 4px"></div>` +
+      musicLibs.map(lib => `
+      <div class="sb-item" id="sb-lib-${lib.id}" onclick="switchToLibrary('${lib.id}', '${lib.name.replace(/'/g, "\'")}', '${lib.type}')">
+        <span class="sb-icon">🎵</span>
+        <span>${esc(lib.name)}</span>
+      </div>`).join("") : "");
   } catch {}
 }
 
@@ -88,6 +102,7 @@ function switchSection(name) {
   else if (name === "music") loadMusicPage();
   else if (name === "search") loadSearchPage();
   else if (name === "settings") loadSettings();
+  else if (name === "collections") loadCollections();
   const userMenu = document.getElementById("userMenu");
   if (userMenu) userMenu.style.display = "none";
 }
@@ -286,6 +301,84 @@ function scrollToLetter(letter) {
       return;
     }
   }
+}
+
+async function loadCollections() {
+  const sec = document.getElementById("sec-collections");
+  sec.innerHTML = `<div class="spinner-wrap"><div class="spinner"></div></div>`;
+  try {
+    const collections = await API.get("/collections");
+    if (!collections.length) {
+      sec.innerHTML = `<div class="empty"><div class="empty-icon">🎬</div><h3>Inga samlingar hittades</h3><p>Skanna om biblioteket för att hitta filmserier</p></div>`;
+      return;
+    }
+    sec.innerHTML = `
+      <div class="grid-wrap" style="padding-right:32px">
+        <div class="row-header" style="margin-bottom:20px">
+          <span class="row-title">Samlingar</span>
+          <span class="row-count">${collections.length} samlingar</span>
+        </div>
+        <div class="media-grid">
+          ${collections.map(c => `
+            <div class="mcard" onclick="openCollection('${c.id}')">
+              <div style="position:relative">
+                ${c.poster_url
+                  ? `<img class="mcard-poster" src="${c.poster_url}" alt="" loading="lazy">`
+                  : `<div class="mcard-poster-ph"><span>🎬</span><span>${esc((c.name||"").slice(0,14))}</span></div>`}
+                <div class="mcard-overlay"><span class="mcard-play">▶</span></div>
+              </div>
+              <div class="mcard-info">
+                <div class="mcard-title">${esc(c.name||"")}</div>
+                <div class="mcard-meta">${c.movies.length} filmer</div>
+              </div>
+            </div>`).join("")}
+        </div>
+      </div>`;
+    // Store for openCollection
+    window._collectionsData = collections;
+  } catch(e) {
+    sec.innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><h3>${e.message}</h3></div>`;
+  }
+}
+
+function openCollection(collectionId) {
+  const collection = window._collectionsData?.find(c => String(c.id) === String(collectionId));
+  if (!collection) return;
+  const sec = document.getElementById("sec-detail") || (() => {
+    const s = document.createElement("section");
+    s.id = "sec-detail"; s.className = "section";
+    document.getElementById("appMain").appendChild(s);
+    return s;
+  })();
+  document.querySelectorAll(".section").forEach(s => s.classList.remove("active"));
+  sec.classList.add("active");
+  const movies = [...collection.movies].sort((a,b) => (a.year||0)-(b.year||0));
+  sec.innerHTML = `
+    <div class="detail-page">
+      <div class="show-hero" ${collection.backdrop_url ? `style="background-image:url('${collection.backdrop_url}')"` : ""}>
+        <div class="show-hero-overlay"></div>
+        <button class="detail-back" onclick="switchSection('collections')">← Samlingar</button>
+        <div class="show-hero-content">
+          <div class="detail-poster-col">
+            ${collection.poster_url ? `<img class="detail-poster" src="${collection.poster_url}" alt="">` : `<div class="detail-poster-ph">🎬</div>`}
+          </div>
+          <div class="detail-info-col">
+            <h1 class="detail-page-title">${esc(collection.name||"")}</h1>
+            <div class="detail-meta-row">
+              <span class="detail-meta-item">${movies.length} filmer i ditt bibliotek</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="detail-content">
+        <div class="detail-section">
+          <h3 class="detail-section-title">Filmer</h3>
+          <div class="media-grid">
+            ${movies.map(m => buildCard(m)).join("")}
+          </div>
+        </div>
+      </div>
+    </div>`;
 }
 
 async function loadLibraryView(libId, libName, libType) {
@@ -2357,14 +2450,16 @@ function startCacheStatusPolling() {
       const statsEl = document.getElementById("subtitle-cache-stats");
       if (statsEl) {
         let html = "";
-        if (cs.total > 0) {
-          html += `<div style="font-weight:500;margin-bottom:2px">Filmer → ${cs.total}</div>`;
+        const hasMovieStats = (cs.withSwe||0) + (cs.withEng||0) + (cs.withExtSrt||0) > 0;
+        const hasEpStats = (cs.withSweEps||0) + (cs.withEngEps||0) + (cs.withExtSrtEps||0) > 0;
+        if (hasMovieStats || cs.total > 0) {
+          html += `<div style="font-weight:500;margin-bottom:2px">Filmer</div>`;
           html += `<div style="padding-left:12px">${cs.withSwe||0} med inbyggd svensk text</div>`;
           html += `<div style="padding-left:12px">${cs.withEng||0} med inbyggd engelsk text</div>`;
           html += `<div style="padding-left:12px">${cs.withExtSrt||0} med extern SRT-fil</div>`;
         }
-        if ((cs.totalEps||0) > 0) {
-          html += `<div style="font-weight:500;margin-top:6px;margin-bottom:2px">Serier → ${cs.totalEps} avsnitt</div>`;
+        if (hasEpStats || (cs.totalEps||0) > 0) {
+          html += `<div style="font-weight:500;margin-top:6px;margin-bottom:2px">Serier → ${cs.totalShows||0} serier · ${cs.totalEps||0} avsnitt</div>`;
           html += `<div style="padding-left:12px">${cs.withSweEps||0} med inbyggd svensk text</div>`;
           html += `<div style="padding-left:12px">${cs.withEngEps||0} med inbyggd engelsk text</div>`;
           html += `<div style="padding-left:12px">${cs.withExtSrtEps||0} med extern SRT-fil</div>`;
@@ -2400,6 +2495,7 @@ async function loadSettings() {
       API.get("/scan/status"), API.get("/updates/check").catch(() => null),
       API.get("/subtitles/cache-status").catch(() => null)
     ]);
+    console.log("[SETTINGS] cacheStatus:", JSON.stringify(cacheStatus)?.slice(0,100));
     const counts = Object.fromEntries((scanStatus.counts || []).map(c => [c.type, c.c]));
     const musicData = (scanStatus.counts || []).find(c => c.type === "music");
     if (musicData) counts.albums = musicData.albums || 0;
@@ -2436,18 +2532,16 @@ async function loadSettings() {
         <div style="font-size:12px;color:var(--muted);margin-top:8px;">👁 Filbevakning aktiv · <span id="next-scan-label">Beräknar...</span></div>
       </div>
 
-      ${cacheStatus && (cacheStatus.total > 0 || cacheStatus.cached > 0) ? `<div class="settings-section" id="subtitle-cache-section">
+      ${cacheStatus ? `<div class="settings-section" id="subtitle-cache-section">
         <div class="settings-section-title">Automatiska undertexter</div>
-        ${(cacheStatus.running || cacheStatus.queued > 0 || cacheStatus.total > 0 || cacheStatus.totalEps > 0) ? `<div style="font-size:13px;color:var(--muted);margin-bottom:8px" id="subtitle-cache-stats">
-          ${cacheStatus.total > 0 ? `<div style="font-weight:500;margin-bottom:2px">Filmer → ${cacheStatus.total}</div>
+        <div style="font-size:13px;color:var(--muted);margin-bottom:8px" id="subtitle-cache-stats">
+          ${((cacheStatus.withSwe||0)+(cacheStatus.withEng||0)+(cacheStatus.withExtSrt||0)) > 0 ? `<div style="font-weight:500;margin-bottom:2px">Filmer</div>
             <div style="padding-left:12px">${cacheStatus.withSwe || 0} med inbyggd svensk text</div>
-            <div style="padding-left:12px">${cacheStatus.withEng || 0} med inbyggd engelsk text</div>
-            <div style="padding-left:12px">${cacheStatus.withExtSrt || 0} med extern SRT-fil</div>` : ''}
+            <div style="padding-left:12px">${cacheStatus.withExtSrt || 0} med extern SRT-fil</div>` : ""}
           ${(cacheStatus.totalEps || 0) > 0 ? `<div style="font-weight:500;margin-top:6px;margin-bottom:2px">Serier → ${cacheStatus.totalShows || "?"} serier hittade med totalt ${cacheStatus.totalEps} avsnitt</div>
             <div style="padding-left:12px">${cacheStatus.withSweEps || 0} med inbyggd svensk text</div>
-            <div style="padding-left:12px">${cacheStatus.withEngEps || 0} med inbyggd engelsk text</div>
             <div style="padding-left:12px">${cacheStatus.withExtSrtEps || 0} med extern SRT-fil</div>` : ''}
-        </div>` : ''}
+        </div>
         <div style="margin-bottom:10px">
           <div style="font-size:13px;font-weight:500;margin-bottom:6px">
             <span id="subtitle-cache-status">${cacheStatus.running ? '⏳ Extraherar undertexter...' : cacheStatus.queued > 0 ? '⏳ Väntar i kö...' : '✅ Alla undertexter är redo!'}</span>

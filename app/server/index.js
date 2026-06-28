@@ -26,6 +26,28 @@ let _subtitleCacheWithExtSrt = 0;     // movies with external SRT
 let _subtitleCacheWithSweEps = 0;     // episodes with embedded Swedish
 let _subtitleCacheWithEngEps = 0;     // episodes with embedded English
 let _subtitleCacheWithExtSrtEps = 0;  // episodes with external SRT
+
+// Count existing cache files on startup
+async function countExistingSubtitleCache() {
+  const cacheDir = path.join(DATA_DIR, "subtitle-cache");
+  if (!fs.existsSync(cacheDir)) { console.log("[SUBTITLE] Cache dir not found:", cacheDir); return; }
+  try {
+    const files = fs.readdirSync(cacheDir);
+    const allSrt = files.filter(f => f.endsWith(".srt") && !f.endsWith("_ext.srt"));
+    _subtitleCacheWithExtSrt = files.filter(f => f.endsWith("_ext.srt")).length;
+    // Cross-reference with DB to split movies vs episodes
+    try {
+      const allMedia = await dbFind(db.media, { type: { $in: ["movie","episode"] } });
+      const episodeIds = new Set(allMedia.filter(m => m.type === "episode").map(m => require("crypto").createHash("md5").update(m._id).digest("hex")));
+      _subtitleCacheWithSwe = allSrt.filter(f => !episodeIds.has(f.split("_")[0])).length;
+      _subtitleCacheWithSweEps = allSrt.filter(f => episodeIds.has(f.split("_")[0])).length;
+    } catch {
+      _subtitleCacheWithSwe = allSrt.length;
+    }
+    console.log("[SUBTITLE] Cache count: ext.srt:", _subtitleCacheWithExtSrt, "swe movies:", _subtitleCacheWithSwe, "swe eps:", _subtitleCacheWithSweEps);
+  } catch(e) { console.log("[SUBTITLE] Count error:", e.message); }
+}
+setTimeout(countExistingSubtitleCache, 1000);
 let _subtitleCacheDone = 0;           // items successfully extracted
 let _subtitleCacheErrors = 0;         // items that failed
 
@@ -392,7 +414,22 @@ async function getMovieMeta(title, year) {
   if(metaCache.has(key)) return metaCache.get(key);
   const data = await tmdbFetch(`/search/movie?query=${encodeURIComponent(title)}${year?`&year=${year}`:""}`);
   const m = data?.results?.[0];
-  const meta = m ? { tmdb_id:m.id, overview:m.overview||"", poster_url:m.poster_path?`https://image.tmdb.org/t/p/w500${m.poster_path}`:null, backdrop_url:m.backdrop_path?`https://image.tmdb.org/t/p/w1280${m.backdrop_path}`:null, rating:m.vote_average||null, year:m.release_date?parseInt(m.release_date):year } : null;
+  if (!m) { metaCache.set(key, null); return null; }
+  // Fetch full movie details to get belongs_to_collection
+  const details = await tmdbFetch(`/movie/${m.id}`);
+  const collection = details?.belongs_to_collection;
+  const meta = {
+    tmdb_id: m.id,
+    overview: m.overview||"",
+    poster_url: m.poster_path ? `https://image.tmdb.org/t/p/w500${m.poster_path}` : null,
+    backdrop_url: m.backdrop_path ? `https://image.tmdb.org/t/p/w1280${m.backdrop_path}` : null,
+    rating: m.vote_average||null,
+    year: m.release_date ? parseInt(m.release_date) : year,
+    collection_id: collection?.id || null,
+    collection_name: collection?.name || null,
+    collection_poster: collection?.poster_path ? `https://image.tmdb.org/t/p/w500${collection.poster_path}` : null,
+    collection_backdrop: collection?.backdrop_path ? `https://image.tmdb.org/t/p/w1280${collection.backdrop_path}` : null
+  };
   metaCache.set(key, meta);
   return meta;
 }
@@ -431,7 +468,7 @@ async function scanLibraries() {
           const {cleanName,year} = cleanTitle(entry.isDirectory()?entry.name:path.basename(filePath));
           const meta = await getMovieMeta(cleanName,year);
           const stat = fs.statSync(filePath);
-          const newItem = {_id:id,library_id:lib.id,type:"movie",title:cleanName,year:meta?.year||year,file_path:filePath,file_size:stat.size,tmdb_id:meta?.tmdb_id||null,poster_url:meta?.poster_url||null,backdrop_url:meta?.backdrop_url||null,overview:meta?.overview||null,rating:meta?.rating||null,added_at:new Date().toISOString()};
+          const newItem = {_id:id,library_id:lib.id,type:"movie",title:cleanName,year:meta?.year||year,file_path:filePath,file_size:stat.size,tmdb_id:meta?.tmdb_id||null,poster_url:meta?.poster_url||null,backdrop_url:meta?.backdrop_url||null,overview:meta?.overview||null,rating:meta?.rating||null,collection_id:meta?.collection_id||null,collection_name:meta?.collection_name||null,collection_poster:meta?.collection_poster||null,collection_backdrop:meta?.collection_backdrop||null,added_at:new Date().toISOString()};
           await dbInsert(db.media, newItem);
           queueSubtitleCache(newItem); // queue Swedish subtitle pre-cache (sequential)
           added++;
@@ -2253,6 +2290,29 @@ app.post("/api/media/:id/fix-meta", requireAdmin, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+
+// ── COLLECTIONS ──────────────────────────────────────────────────────────────
+app.get("/api/collections", requireAuth, async (req, res) => {
+  try {
+    const movies = await dbFind(db.media, { type: "movie", collection_id: { $exists: true } });
+    const collectionsMap = {};
+    movies.filter(m => m.collection_id).forEach(m => {
+      const id = m.collection_id;
+      if (!collectionsMap[id]) {
+        collectionsMap[id] = {
+          id, name: m.collection_name, poster_url: m.collection_poster,
+          backdrop_url: m.collection_backdrop, movies: []
+        };
+      }
+      collectionsMap[id].movies.push({ ...m, file_path: undefined, _id: undefined, id: m._id });
+    });
+    // Only return collections with 2+ movies
+    const collections = Object.values(collectionsMap)
+      .filter(c => c.movies.length >= 2)
+      .sort((a,b) => (a.name||"").localeCompare(b.name||""));
+    res.json(collections);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
 
 // ── MEDIA DETAILS (cast, crew, genres) ───────────────────────────────────────
 app.get("/api/media/:id/details", requireAuth, async (req, res) => {

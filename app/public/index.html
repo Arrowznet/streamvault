@@ -32,11 +32,6 @@
     <div class="sb-nav" id="sb-nav">
       <!-- Libraries injected here by loadSidebarLibraries() -->
       <div id="sb-libraries"></div>
-      <div class="sb-sep">ÖVRIGT</div>
-      <div style="height:1px;background:var(--border);margin:0 18px 4px"></div>
-      <div class="sb-item" id="sb-settings" onclick="switchSection('settings')">
-        <span class="sb-icon">⚙️</span><span>Inställningar</span>
-      </div>
     </div>
     <div class="sb-user" onclick="toggleUserMenu()">
       <div class="user-avatar" id="userAvatar">?</div>
@@ -52,6 +47,7 @@
   <!-- TOPBAR -->
   <div id="topbar">
     <input class="topbar-search" id="topbar-search-input" type="text" placeholder="🔍 Sök filmer, serier, skådespelare..." oninput="handleTopbarSearch()" onfocus="switchSection('search')" />
+    <button onclick="switchSection('settings')" id="sb-settings" style="margin-left:auto;background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer;padding:8px 12px;border-radius:8px;transition:color 0.2s" onmouseover="this.style.color='var(--text)'" onmouseout="this.style.color='var(--muted)'">⚙️</button>
   </div>
 
   <!-- MAIN CONTENT -->
@@ -63,6 +59,7 @@
     <section id="sec-search" class="section"></section>
     <section id="sec-settings" class="section"></section>
     <section id="sec-library" class="section"></section>
+    <section id="sec-collections" class="section"></section>
     <section id="sec-detail" class="section"></section>
   </main>
 
