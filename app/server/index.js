@@ -380,7 +380,8 @@ const metaCache = new Map();
 function tmdbFetch(endpoint) {
   return new Promise(resolve => {
     if (!config.tmdb_api_key) return resolve(null);
-    https.get(`https://api.themoviedb.org/3${endpoint}&api_key=${config.tmdb_api_key}&language=en-US`, res => {
+    const sep = endpoint.includes("?") ? "&" : "?";
+    https.get(`https://api.themoviedb.org/3${endpoint}${sep}api_key=${config.tmdb_api_key}&language=en-US`, res => {
       let d=""; res.on("data",c=>d+=c); res.on("end",()=>{ try{resolve(JSON.parse(d))}catch{resolve(null)} });
     }).on("error",()=>resolve(null));
   });
@@ -2252,6 +2253,144 @@ app.post("/api/media/:id/fix-meta", requireAdmin, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+
+// ── MEDIA DETAILS (cast, crew, genres) ───────────────────────────────────────
+app.get("/api/media/:id/details", requireAuth, async (req, res) => {
+  try {
+    const item = await dbFindOne(db.media, { _id: req.params.id });
+    if (!item || !item.tmdb_id || !config.tmdb_api_key) return res.json({ cast: [], crew: [], genres: [], runtime: null });
+    const endpoint = item.type === "tvshow"
+      ? `/tv/${item.tmdb_id}?append_to_response=aggregate_credits`
+      : `/movie/${item.tmdb_id}?append_to_response=credits`;
+    const data = await tmdbFetch(endpoint);
+    if (!data) return res.json({ cast: [], crew: [], genres: [], runtime: null });
+    // TV shows use aggregate_credits for full series cast
+    const castSource = item.type === "tvshow"
+      ? (data.aggregate_credits?.cast || data.credits?.cast || [])
+      : (data.credits?.cast || []);
+    const cast = castSource.slice(0, 50).map(p => ({
+      id: p.id, name: p.name,
+      character: p.character || (p.roles?.[0]?.character) || "",
+      profile_url: p.profile_path ? `https://image.tmdb.org/t/p/w185${p.profile_path}` : null
+    }));
+    const crew = (data.credits?.crew || [])
+      .filter(p => ["Director","Creator","Writer"].includes(p.job))
+      .slice(0, 5).map(p => ({ id: p.id, name: p.name, job: p.job }));
+    const genres = (data.genres || []).map(g => g.name);
+    const runtime = data.runtime || (data.episode_run_time?.[0]) || null;
+    res.json({ cast, crew, genres, runtime });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── TV SHOW SEASON DATA ──────────────────────────────────────────────────────
+app.get("/api/tvshow/:id/seasons", requireAuth, async (req, res) => {
+  try {
+    const show = await dbFindOne(db.media, { _id: req.params.id });
+    if (!show) return res.status(404).json({ error: "Hittades inte" });
+
+    // Get all episodes for this show from DB
+    const episodes = await dbFind(db.media, { parent_id: req.params.id, type: "episode" });
+
+    // Group by season
+    const seasonMap = {};
+    episodes.forEach(ep => {
+      const s = ep.season || 0;
+      if (!seasonMap[s]) seasonMap[s] = [];
+      seasonMap[s].push(ep);
+    });
+
+    // Get season images from TMDB
+    let tmdbSeasons = [];
+    if (show.tmdb_id && config.tmdb_api_key) {
+      const data = await tmdbFetch(`/tv/${show.tmdb_id}?append_to_response=seasons`);
+      if (data?.seasons) tmdbSeasons = data.seasons;
+    }
+
+    const seasons = Object.entries(seasonMap)
+      .filter(([s]) => parseInt(s) > 0)
+      .sort((a,b) => parseInt(a[0]) - parseInt(b[0]))
+      .map(([s, eps]) => {
+        const seasonNum = parseInt(s);
+        const tmdbSeason = tmdbSeasons.find(ts => ts.season_number === seasonNum);
+        return {
+          season: seasonNum,
+          name: tmdbSeason?.name || `Säsong ${seasonNum}`,
+          overview: tmdbSeason?.overview || "",
+          poster_url: tmdbSeason?.poster_path ? `https://image.tmdb.org/t/p/w300${tmdbSeason.poster_path}` : show.poster_url,
+          episode_count: eps.length,
+          air_date: tmdbSeason?.air_date || null
+        };
+      });
+
+    res.json({ seasons });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get("/api/tvshow/:id/season/:season", requireAuth, async (req, res) => {
+  try {
+    const show = await dbFindOne(db.media, { _id: req.params.id });
+    if (!show) return res.status(404).json({ error: "Hittades inte" });
+
+    const seasonNum = parseInt(req.params.season);
+    const episodes = await dbFind(db.media, { parent_id: req.params.id, type: "episode", season: seasonNum });
+    episodes.sort((a,b) => a.episode - b.episode);
+
+    // Get episode thumbnails + names from TMDB
+    let tmdbEpisodes = [];
+    if (show.tmdb_id && config.tmdb_api_key) {
+      const url = `/tv/${show.tmdb_id}/season/${seasonNum}`;
+      console.log("[TMDB] fetching:", `https://api.themoviedb.org/3${url}&api_key=${config.tmdb_api_key.slice(0,8)}...`);
+      const data = await tmdbFetch(url);
+      console.log("[TMDB] season data:", JSON.stringify(data)?.slice(0,300));
+      if (data?.episodes) tmdbEpisodes = data.episodes;
+    }
+
+    const enriched = episodes.map(ep => {
+      const tmdbEp = tmdbEpisodes.find(te => te.episode_number === ep.episode);
+      return {
+        ...safe(ep),
+        title: tmdbEp?.name || ep.title || `Avsnitt ${ep.episode}`,
+        overview: tmdbEp?.overview || "",
+        still_url: tmdbEp?.still_path ? `https://image.tmdb.org/t/p/w300${tmdbEp.still_path}` : null,
+        runtime: tmdbEp?.runtime || null,
+        air_date: tmdbEp?.air_date || null
+      };
+    });
+
+    // Season details from TMDB
+    let seasonInfo = { name: `Säsong ${seasonNum}`, poster_url: show.poster_url };
+    if (show.tmdb_id && config.tmdb_api_key) {
+      const data = await tmdbFetch(`/tv/${show.tmdb_id}?append_to_response=seasons`);
+      const ts = data?.seasons?.find(s => s.season_number === seasonNum);
+      if (ts) {
+        seasonInfo = {
+          name: ts.name || `Säsong ${seasonNum}`,
+          poster_url: ts.poster_path ? `https://image.tmdb.org/t/p/w300${ts.poster_path}` : show.poster_url,
+          overview: ts.overview || ""
+        };
+      }
+    }
+
+    // Get season cast - use aggregate_credits filtered by season
+    let seasonCast = [];
+    if (show.tmdb_id && config.tmdb_api_key) {
+      const aggCredits = await tmdbFetch(`/tv/${show.tmdb_id}?append_to_response=aggregate_credits`);
+      if (aggCredits?.aggregate_credits?.cast) {
+        // Filter cast that appeared in this season
+        seasonCast = aggCredits.aggregate_credits.cast
+          .filter(p => p.roles?.some(r => r.episode_count > 0))
+          .sort((a,b) => (b.popularity||0) - (a.popularity||0))
+          .slice(0, 50)
+          .map(p => ({
+            id: p.id, name: p.name,
+            character: p.roles?.[0]?.character || "",
+            profile_url: p.profile_path ? `https://image.tmdb.org/t/p/w185${p.profile_path}` : null
+          }));
+      }
+    }
+    res.json({ season: seasonNum, ...seasonInfo, episodes: enriched, cast: seasonCast });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
 
 // ── PERSON DETAILS ───────────────────────────────────────────────────────────
 app.get("/api/person/:tmdb_id", requireAuth, async (req, res) => {

@@ -247,6 +247,21 @@ async function startUpdate(version, downloadUrl, banner) {
 
 
 
+function buildCastScroll(cast, scrollId) {
+  return `<div class="cast-scroll-wrap">
+    <button class="cast-scroll-btn left" onclick="document.getElementById('${scrollId}').scrollBy({left:-300,behavior:'smooth'})">‹</button>
+    <div class="cast-scroll" id="${scrollId}">
+      ${cast.map(p => `
+        <div class="cast-card" onclick="openPersonDetail(${p.id})">
+          ${p.profile_url ? `<img class="cast-photo" src="${p.profile_url}" alt="" loading="lazy">` : `<div class="cast-photo-ph">👤</div>`}
+          <div class="cast-name">${esc(p.name)}</div>
+          <div class="cast-char">${esc(p.character||"")}</div>
+        </div>`).join("")}
+    </div>
+    <button class="cast-scroll-btn right" onclick="document.getElementById('${scrollId}').scrollBy({left:300,behavior:'smooth'})">›</button>
+  </div>`;
+}
+
 function buildAbcNav(items) {
   const letters = new Set(items.map(i => (i.title||"").replace(/^(the |a |an )/i,"")[0]?.toUpperCase()).filter(Boolean));
   const all = "#ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("");
@@ -614,7 +629,7 @@ function buildHero(item) {
   return `<div class="hero">
     <div class="hero-bg" ${bg}></div>
     <div class="hero-content">
-      <div class="hero-badge">StreamVault rekommenderar</div>
+      <div class="hero-badge">${navigator.language.startsWith("sv") ? "StreamVault rekommenderar" : navigator.language.startsWith("no") ? "StreamVault anbefaler" : navigator.language.startsWith("da") ? "StreamVault anbefaler" : navigator.language.startsWith("fi") ? "StreamVault suosittelee" : navigator.language.startsWith("de") ? "StreamVault empfiehlt" : "StreamVault recommends"}</div>
       <div class="hero-title">${esc(item.title)}</div>
       <div class="hero-meta">
         ${item.rating ? `<span class="hero-rating">⭐ ${parseFloat(item.rating).toFixed(1)}</span>` : ""}
@@ -646,7 +661,8 @@ function buildCard(item, wide = false) {
   const progressBar = (!item.completed && item.position > 10 && item.duration)
     ? `<div class="mcard-progress"><div class="mcard-progress-fill" style="width:${Math.min(100, Math.round(item.position/item.duration*100))}%"></div></div>`
     : "";
-  return `<div class="mcard${wide ? " mcard-wide" : ""}" onclick='openDetail("${item.id}")'>
+  const clickFn = item.type === "tvshow" ? `openShowDetail("${item.id}")` : `openDetail("${item.id}")`;
+  return `<div class="mcard${wide ? " mcard-wide" : ""}" onclick='${clickFn}'>
     <div style="position:relative">${poster}${ph}<div class="mcard-overlay"><span class="mcard-play">▶</span></div>${watchedBadge}${progressBar}</div>
     <div class="mcard-info">
       <div class="mcard-title">${esc(item.title)}</div>
@@ -656,6 +672,145 @@ function buildCard(item, wide = false) {
 }
 
 // ── DETAIL ────────────────────────────────────────────────────────────────────
+async function openShowDetail(id) {
+  document.querySelectorAll(".section").forEach(s => s.classList.remove("active"));
+  const sec = document.getElementById("sec-detail") || (() => {
+    const s = document.createElement("section");
+    s.id = "sec-detail"; s.className = "section";
+    document.getElementById("appMain").appendChild(s);
+    return s;
+  })();
+  sec.classList.add("active");
+  sec.dataset.fromId = id;
+  sec.innerHTML = `<div class="spinner-wrap" style="height:60vh"><div class="spinner"></div></div>`;
+  try {
+    const [item, details, seasonsData] = await Promise.all([
+      API.get("/media/" + id),
+      API.get("/media/" + id + "/details").catch(() => ({})),
+      API.get("/tvshow/" + id + "/seasons").catch(() => ({ seasons: [] }))
+    ]);
+    const seasons = seasonsData.seasons || [];
+    const genresHtml = (details.genres||[]).map(g => `<span class="detail-genre">${esc(g)}</span>`).join("");
+    const directors = (details.crew||[]).filter(c => ["Creator","Director"].includes(c.job)).map(c => esc(c.name)).join(", ");
+    const castHtml = (details.cast||[]).length ? `
+      <div class="detail-section">
+        <h3 class="detail-section-title">Skådespelare</h3>
+        ${buildCastScroll(details.cast, "cast-show-${id}")}
+      </div>` : "";
+    const seasonsHtml = seasons.length ? `
+      <div class="detail-section">
+        <h3 class="detail-section-title">Säsonger</h3>
+        <div class="row-scroll">
+          ${seasons.map(s => `
+            <div class="mcard" onclick="openSeason('${id}', ${s.season})">
+              <div style="position:relative">
+                ${s.poster_url
+                  ? `<img class="mcard-poster" src="${s.poster_url}" alt="" loading="lazy">`
+                  : `<div class="mcard-poster-ph"><span>📺</span><span>${esc(s.name.slice(0,14))}</span></div>`}
+                <div class="mcard-overlay"><span class="mcard-play">▶</span></div>
+              </div>
+              <div class="mcard-info">
+                <div class="mcard-title">${esc(s.name)}</div>
+                <div class="mcard-meta">${s.episode_count} avsnitt${s.air_date ? " · " + s.air_date.slice(0,4) : ""}</div>
+              </div>
+            </div>`).join("")}
+        </div>
+      </div>` : "";
+    sec.innerHTML = `
+      <div class="detail-page">
+        <div class="show-hero" ${item.backdrop_url ? `style="background-image:url('${item.backdrop_url}')"` : ""}>
+          <div class="show-hero-overlay"></div>
+          <button class="detail-back" onclick="closeDetail()">← Tillbaka</button>
+          <div class="show-hero-content">
+            <div class="detail-poster-col">
+              ${item.poster_url ? `<img class="detail-poster" src="${item.poster_url}" alt="">` : `<div class="detail-poster-ph">📺</div>`}
+            </div>
+            <div class="detail-info-col">
+              <h1 class="detail-page-title">${esc(item.title)}</h1>
+              <div class="detail-meta-row">
+                ${item.rating ? `<span class="detail-rating">⭐ ${parseFloat(item.rating).toFixed(1)}</span>` : ""}
+                ${directors ? `<span class="detail-meta-item">🎬 ${directors}</span>` : ""}
+              </div>
+              ${genresHtml ? `<div class="detail-genres">${genresHtml}</div>` : ""}
+              ${item.overview ? `<p class="detail-page-overview">${esc(item.overview)}</p>` : ""}
+              <div class="detail-actions">
+                <button class="btn-fav" onclick='openFixMeta("${item.id}","${esc(item.title)}","tv")'>🔍 Fixa info</button>
+                <button class="btn-fav" onclick='openEditMedia("${item.id}")'>✏ Redigera</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="detail-content">
+          ${seasonsHtml}
+          ${castHtml}
+        </div>
+      </div>`;
+  } catch(e) {
+    sec.innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><h3>${e.message}</h3></div>`;
+  }
+}
+
+async function openSeason(showId, seasonNum) {
+  const sec = document.getElementById("sec-detail");
+  sec.innerHTML = `<div class="spinner-wrap" style="height:60vh"><div class="spinner"></div></div>`;
+  try {
+    const [show, seasonData] = await Promise.all([
+      API.get("/media/" + showId),
+      API.get("/tvshow/" + showId + "/season/" + seasonNum)
+    ]);
+    const episodes = seasonData.episodes || [];
+    const cast = seasonData.cast || [];
+    const castHtml = cast.length ? `
+      <div class="detail-section">
+        <h3 class="detail-section-title">Skådespelare</h3>
+        ${buildCastScroll(cast, "cast-season-${showId}-${seasonNum}")}
+      </div>` : "";
+    const episodesHtml = `<div class="media-grid">${episodes.map(ep => {
+      const label = `S${String(seasonNum).padStart(2,"0")} E${String(ep.episode||0).padStart(2,"0")}`;
+      return `<div class="mcard" onclick='playEpisode("${ep.id}","${esc(show.title)}","${showId}",${seasonNum},${ep.episode||0})'>
+        <div style="position:relative">
+          ${ep.still_url
+            ? `<img class="mcard-poster" src="${ep.still_url}" alt="" loading="lazy" style="aspect-ratio:16/9;object-fit:cover">`
+            : `<div class="mcard-poster-ph" style="aspect-ratio:16/9"><span>📺</span><span>${esc(label)}</span></div>`}
+          <div class="mcard-overlay"><span class="mcard-play">▶</span></div>
+        </div>
+        <div class="mcard-info">
+          <div class="mcard-title">${esc(ep.title||"Avsnitt "+ep.episode)}</div>
+          <div class="mcard-meta">Avsnitt ${ep.episode||""}${ep.runtime ? " · "+ep.runtime+" min" : ""}</div>
+        </div>
+      </div>`;
+    }).join("")}</div>`;
+    sec.innerHTML = `
+      <div class="detail-page">
+        <div class="show-hero" ${show.backdrop_url ? `style="background-image:url('${show.backdrop_url}')"` : ""}>
+          <div class="show-hero-overlay"></div>
+          <button class="detail-back" onclick="openShowDetail('${showId}')">← ${esc(show.title)}</button>
+          <div class="show-hero-content">
+            <div class="detail-poster-col">
+              ${seasonData.poster_url ? `<img class="detail-poster" src="${seasonData.poster_url}" alt="">` : `<div class="detail-poster-ph">📺</div>`}
+            </div>
+            <div class="detail-info-col">
+              <h1 class="detail-page-title">${esc(seasonData.name||"Säsong "+seasonNum)}</h1>
+              <div class="detail-meta-row">
+                <span class="detail-meta-item">${episodes.length} avsnitt</span>
+              </div>
+              ${seasonData.overview ? `<p class="detail-page-overview">${esc(seasonData.overview)}</p>` : ""}
+            </div>
+          </div>
+        </div>
+        <div class="detail-content">
+          ${castHtml}
+          <div class="detail-section">
+            <h3 class="detail-section-title">Avsnitt</h3>
+            ${episodesHtml || '<p style="color:var(--muted)">Inga avsnitt hittades</p>'}
+          </div>
+        </div>
+      </div>`;
+  } catch(e) {
+    sec.innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><h3>${e.message}</h3></div>`;
+  }
+}
+
 async function openTmdbDetail(tmdbId) {
   document.querySelectorAll(".section").forEach(s => s.classList.remove("active"));
   const sec = document.getElementById("sec-detail") || (() => {
@@ -763,14 +918,7 @@ async function openDetail(id) {
     const castHtml = (details.cast||[]).length ? `
       <div class="detail-section">
         <h3 class="detail-section-title">Skådespelare</h3>
-        <div class="cast-scroll">
-          ${(details.cast||[]).map(p => `
-            <div class="cast-card" onclick="openPersonDetail(${p.id})">
-              ${p.profile_url ? `<img class="cast-photo" src="${p.profile_url}" alt="" loading="lazy">` : `<div class="cast-photo-ph">👤</div>`}
-              <div class="cast-name">${esc(p.name)}</div>
-              <div class="cast-char">${esc(p.character||"")}</div>
-            </div>`).join("")}
-        </div>
+        ${buildCastScroll(details.cast, "cast-movie-${id}")}
       </div>` : "";
     let episodesHtml = "";
     if (item.type === "tvshow" && item.episodes?.length) {
@@ -1114,6 +1262,8 @@ async function toggleFav(id, btn) {
 // ── PLAYBACK ──────────────────────────────────────────────────────────────────
 let currentHls = null;
 let currentItemId = null;
+let currentEpisodeData = null; // { showId, season, episode, episodes[] }
+let _nextEpTimer = null;
 
 function loadHlsJs() {
   return new Promise((resolve) => {
@@ -1165,6 +1315,25 @@ async function playItem(id, title) {
     if (info.method === "direct") {
       video.src = info.url;
       video.play().catch(() => {});
+      // Reset DASH state for new episode
+      window._dashStartSec = 0;
+      window._dashFirstCT = null;
+      window._dashSessionStart = Date.now();
+      // Simple seek handler for direct play
+      window._hlsSeekHandler = (seekSec) => {
+        video.currentTime = seekSec;
+        window._dashStartSec = seekSec;
+        window._dashFirstCT = video.currentTime;
+        video.play().catch(() => {});
+      };
+      video.onended = () => {
+        const nextEp = getNextEpisode();
+        if (nextEp) {
+          document.getElementById("next-ep-banner")?.remove();
+          clearInterval(_nextEpTimer);
+          playEpisode(nextEp.id, currentEpisodeData?.showTitle||"", currentEpisodeData?.showId, currentEpisodeData?.season, nextEp.episode);
+        }
+      };
       video.onloadedmetadata = () => {
         initPlayerControls(info.duration || video.duration);
         if (resumeSec > 0) {
@@ -1335,22 +1504,29 @@ async function playItem(id, title) {
     // Progress: dashStartSec + video.currentTime = absolute position
     // video.currentTime always starts at 0 per session (Plex offset=0 approach)
     let _lastProgressSave = 0;
+    let _nextEpShown = false;
     video.addEventListener("timeupdate", () => {
       const now = Date.now();
-      if (now - _lastProgressSave < 5000) return;
-      _lastProgressSave = now;
       const dur = playerDuration || info.duration || (isNaN(video.duration) ? 0 : video.duration);
       if (dur > 30) {
         const firstCT = window._dashFirstCT || 0;
         const ct = video.currentTime;
         const pos = ct > 0 ? (window._dashStartSec || 0) + Math.max(0, ct - firstCT)
                            : (window._dashStartSec || 0) + (Date.now() - (window._dashSessionStart || Date.now())) / 1000;
+        const pct = pos / dur;
+        // Show next episode banner at 92%
+        if (pct > 0.98 && !_nextEpShown) {
+          _nextEpShown = true;
+          const nextEp = getNextEpisode();
+          if (nextEp) showNextEpisodeBanner(nextEp);
+        }
+        if (now - _lastProgressSave < 5000) return;
+        _lastProgressSave = now;
         if (pos < 5) return;
-        console.log("[POS] ct:", Math.floor(ct), "firstCT:", Math.floor(firstCT), "startSec:", window._dashStartSec, "pos:", Math.floor(pos));
         API.post("/media/" + id + "/progress", {
           position: Math.floor(pos),
           duration: Math.floor(dur),
-          completed: pos / dur > 0.9 ? 1 : 0
+          completed: pct > 0.9 ? 1 : 0
         }).catch(() => {});
       }
     });
@@ -1359,6 +1535,65 @@ async function playItem(id, title) {
     console.error("Playback error:", e);
     document.getElementById("pb-sub").textContent = "Fel: " + e.message;
   }
+}
+
+async function playEpisode(id, showTitle, showId, season, episodeNum) {
+  // Load all episodes for this season to enable next episode
+  try {
+    const seasonData = await API.get("/tvshow/" + showId + "/season/" + season);
+    currentEpisodeData = {
+      showId, showTitle, season,
+      episodes: seasonData.episodes || [],
+      currentEpisode: episodeNum
+    };
+  } catch {
+    currentEpisodeData = null;
+  }
+  const label = `S${String(season).padStart(2,"0")} E${String(episodeNum).padStart(2,"0")}`;
+  playItem(id, showTitle + " · " + label);
+}
+
+function getNextEpisode() {
+  if (!currentEpisodeData) return null;
+  const { episodes, currentEpisode } = currentEpisodeData;
+  const idx = episodes.findIndex(ep => ep.episode === currentEpisode);
+  return idx >= 0 && idx < episodes.length - 1 ? episodes[idx + 1] : null;
+}
+
+function showNextEpisodeBanner(nextEp) {
+  // Remove existing banner
+  document.getElementById("next-ep-banner")?.remove();
+  if (!nextEp) return;
+  clearTimeout(_nextEpTimer);
+  let countdown = 20;
+  const banner = document.createElement("div");
+  banner.id = "next-ep-banner";
+  banner.style.cssText = "position:absolute;bottom:80px;right:24px;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px 20px;z-index:100;display:flex;align-items:center;gap:16px;min-width:280px;box-shadow:0 4px 24px rgba(0,0,0,0.5)";
+  const update = () => {
+    banner.innerHTML = `
+      <div style="flex:1">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Nästa avsnitt om ${countdown}s</div>
+        <div style="font-size:14px;font-weight:600">${esc(nextEp.title||"Avsnitt "+nextEp.episode)}</div>
+      </div>
+      <button onclick="playEpisode('${nextEp.id}','${esc(currentEpisodeData.showTitle||"")}','${currentEpisodeData.showId}',${currentEpisodeData.season},${nextEp.episode})" 
+        style="background:var(--accent);border:none;color:white;font-family:'DM Sans',sans-serif;font-size:13px;font-weight:600;padding:8px 16px;border-radius:8px;cursor:pointer;white-space:nowrap">
+        ▶ Spela nu
+      </button>
+      <button onclick="document.getElementById('next-ep-banner').remove();clearTimeout(_nextEpTimer)"
+        style="background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer">✕</button>`;
+  };
+  update();
+  document.getElementById("player-bar").appendChild(banner);
+  _nextEpTimer = setInterval(() => {
+    countdown--;
+    if (countdown <= 0) {
+      clearInterval(_nextEpTimer);
+      banner.remove();
+      playEpisode(nextEp.id, currentEpisodeData.showTitle||"", currentEpisodeData.showId, currentEpisodeData.season, nextEp.episode);
+    } else {
+      update();
+    }
+  }, 1000);
 }
 
 function playMusic(id, title, artist) {
@@ -2018,6 +2253,10 @@ function closePlayer() {
   document.getElementById("player-bar").style.display = "none";
   document.body.style.paddingBottom = "";
   nowPlayingId = null;
+  currentItemId = null;
+  currentEpisodeData = null;
+  clearInterval(_nextEpTimer);
+  document.getElementById("next-ep-banner")?.remove();
   stopBufferPolling();
 }
 
