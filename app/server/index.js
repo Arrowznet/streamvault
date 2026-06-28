@@ -2191,7 +2191,7 @@ app.get("/api/media/:id/fileinfo", requireAdmin, async (req, res) => {
     const subtitleStreams = probe?.streams?.filter(s => s.codec_type === "subtitle") || [];
     const fmt = probe?.format || {};
     res.json({
-      title: item.title, file_size: item.file_size, tmdb_id: item.tmdb_id,
+      title: item.title, file_path: item.file_path, file_size: item.file_size, tmdb_id: item.tmdb_id,
       library_id: item.library_id, added_at: item.added_at, year: item.year, type: item.type, rating: item.rating,
       video: videoStream ? {
         codec: videoStream.codec_name?.toUpperCase(), profile: videoStream.profile,

@@ -247,6 +247,32 @@ async function startUpdate(version, downloadUrl, banner) {
 
 
 
+function buildAbcNav(items) {
+  const letters = new Set(items.map(i => (i.title||"").replace(/^(the |a |an )/i,"")[0]?.toUpperCase()).filter(Boolean));
+  const all = "#ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("");
+  return `<div class="abc-nav">${all.map(l => {
+    const hasItems = l === "#"
+      ? [...letters].some(c => !/[A-Z]/.test(c))
+      : letters.has(l);
+    return `<a onclick="scrollToLetter('${l}')" class="${hasItems ? 'has-items' : ''}">${l}</a>`;
+  }).join("")}</div>`;
+}
+
+function scrollToLetter(letter) {
+  const grid = document.getElementById("lib-grid") || document.querySelector(".media-grid");
+  if (!grid) return;
+  const cards = grid.querySelectorAll(".mcard");
+  for (const card of cards) {
+    const title = card.querySelector(".mcard-title")?.textContent?.replace(/^(the |a |an )/i,"") || "";
+    const firstChar = title[0]?.toUpperCase();
+    const matches = letter === "#" ? !/[A-Z]/.test(firstChar) : firstChar === letter;
+    if (matches) {
+      card.scrollIntoView({ behavior: "smooth", block: "start" });
+      return;
+    }
+  }
+}
+
 async function loadLibraryView(libId, libName, libType) {
   const sec = document.getElementById("sec-library");
   sec.innerHTML = `<div class="spinner-wrap"><div class="spinner"></div></div>`;
@@ -261,7 +287,7 @@ async function loadLibraryView(libId, libName, libType) {
     const data = await API.get(`/libraries/${libId}/contents`);
     const items = data.items || [];
     sec.innerHTML = `
-      <div class="grid-wrap">
+      <div class="grid-wrap" style="padding-right:32px">
         <div class="filter-bar">
           <h2 style="font-size:22px;font-weight:700;margin:0;flex:1">${esc(libName)}</h2>
           <input class="filter-input" type="text" placeholder="Sök i ${esc(libName)}..." id="lib-filter-q" oninput="filterLibraryView()"/>
@@ -274,7 +300,8 @@ async function loadLibraryView(libId, libName, libType) {
         <div class="media-grid" id="lib-grid">
           ${items.length ? items.map(i => buildCard(i)).join("") : '<div class="empty"><div class="empty-icon">📭</div><h3>Tomt bibliotek</h3></div>'}
         </div>
-      </div>`;
+      </div>
+      ${buildAbcNav(items)}`;
     sec.dataset.items = JSON.stringify(items);
   } catch(e) {
     sec.innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><h3>Kunde inte ladda</h3><p>${e.message}</p></div>`;
@@ -309,12 +336,20 @@ async function loadHome() {
     allLibraries = libs;
     let html = "";
 
-    // Hero from first movie with backdrop
-    const firstMovieLib = libs.find(l => l.type === "movies");
-    if (firstMovieLib) {
-      const data = await API.get(`/libraries/${firstMovieLib.id}/contents`);
-      const featured = data.items.find(m => m.backdrop_url) || data.items[0];
-      if (featured) html += buildHero(featured);
+    // Hero: daily seed - same film all day, changes at midnight
+    const movieLibs = libs.filter(l => l.type === "movies");
+    if (movieLibs.length) {
+      let allMovies = [];
+      for (const lib of movieLibs) {
+        const data = await API.get(`/libraries/${lib.id}/contents`);
+        allMovies = allMovies.concat(data.items.filter(m => m.backdrop_url));
+      }
+      if (allMovies.length) {
+        const today = new Date();
+        const seed = today.getFullYear() * 10000 + (today.getMonth()+1) * 100 + today.getDate();
+        const idx = seed % allMovies.length;
+        html += buildHero(allMovies[idx]);
+      }
     }
 
     if (continueW?.length) html += buildRow("Fortsätt titta", continueW);
@@ -579,7 +614,7 @@ function buildHero(item) {
   return `<div class="hero">
     <div class="hero-bg" ${bg}></div>
     <div class="hero-content">
-      <div class="hero-badge">Utvalda</div>
+      <div class="hero-badge">StreamVault rekommenderar</div>
       <div class="hero-title">${esc(item.title)}</div>
       <div class="hero-meta">
         ${item.rating ? `<span class="hero-rating">⭐ ${parseFloat(item.rating).toFixed(1)}</span>` : ""}
@@ -1003,6 +1038,13 @@ async function openMediaInfo(id) {
         </div>
         <div style="padding:24px;display:flex;flex-direction:column;gap:24px">
           <div>
+            <div class="info-section-title">Fil</div>
+            <div style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:10px 14px;font-size:12px;font-family:monospace;color:var(--text);word-break:break-all;margin-bottom:8px">${esc(item.file_path||"–")}</div>
+            ${infoRow("Storlek",item.container?.size||"–")}
+            ${infoRow("Speltid",item.container?.duration?Math.floor(item.container.duration/3600)+"h "+Math.floor((item.container.duration%3600)/60)+"m":"–")}
+            ${infoRow("Inlagt",item.added_at?new Date(item.added_at).toLocaleDateString("sv-SE"):"–")}
+          </div>
+          <div>
             <div class="info-section-title">Video</div>
             ${infoRow("Codec",v?.codec)} ${infoRow("Profil",v?.profile)} ${infoRow("Upplösning",v?.width&&v?.height?v.width+"x"+v.height:"–")} ${infoRow("Bildhastighet",v?.fps?v.fps+"fps":"–")} ${infoRow("Bitdjup",v?.bit_depth?v.bit_depth+" bit":"–")}
           </div>
@@ -1010,9 +1052,8 @@ async function openMediaInfo(id) {
           <div><div class="info-section-title">Undertexter</div>${subHtml}</div>
           <div>
             <div class="info-section-title">Container</div>
-            ${infoRow("Format",item.container?.format)} ${infoRow("Speltid",item.container?.duration?Math.floor(item.container.duration/3600)+"h "+Math.floor((item.container.duration%3600)/60)+"m":"–")} ${infoRow("Storlek",item.container?.size)} ${infoRow("Bitrate",item.container?.bitrate)}
+            ${infoRow("Format",item.container?.format)} ${infoRow("Bitrate",item.container?.bitrate)}
           </div>
-          <div><div class="info-section-title">Övrigt</div>${infoRow("Inlagt",item.added_at?new Date(item.added_at).toLocaleDateString("sv-SE"):"–")}</div>
         </div>
       </div>`;
     document.body.appendChild(modal);
@@ -1538,27 +1579,22 @@ function toggleFullscreen() {
   var bar = document.getElementById("player-bar");
   if (!document.fullscreenElement) {
     bar.requestFullscreen().catch(function() {});
-    bar.addEventListener("mousemove", showFsControls);
-    bar.addEventListener("click", showFsControls);
-    showFsControls();
   } else {
     document.exitFullscreen();
-    clearTimeout(_fsHideTimer);
-    var controls = document.getElementById("custom-controls");
-    if (controls) controls.style.opacity = "1";
-    bar.style.cursor = "default";
-    bar.removeEventListener("mousemove", showFsControls);
-    bar.removeEventListener("click", showFsControls);
   }
 }
 
 document.addEventListener("fullscreenchange", function() {
-  if (!document.fullscreenElement) {
+  var bar = document.getElementById("player-bar");
+  var controls = document.getElementById("custom-controls");
+  if (document.fullscreenElement) {
+    bar.addEventListener("mousemove", showFsControls);
+    bar.addEventListener("click", showFsControls);
+    showFsControls();
+  } else {
     clearTimeout(_fsHideTimer);
-    var controls = document.getElementById("custom-controls");
     if (controls) controls.style.opacity = "1";
-    var bar = document.getElementById("player-bar");
-    if (bar) { bar.style.cursor = "default"; bar.removeEventListener("mousemove", showFsControls); }
+    if (bar) { bar.removeEventListener("mousemove", showFsControls); bar.removeEventListener("click", showFsControls); bar.style.cursor = "default"; }
   }
 });
 
