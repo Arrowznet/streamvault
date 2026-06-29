@@ -341,7 +341,7 @@ async function loadCollections() {
   }
 }
 
-function openCollection(collectionId) {
+async function openCollection(collectionId) {
   const collection = window._collectionsData?.find(c => String(c.id) === String(collectionId));
   if (!collection) return;
   const sec = document.getElementById("sec-detail") || (() => {
@@ -352,7 +352,57 @@ function openCollection(collectionId) {
   })();
   document.querySelectorAll(".section").forEach(s => s.classList.remove("active"));
   sec.classList.add("active");
-  const movies = [...collection.movies].sort((a,b) => (a.year||0)-(b.year||0));
+  sec.innerHTML = `<div class="spinner-wrap" style="height:60vh"><div class="spinner"></div></div>`;
+
+  // Fetch full collection from TMDB to get missing films too
+  let allParts = null;
+  try {
+    allParts = await API.get("/collections/" + collectionId + "/full");
+  } catch {}
+
+  const localMovies = [...collection.movies].sort((a,b) => (a.year||0)-(b.year||0));
+
+  let filmsHtml = "";
+  if (allParts?.parts?.length) {
+    const inLib = allParts.parts.filter(p => p.in_library);
+    const missing = allParts.parts.filter(p => !p.in_library);
+
+    if (inLib.length) {
+      filmsHtml += `<div class="detail-section">
+        <h3 class="detail-section-title">I ditt bibliotek (${inLib.length})</h3>
+        <div class="media-grid">
+          ${localMovies.map(m => buildCard(m)).join("")}
+        </div>
+      </div>`;
+    }
+
+    if (missing.length) {
+      filmsHtml += `<div class="detail-section">
+        <h3 class="detail-section-title">Saknas i ditt bibliotek (${missing.length})</h3>
+        <div class="media-grid">
+          ${missing.map(p => `
+            <div class="mcard" onclick="openTmdbDetail(${p.tmdb_id})" style="opacity:0.6">
+              <div style="position:relative">
+                ${p.poster_url
+                  ? `<img class="mcard-poster" src="${p.poster_url}" alt="" loading="lazy">`
+                  : `<div class="mcard-poster-ph"><span>🎬</span><span>${esc((p.title||"").slice(0,14))}</span></div>`}
+                <div class="mcard-overlay"><span class="mcard-play" style="font-size:24px">🔍</span></div>
+              </div>
+              <div class="mcard-info">
+                <div class="mcard-title">${esc(p.title||"")}</div>
+                <div class="mcard-meta">${p.year||""}</div>
+              </div>
+            </div>`).join("")}
+        </div>
+      </div>`;
+    }
+  } else {
+    filmsHtml = `<div class="detail-section">
+      <h3 class="detail-section-title">Filmer (${localMovies.length})</h3>
+      <div class="media-grid">${localMovies.map(m => buildCard(m)).join("")}</div>
+    </div>`;
+  }
+
   sec.innerHTML = `
     <div class="detail-page">
       <div class="show-hero" ${collection.backdrop_url ? `style="background-image:url('${collection.backdrop_url}')"` : ""}>
@@ -365,18 +415,13 @@ function openCollection(collectionId) {
           <div class="detail-info-col">
             <h1 class="detail-page-title">${esc(collection.name||"")}</h1>
             <div class="detail-meta-row">
-              <span class="detail-meta-item">${movies.length} filmer i ditt bibliotek</span>
+              <span class="detail-meta-item">${localMovies.length} av ${allParts?.parts?.length||localMovies.length} filmer i ditt bibliotek</span>
             </div>
           </div>
         </div>
       </div>
       <div class="detail-content">
-        <div class="detail-section">
-          <h3 class="detail-section-title">Filmer</h3>
-          <div class="media-grid">
-            ${movies.map(m => buildCard(m)).join("")}
-          </div>
-        </div>
+        ${filmsHtml}
       </div>
     </div>`;
 }
@@ -623,19 +668,21 @@ async function loadMusicPage() {
   }
 }
 
-function renderArtistGrid(byArtist) {
+async function renderArtistGrid(byArtist) {
   const sec = document.getElementById("sec-music");
   const artists = Object.entries(byArtist).sort((a,b) => a[1].name.localeCompare(b[1].name));
   let html = `<div style="padding:28px">
     <div class="row-header" style="margin-bottom:20px"><span class="row-title">Musik</span><span class="row-count">${artists.length} artister / mappar</span></div>
     <div class="row-scroll">`;
-  artists.forEach(([id, data]) => {
+  artists.forEach(([id, data], idx) => {
     const albumCount = Object.keys(data.albums).length;
     const safeId = encodeURIComponent(id);
     const icon = data.isStandalone ? "💿" : "🎤";
+    const imgId = "artist-img-" + idx;
+    const artistKey = "aimg-" + encodeURIComponent(data.name).slice(0,30).replace(/%/g,"");
     html += `<div class="mcard" onclick="openArtistById('${safeId}')">
       <div style="position:relative">
-        <div class="mcard-poster-ph"><span>${icon}</span><span>${esc(data.name.slice(0,14))}</span></div>
+        <div class="mcard-poster-ph" id="${artistKey}"><span>${icon}</span><span>${esc(data.name.slice(0,14))}</span></div>
         <div class="mcard-overlay"><span class="mcard-play">▶</span></div>
       </div>
       <div class="mcard-info">
@@ -646,6 +693,18 @@ function renderArtistGrid(byArtist) {
   });
   html += `</div></div>`;
   sec.innerHTML = html;
+  // Load Spotify images asynchronously for non-standalone artists
+  // Load Spotify images using same index as rendering
+  artists.forEach(([id, data]) => {
+    const artistKey = "aimg-" + encodeURIComponent(data.name).slice(0,30).replace(/%/g,"");
+    API.get("/spotify/artist/" + encodeURIComponent(data.name)).then(r => {
+      console.log("[SPOTIFY]", data.name, "-> image:", !!r.image, "searched:", r.searched);
+      if (r.image) {
+        const el = document.getElementById(artistKey);
+        if (el) el.outerHTML = `<img class="mcard-poster" src="${r.image}" alt="" loading="lazy" style="aspect-ratio:1/1;object-fit:cover">`;
+      }
+    }).catch(e => console.log("[SPOTIFY ERR]", data.name, e.message));
+  });
 }
 
 function openArtistById(safeId) {
@@ -2499,6 +2558,10 @@ async function loadSettings() {
     const counts = Object.fromEntries((scanStatus.counts || []).map(c => [c.type, c.c]));
     const musicData = (scanStatus.counts || []).find(c => c.type === "music");
     if (musicData) counts.albums = musicData.albums || 0;
+    const tvData = (scanStatus.counts || []).find(c => c.type === "tvshow");
+    if (tvData) counts.episodes = tvData.episodes || 0;
+    const movieData = (scanStatus.counts || []).find(c => c.type === "movie");
+    if (movieData) counts.collections = movieData.collections || 0;
     // Auto-refresh cache status while queue is running
     if (cacheStatus && (cacheStatus.running || cacheStatus.queued > 0)) {
       startCacheStatusPolling();
@@ -2514,11 +2577,11 @@ async function loadSettings() {
         <div style="display:flex;gap:12px;margin-bottom:12px">
           <div style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:14px 20px;text-align:center">
             <div style="font-size:22px;font-weight:600">${counts.movie || 0}</div>
-            <div style="font-size:12px;color:var(--muted)">Filmer</div>
+            <div style="font-size:12px;color:var(--muted)">Filmer${counts.collections ? " · " + counts.collections + " samlingar" : ""}</div>
           </div>
           <div style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:14px 20px;text-align:center">
             <div style="font-size:22px;font-weight:600">${counts.tvshow || 0}</div>
-            <div style="font-size:12px;color:var(--muted)">Serier</div>
+            <div style="font-size:12px;color:var(--muted)">Serier · ${counts.episodes || 0} avsnitt</div>
           </div>
           <div style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:14px 20px;text-align:center">
             <div style="font-size:22px;font-weight:600">${counts.albums || 0}</div>
@@ -2615,6 +2678,20 @@ async function loadSettings() {
         <div class="setting-row">
           <div><div class="setting-label">OpenSubtitles API-nyckel</div><div class="setting-desc">Automatiska undertexter</div></div>
           <input class="s-input" type="password" id="s-opensub" value="${esc(cfg.opensubtitles_api_key || "")}" placeholder="Ej angiven" autocomplete="off"/>
+        </div>
+        <div class="setting-row">
+<div><div class="setting-label">Last.fm API-nyckel</div><div class="setting-desc">Artistbilder i musikbiblioteket</div></div>
+          <input class="s-input" type="password" id="s-lastfm" value="${esc(cfg.lastfm_api_key || '')}" placeholder="Ej angiven" autocomplete="off"/>
+        </div>
+        <div class="setting-row">
+          <div><div class="setting-label">Spotify Client ID</div><div class="setting-desc">Artistbilder i musikbiblioteket</div></div>
+          <input class="s-input" type="password" id="s-spotify-id" value="${esc(cfg.spotify_client_id || '')}" placeholder="Ej angiven" autocomplete="off"/>
+        </div>
+        <div class="setting-row">
+          <div><div class="setting-label">Spotify Client Secret</div><div class="setting-desc">Krävs tillsammans med Client ID</div></div>
+          <input class="s-input" type="password" id="s-spotify-secret" value="${esc(cfg.spotify_client_secret || '')}" placeholder="Ej angiven" autocomplete="off"/>
+        </div>
+        <div class="setting-row">
         </div>
         <div style="margin-top:12px"><button class="s-btn primary" onclick="saveApiKeys()">Spara nycklar</button></div>
       </div>
@@ -2796,7 +2873,10 @@ async function saveApiKeys() {
   try {
     await API.patch("/config", {
       tmdb_api_key: document.getElementById("s-tmdb").value.trim(),
-      opensubtitles_api_key: document.getElementById("s-opensub").value.trim()
+      opensubtitles_api_key: document.getElementById("s-opensub").value.trim(),
+      lastfm_api_key: document.getElementById("s-lastfm")?.value?.trim() || "",
+      spotify_client_id: document.getElementById("s-spotify-id")?.value?.trim() || "",
+      spotify_client_secret: document.getElementById("s-spotify-secret")?.value?.trim() || ""
     });
     toast("✓ Nycklar sparade!", "success");
   } catch (e) { toast(e.message, "error"); }

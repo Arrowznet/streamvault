@@ -2175,8 +2175,11 @@ app.get("/api/scan/status", requireAuth, async (req, res) => {
   const allMusic = await dbFind(db.media, {type:"music"});
   const musicTracks = allMusic.filter(m => { try { return JSON.parse(m.extra_data||"{}").isTrack; } catch { return false; } }).length;
   const musicAlbums = allMusic.filter(m => { try { return JSON.parse(m.extra_data||"{}").isAlbum; } catch { return false; } }).length;
-  const [movies,tvshows] = await Promise.all([dbCount(db.media,{type:"movie"}),dbCount(db.media,{type:"tvshow"})]);
-  res.json({scanning:isScanning,counts:[{type:"movie",c:movies},{type:"tvshow",c:tvshows},{type:"music",c:musicTracks,albums:musicAlbums}]});
+  const [movies,tvshows,episodes] = await Promise.all([dbCount(db.media,{type:"movie"}),dbCount(db.media,{type:"tvshow"}),dbCount(db.media,{type:"episode"})]);
+  const allMoviesForCollections = await dbFind(db.media, {type:"movie", collection_id: {$exists: true}});
+  const collectionIds = new Set(allMoviesForCollections.filter(m => m.collection_id).map(m => m.collection_id));
+  const collections = collectionIds.size;
+  res.json({scanning:isScanning,counts:[{type:"movie",c:movies,collections},{type:"tvshow",c:tvshows,episodes},{type:"music",c:musicTracks,albums:musicAlbums}]});
 });
 
 app.get("/api/config", requireAdmin, (req, res) => {
@@ -2184,7 +2187,7 @@ app.get("/api/config", requireAdmin, (req, res) => {
 });
 
 app.patch("/api/config", requireAdmin, (req, res) => {
-  ["tmdb_api_key","opensubtitles_api_key","port","language"].forEach(k=>{if(req.body[k]!==undefined)config[k]=req.body[k];});
+  ["tmdb_api_key","opensubtitles_api_key","lastfm_api_key","spotify_client_id","spotify_client_secret","port","language"].forEach(k=>{if(req.body[k]!==undefined)config[k]=req.body[k];});
   fs.writeFileSync(CONFIG_PATH,JSON.stringify(config,null,2));
   res.json({ok:true});
 });
@@ -2290,6 +2293,139 @@ app.post("/api/media/:id/fix-meta", requireAdmin, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+
+// ── SPOTIFY ARTIST IMAGE ─────────────────────────────────────────────────────
+let _spotifyToken = null;
+let _spotifyTokenExpiry = 0;
+
+async function getSpotifyToken() {
+  if (_spotifyToken && Date.now() < _spotifyTokenExpiry) return _spotifyToken;
+  if (!config.spotify_client_id || !config.spotify_client_secret) return null;
+  try {
+    const creds = Buffer.from(`${config.spotify_client_id}:${config.spotify_client_secret}`).toString("base64");
+    const data = await new Promise((resolve, reject) => {
+      const body = "grant_type=client_credentials";
+      const req = https.request({
+        hostname: "accounts.spotify.com", path: "/api/token", method: "POST",
+        headers: { "Authorization": `Basic ${creds}`, "Content-Type": "application/x-www-form-urlencoded", "Content-Length": Buffer.byteLength(body) }
+      }, res => {
+        let d = ""; res.on("data", c => d += c);
+        res.on("end", () => { try { resolve(JSON.parse(d)); } catch { reject(new Error("Parse error")); } });
+      });
+      req.on("error", reject);
+      req.write(body);
+      req.end();
+    });
+    if (data.access_token) {
+      _spotifyToken = data.access_token;
+      _spotifyTokenExpiry = Date.now() + (data.expires_in - 60) * 1000;
+      return _spotifyToken;
+    }
+  } catch(e) { console.log("[SPOTIFY] Token error:", e.message); }
+  return null;
+}
+
+function cleanArtistName(name) {
+  let n = name;
+  n = n.replace(/\([^)]*\)/g, "");
+  n = n.replace(/(19|20)\d{2}/g, "");
+  n = n.replace(/\s+[-–]\s+.+$/, "");
+  n = n.replace(/_/g, " ");
+  n = n.replace(/(remastered|deluxe|edition|greatest|hits|best|collection|anthology|vol|volume|cd|disc|lp|ep|single|live|acoustic|unplugged|remix|reissue|expanded|cta|nbd|se)/gi, "");
+  n = n.replace(/\s+/g, " ").trim();
+  return n;
+}
+
+app.get("/api/spotify/artist/:name", requireAuth, async (req, res) => {
+  try {
+    const token = await getSpotifyToken();
+    if (!token) return res.json({ image: null });
+    const rawName = req.params.name;
+    const cleanName = cleanArtistName(rawName);
+    // Try clean name first, fall back to raw if no results
+    const trySearch = async (name) => {
+      return new Promise((resolve) => {
+        https.get({
+          hostname: "api.spotify.com",
+          path: `/v1/search?q=${encodeURIComponent(name)}&type=artist&limit=1`,
+          headers: { "Authorization": `Bearer ${token}` }
+        }, r => {
+          let d = ""; r.on("data", c => d += c);
+          r.on("end", () => { try { resolve(JSON.parse(d)); } catch { resolve(null); } });
+        }).on("error", () => resolve(null));
+      });
+    };
+    let search = await trySearch(cleanName);
+    let artist = search?.artists?.items?.[0];
+    // If no result with clean name and it differs, try raw name
+    if (!artist && cleanName !== rawName) {
+      search = await trySearch(rawName);
+      artist = search?.artists?.items?.[0];
+    }
+    const image = artist?.images?.[0]?.url || null;
+    // Proxy the image through our server to avoid CORS issues
+    const proxyImage = image ? `/api/proxy-image?url=${encodeURIComponent(image)}` : null;
+    res.json({ image: proxyImage, name: artist?.name || null, searched: cleanName });
+  } catch(e) { res.json({ image: null }); }
+});
+
+// ── IMAGE PROXY ──────────────────────────────────────────────────────────────
+app.get("/api/proxy-image", async (req, res) => {
+  const url = req.query.url;
+  if (!url || !url.startsWith("https://")) return res.status(400).end();
+  try {
+    const parsed = new URL(url);
+    const req2 = https.get({ hostname: parsed.hostname, path: parsed.pathname + parsed.search }, r => {
+      res.setHeader("Content-Type", r.headers["content-type"] || "image/jpeg");
+      res.setHeader("Cache-Control", "public, max-age=86400");
+      r.pipe(res);
+    });
+    req2.on("error", () => res.status(500).end());
+  } catch { res.status(500).end(); }
+});
+
+// ── LAST.FM ARTIST IMAGE ─────────────────────────────────────────────────────
+app.get("/api/lastfm/artist/:name", requireAuth, async (req, res) => {
+  if (!config.lastfm_api_key) return res.json({ image: null });
+  try {
+    const name = encodeURIComponent(req.params.name);
+    const url = `https://ws.audioscrobbler.com/2.0/?method=artist.getinfo&artist=${name}&api_key=${config.lastfm_api_key}&format=json`;
+    const data = await new Promise(resolve => {
+      https.get(url, r => {
+        let d = ""; r.on("data", c => d += c);
+        r.on("end", () => { try { resolve(JSON.parse(d)); } catch { resolve(null); } });
+      }).on("error", () => resolve(null));
+    });
+    const images = data?.artist?.image || [];
+    const large = images.find(i => i.size === "extralarge") || images.find(i => i.size === "large");
+    const image = large?.["#text"] || null;
+    // Filter out Last.fm placeholder image
+    const isPlaceholder = !image || image === "" || image.includes("2a96cbd8b46e442fc41c2b86b821562f");
+    res.json({ image: isPlaceholder ? null : image });
+  } catch(e) { res.json({ image: null }); }
+});
+
+// ── COLLECTION FULL DATA (from TMDB) ─────────────────────────────────────────
+app.get("/api/collections/:collection_id/full", requireAuth, async (req, res) => {
+  try {
+    if (!config.tmdb_api_key) return res.json({ parts: [] });
+    const data = await tmdbFetch(`/collection/${req.params.collection_id}`);
+    if (!data) return res.json({ parts: [] });
+    // Find which parts we have locally
+    const allMedia = await dbFind(db.media, { type: "movie" });
+    const localTmdbIds = new Set(allMedia.filter(m => m.tmdb_id).map(m => String(m.tmdb_id)));
+    const parts = (data.parts || [])
+      .sort((a,b) => (a.release_date||"").localeCompare(b.release_date||""))
+      .map(p => ({
+        tmdb_id: p.id,
+        title: p.title,
+        year: p.release_date ? parseInt(p.release_date) : null,
+        poster_url: p.poster_path ? `https://image.tmdb.org/t/p/w342${p.poster_path}` : null,
+        in_library: localTmdbIds.has(String(p.id))
+      }));
+    res.json({ name: data.name, parts });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
 
 // ── COLLECTIONS ──────────────────────────────────────────────────────────────
 app.get("/api/collections", requireAuth, async (req, res) => {
