@@ -693,11 +693,19 @@ async function renderArtistGrid(byArtist) {
   });
   html += `</div></div>`;
   sec.innerHTML = html;
-  // Load Spotify images sequentially to avoid rate limiting
+  // Load images: check local cover first, fall back to Spotify
   (async () => {
     for (const [id, data] of artists) {
       const artistKey = "aimg-" + encodeURIComponent(data.name).slice(0,30).replace(/%/g,"");
       try {
+        // Check for local cover art first (no rate limit, instant)
+        const local = await API.get("/music/has-local-cover/" + encodeURIComponent(id)).catch(() => null);
+        if (local?.hasLocal) {
+          const el = document.getElementById(artistKey);
+          if (el) el.outerHTML = `<img class="mcard-poster" src="${local.url}" alt="" loading="lazy" style="aspect-ratio:1/1;object-fit:cover">`;
+          continue; // Skip Spotify entirely
+        }
+        // Fall back to Spotify
         const r = await API.get("/spotify/artist/" + encodeURIComponent(data.name));
         if (r.image) {
           const el = document.getElementById(artistKey);
@@ -721,13 +729,32 @@ function openArtistById(safeId) {
     return;
   }
   const albums = Object.entries(data.albums).sort((a,b) => a[1].name.localeCompare(b[1].name));
-  let html = `<div style="padding:28px">
-    <button class="s-btn" onclick="renderArtistGrid(_musicData)" style="margin-bottom:20px">← Alla artister</button>
-    <div class="row-header" style="margin-bottom:20px">
-      <span class="row-title">🎤 ${esc(data.name)}</span>
-      <span class="row-count">${albums.length} album</span>
+  const artistImgKey = "aimg-" + encodeURIComponent(data.name).slice(0,30).replace(/%/g,"");
+  let html = `<div class="detail-page">
+    <div class="show-hero" id="artist-hero-bg">
+      <div class="show-hero-overlay"></div>
+      <button class="detail-back" onclick="renderArtistGrid(_musicData)">← Alla artister</button>
+      <div class="show-hero-content">
+        <div class="detail-poster-col">
+          <div class="detail-poster" id="${artistImgKey}-hero" style="width:180px;height:180px;border-radius:50%;background:var(--card2);display:flex;align-items:center;justify-content:center;font-size:48px;overflow:hidden">🎤</div>
+        </div>
+        <div class="detail-info-col">
+          <h1 class="detail-page-title">${esc(data.name)}</h1>
+          <div class="detail-meta-row" id="artist-meta-row">
+            <span class="detail-meta-item">${albums.length} album</span>
+          </div>
+          <div id="artist-genres" class="detail-genres"></div>
+          <p id="artist-bio-text" class="detail-page-overview"></p>
+          <div class="detail-actions">
+            <button class="btn-fav" onclick='openMusicFixMeta("artist","${encodeURIComponent(data.name)}","${esc(data.name)}")'>🔍 Fixa info</button>
+          </div>
+        </div>
+      </div>
     </div>
-    <div class="row-scroll">`;
+    <div class="detail-content">
+      <div class="detail-section">
+        <h3 class="detail-section-title">Album</h3>
+        <div class="media-grid">`;
   albums.forEach(([albumId, albumData], idx) => {
     const safeArtistId = encodeURIComponent(id);
     const safeAlbumId = encodeURIComponent(albumId);
@@ -743,19 +770,58 @@ function openArtistById(safeId) {
       </div>
     </div>`;
   });
-  html += `</div></div>`;
+  html += `</div></div></div></div>`;
   sec.innerHTML = html;
-  // Load album images from Spotify
-  albums.forEach(([albumId, albumData], idx) => {
-    const albumImgId = "album-img-" + idx;
-    API.get("/spotify/album/" + encodeURIComponent(data.name) + "/" + encodeURIComponent(albumData.name))
-      .then(r => {
+
+  // Load artist image for hero (poster + backdrop)
+  (async () => {
+    try {
+      const local = await API.get("/music/has-local-cover/" + encodeURIComponent(id)).catch(() => null);
+      const imgUrl = local?.hasLocal ? local.url : (await API.get("/spotify/artist/" + encodeURIComponent(data.name)).catch(() => null))?.image;
+      if (imgUrl) {
+        const posterEl = document.getElementById(artistImgKey + "-hero");
+        if (posterEl) posterEl.outerHTML = `<img class="detail-poster" src="${imgUrl}" style="width:180px;height:180px;border-radius:50%;object-fit:cover">`;
+        const heroBg = document.getElementById("artist-hero-bg");
+        if (heroBg) heroBg.style.backgroundImage = `url('${imgUrl}')`;
+      }
+    } catch {}
+  })();
+
+  // Load artist bio from Last.fm
+  API.get("/lastfm/artist/" + encodeURIComponent(data.name)).then(r => {
+    if (r.tags?.length) {
+      const genresEl = document.getElementById("artist-genres");
+      if (genresEl) genresEl.innerHTML = r.tags.map(t => `<span class="detail-genre">${esc(t)}</span>`).join("");
+    }
+    if (r.bio) {
+      const bioEl = document.getElementById("artist-bio-text");
+      if (bioEl) bioEl.textContent = r.bio;
+    }
+    if (r.listeners) {
+      const metaRow = document.getElementById("artist-meta-row");
+      if (metaRow) metaRow.innerHTML += `<span class="detail-meta-item">${parseInt(r.listeners).toLocaleString("sv-SE")} lyssnare</span>`;
+    }
+  }).catch(() => {});
+  // Load album images: check local cover first, fall back to Spotify
+  (async () => {
+    for (let idx = 0; idx < albums.length; idx++) {
+      const [albumId, albumData] = albums[idx];
+      const albumImgId = "album-img-" + idx;
+      try {
+        const local = await API.get("/music/has-local-cover/" + encodeURIComponent(albumId)).catch(() => null);
+        if (local?.hasLocal) {
+          const el = document.getElementById(albumImgId);
+          if (el) el.outerHTML = `<img class="mcard-poster" src="${local.url}" alt="" loading="lazy" style="object-fit:cover">`;
+          continue;
+        }
+        const r = await API.get("/spotify/album/" + encodeURIComponent(data.name) + "/" + encodeURIComponent(albumData.name));
         if (r.image) {
           const el = document.getElementById(albumImgId);
           if (el) el.outerHTML = `<img class="mcard-poster" src="${r.image}" alt="" loading="lazy" style="object-fit:cover">`;
         }
-      }).catch(() => {});
-  });
+      } catch {}
+    }
+  })();
 }
 
 function openAlbumById(safeArtistId, safeAlbumId) {
@@ -770,6 +836,7 @@ function openAlbumById(safeArtistId, safeAlbumId) {
     <div class="row-header" style="margin-bottom:20px">
       <span class="row-title">💿 ${esc(albumData.name)}</span>
       <span class="row-count">${albumData.tracks.length} låtar</span>
+      <button class="btn-fav" style="margin-left:12px" onclick='openMusicFixMeta("${artistData.isStandalone ? "artist" : "album"}","${artistData.isStandalone ? encodeURIComponent(artistData.name) : encodeURIComponent(albumData.name)}","${esc(albumData.name)}","${encodeURIComponent(artistData.name)}")'>🔍 Fixa info</button>
     </div>
     <div>${albumData.tracks.map(t => buildMusicRow(t)).join("")}</div>
   </div>`;
@@ -2614,9 +2681,11 @@ async function loadSettings() {
         <div style="font-size:13px;color:var(--muted);margin-bottom:8px" id="subtitle-cache-stats">
           ${((cacheStatus.withSwe||0)+(cacheStatus.withEng||0)+(cacheStatus.withExtSrt||0)) > 0 ? `<div style="font-weight:500;margin-bottom:2px">Filmer</div>
             <div style="padding-left:12px">${cacheStatus.withSwe || 0} med inbyggd svensk text</div>
+            <div style="padding-left:12px">${cacheStatus.withEng || 0} med inbyggd engelsk text</div>
             <div style="padding-left:12px">${cacheStatus.withExtSrt || 0} med extern SRT-fil</div>` : ""}
-          ${(cacheStatus.totalEps || 0) > 0 ? `<div style="font-weight:500;margin-top:6px;margin-bottom:2px">Serier → ${cacheStatus.totalShows || "?"} serier hittade med totalt ${cacheStatus.totalEps} avsnitt</div>
+          ${((cacheStatus.withSweEps||0)+(cacheStatus.withEngEps||0)+(cacheStatus.withExtSrtEps||0)) > 0 || (cacheStatus.totalEps || 0) > 0 ? `<div style="font-weight:500;margin-top:6px;margin-bottom:2px">Serier${cacheStatus.totalEps ? ` → ${cacheStatus.totalShows || "?"} serier · ${cacheStatus.totalEps} avsnitt` : ""}</div>
             <div style="padding-left:12px">${cacheStatus.withSweEps || 0} med inbyggd svensk text</div>
+            <div style="padding-left:12px">${cacheStatus.withEngEps || 0} med inbyggd engelsk text</div>
             <div style="padding-left:12px">${cacheStatus.withExtSrtEps || 0} med extern SRT-fil</div>` : ''}
         </div>
         <div style="margin-bottom:10px">
@@ -2629,7 +2698,7 @@ async function loadSettings() {
           </div>` : ''}
           ${cacheStatus.errors > 0 ? `<div style="font-size:11px;color:var(--muted);margin-top:4px">⚠️ ${cacheStatus.errors} filer hoppades över (bildbaserade undertexter stöds ej)</div>` : ''}
         </div>
-        <div id="subtitle-cache-cached" style="font-size:12px;color:var(--muted)">💾 ${cacheStatus.done > 0 ? cacheStatus.done : cacheStatus.cached} svenska undertextfiler extraherade och sparade</div>
+        <div id="subtitle-cache-cached" style="font-size:12px;color:var(--muted)">💾 ${cacheStatus.done > 0 ? cacheStatus.done : cacheStatus.cached} undertextfiler extraherade och sparade</div>
       </div>` : ''}
 
       <div class="settings-section">
@@ -3045,6 +3114,114 @@ function cleanTitleForSearch(title) {
   // Clean spaces
   n = n.replace(/\s+/g, " ").trim();
   return n;
+}
+
+async function openMusicFixMeta(kind, folderKey, currentName, artistFolderKey) {
+  // kind: "artist" or "album"
+  document.getElementById("fix-meta-overlay")?.remove();
+  const overlay = document.createElement("div");
+  overlay.id = "fix-meta-overlay";
+  overlay.style.cssText = "position:fixed!important;top:0!important;left:0!important;right:0!important;bottom:0!important;z-index:10000!important;background:rgba(0,0,0,0.9)!important;display:flex!important;align-items:center!important;justify-content:center!important;padding:20px!important;";
+  overlay.innerHTML = `
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:14px;width:100%;max-width:600px;max-height:85vh;display:flex;flex-direction:column;overflow:hidden;">
+      <div style="padding:18px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px;">
+        <span style="font-size:18px">🔍</span>
+        <div style="flex:1">
+          <div style="font-size:15px;font-weight:600">Fixa ${kind === "artist" ? "artistinfo" : "albuminfo"}</div>
+          <div style="font-size:12px;color:var(--muted)">${esc(currentName)}</div>
+        </div>
+        <button onclick="document.getElementById('fix-meta-overlay').remove()" style="background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer;">✕</button>
+      </div>
+      <div style="padding:16px 20px;border-bottom:1px solid var(--border);">
+        <div style="display:flex;gap:8px;margin-bottom:10px">
+          <input id="fix-music-search-input" style="flex:1;background:var(--card2);border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:14px;padding:10px 14px;border-radius:8px;outline:none;" 
+            type="text" placeholder="Sök på Spotify..." value="${esc(currentName)}"/>
+          <button onclick="runMusicFixSearch('${kind}','${folderKey}','${artistFolderKey||""}')" style="background:var(--accent);border:none;color:white;font-family:inherit;font-size:14px;font-weight:500;padding:10px 18px;border-radius:8px;cursor:pointer;">Sök</button>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <input type="file" id="fix-music-file-input" accept="image/*" style="display:none" onchange="handleMusicCoverUpload('${kind}','${folderKey}','${artistFolderKey||""}')"/>
+          <button onclick="document.getElementById('fix-music-file-input').click()" style="background:var(--card2);border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:13px;padding:8px 14px;border-radius:8px;cursor:pointer;">📁 Ladda upp egen bild</button>
+          <span style="font-size:11px;color:var(--muted)">JPG/PNG, max 10MB</span>
+        </div>
+      </div>
+      <div id="fix-music-results" style="flex:1;overflow-y:auto;padding:12px;">
+        <div style="text-align:center;color:var(--muted);padding:32px;font-size:13px;">Skriv en sökning ovan och tryck Sök</div>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  document.getElementById("fix-music-search-input").addEventListener("keydown", e => {
+    if (e.key === "Enter") runMusicFixSearch(kind, folderKey, artistFolderKey || "");
+  });
+  // Auto-run search immediately
+  runMusicFixSearch(kind, folderKey, artistFolderKey || "");
+}
+
+async function runMusicFixSearch(kind, folderKey, artistFolderKey) {
+  const q = document.getElementById("fix-music-search-input").value.trim();
+  const resultsDiv = document.getElementById("fix-music-results");
+  resultsDiv.innerHTML = `<div style="text-align:center;color:var(--muted);padding:32px;font-size:13px;">Söker...</div>`;
+  try {
+    const endpoint = kind === "artist" ? "/spotify/search-artists" : "/spotify/search-albums";
+    const data = await API.get(endpoint + "?q=" + encodeURIComponent(q));
+    if (data.rateLimited) {
+      resultsDiv.innerHTML = `<div style="text-align:center;color:var(--muted);padding:32px;font-size:13px;">⏳ Spotify är tillfälligt begränsad. Försök igen om ${data.retryAfterSec}s</div>`;
+      return;
+    }
+    const results = data.results || [];
+    if (!results.length) {
+      resultsDiv.innerHTML = `<div style="text-align:center;color:var(--muted);padding:32px;font-size:13px;">Inga resultat hittades</div>`;
+      return;
+    }
+    resultsDiv.innerHTML = results.map(r => `
+      <div style="display:flex;align-items:center;gap:12px;padding:10px;border-radius:8px;cursor:pointer;transition:background 0.15s" 
+        onmouseover="this.style.background='var(--card2)'" onmouseout="this.style.background='none'"
+        onclick='applyMusicFix("${kind}","${folderKey}","${artistFolderKey}",${JSON.stringify(r.image)},${JSON.stringify(r.name)})'>
+        ${r.image ? `<img src="${r.image}" style="width:56px;height:56px;border-radius:8px;object-fit:cover;flex-shrink:0">` : `<div style="width:56px;height:56px;border-radius:8px;background:var(--card2);display:flex;align-items:center;justify-content:center;flex-shrink:0">${kind==="artist"?"🎤":"💿"}</div>`}
+        <div style="flex:1;overflow:hidden">
+          <div style="font-size:14px;font-weight:600">${esc(r.name)}</div>
+          ${r.artist ? `<div style="font-size:12px;color:var(--muted)">${esc(r.artist)}</div>` : ""}
+        </div>
+      </div>`).join("");
+  } catch(e) {
+    resultsDiv.innerHTML = `<div style="text-align:center;color:var(--muted);padding:32px;font-size:13px;">Fel: ${e.message}</div>`;
+  }
+}
+
+async function handleMusicCoverUpload(kind, folderKey, artistFolderKey) {
+  const fileInput = document.getElementById("fix-music-file-input");
+  const file = fileInput.files[0];
+  if (!file) return;
+  if (file.size > 10 * 1024 * 1024) return toast("Filen är för stor (max 10MB)", "error");
+  const reader = new FileReader();
+  reader.onload = async () => {
+    try {
+      const result = await API.post("/music/upload-cover", {
+        imageBase64: reader.result,
+        kind, folderKey, artistFolderKey
+      });
+      document.getElementById("fix-meta-overlay")?.remove();
+      toast("✓ Bild uppladdad! Ladda om sidan för att se ändringen.", "success");
+    } catch(e) {
+      toast("Fel vid uppladdning: " + e.message, "error");
+    }
+  };
+  reader.readAsDataURL(file);
+}
+
+async function applyMusicFix(kind, folderKey, artistFolderKey, image, name) {
+  try {
+    const folderName = decodeURIComponent(folderKey);
+    if (kind === "artist") {
+      await API.post("/spotify/artist-override", { folderName, image, name });
+    } else {
+      const artistFolder = decodeURIComponent(artistFolderKey);
+      await API.post("/spotify/album-override", { artistFolder, albumFolder: folderName, image, name });
+    }
+    document.getElementById("fix-meta-overlay")?.remove();
+    toast("✓ Uppdaterad! Ladda om sidan för att se ändringen.", "success");
+  } catch(e) {
+    toast("Fel: " + e.message, "error");
+  }
 }
 
 async function openFixMeta(mediaId, currentTitle, type) {

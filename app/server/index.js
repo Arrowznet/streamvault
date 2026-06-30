@@ -30,21 +30,34 @@ let _subtitleCacheWithExtSrtEps = 0;  // episodes with external SRT
 // Count existing cache files on startup
 async function countExistingSubtitleCache() {
   const cacheDir = path.join(DATA_DIR, "subtitle-cache");
-  if (!fs.existsSync(cacheDir)) { console.log("[SUBTITLE] Cache dir not found:", cacheDir); return; }
+  if (!fs.existsSync(cacheDir)) return;
   try {
     const files = fs.readdirSync(cacheDir);
-    const allSrt = files.filter(f => f.endsWith(".srt") && !f.endsWith("_ext.srt"));
-    _subtitleCacheWithExtSrt = files.filter(f => f.endsWith("_ext.srt")).length;
-    // Cross-reference with DB to split movies vs episodes
+    const allExtSrt = files.filter(f => f.endsWith("_ext.srt"));
+    // Reset counters
+    _subtitleCacheWithSwe = 0; _subtitleCacheWithEng = 0;
+    _subtitleCacheWithSweEps = 0; _subtitleCacheWithEngEps = 0;
     try {
-      const allMedia = await dbFind(db.media, { type: { $in: ["movie","episode"] } });
-      const episodeIds = new Set(allMedia.filter(m => m.type === "episode").map(m => require("crypto").createHash("md5").update(m._id).digest("hex")));
-      _subtitleCacheWithSwe = allSrt.filter(f => !episodeIds.has(f.split("_")[0])).length;
-      _subtitleCacheWithSweEps = allSrt.filter(f => episodeIds.has(f.split("_")[0])).length;
-    } catch {
-      _subtitleCacheWithSwe = allSrt.length;
+      const allMedia = await dbFind(db.media, { type: { $in: ["movie","episode"] }, cached_subtitle_lang: { $exists: true } });
+      for (const m of allMedia) {
+        // Verify the cache file actually still exists on disk
+        const exists = files.some(f => f.startsWith(m._id + "_") && f.endsWith(".srt") && !f.endsWith("_ext.srt"));
+        if (!exists) continue;
+        if (m.type === "episode") {
+          if (m.cached_subtitle_lang === "swe") _subtitleCacheWithSweEps++; else if (m.cached_subtitle_lang === "eng") _subtitleCacheWithEngEps++;
+        } else {
+          if (m.cached_subtitle_lang === "swe") _subtitleCacheWithSwe++; else if (m.cached_subtitle_lang === "eng") _subtitleCacheWithEng++;
+        }
+      }
+      const episodeIds = new Set((await dbFind(db.media, { type: "episode" })).map(m => m._id));
+      _subtitleCacheWithExtSrt = allExtSrt.filter(f => {
+        const hash = f.replace("_ext.srt", "");
+        return !Array.from(episodeIds).some(id => require("crypto").createHash("md5").update(id).digest("hex") === hash);
+      }).length;
+      _subtitleCacheWithExtSrtEps = allExtSrt.length - _subtitleCacheWithExtSrt;
+    } catch(e) {
+      console.log("[SUBTITLE] DB count error:", e.message);
     }
-    console.log("[SUBTITLE] Cache count: ext.srt:", _subtitleCacheWithExtSrt, "swe movies:", _subtitleCacheWithSwe, "swe eps:", _subtitleCacheWithSweEps);
   } catch(e) { console.log("[SUBTITLE] Count error:", e.message); }
 }
 setTimeout(countExistingSubtitleCache, 1000);
@@ -554,15 +567,11 @@ function preCacheSubtitles(item) {
             const title = (s.tags?.title || "").toLowerCase();
             return lang === "swe" || lang === "sv" || title.includes("svenska") || title.includes("swedish");
           });
-          // Count English embedded subtitles for statistics
+          // Find English subtitle stream (used as fallback if no Swedish)
           const engStream = streams.find(s => {
             const lang = (s.tags?.language || "").toLowerCase();
             return lang === "eng" || lang === "en";
           });
-          if (engStream && !sweStream) {
-            if (item.type === "episode") _subtitleCacheWithEngEps++;
-            else _subtitleCacheWithEng++;
-          }
           // Check for external SRT file next to the video file
           const videoDir = path.dirname(item.file_path);
           const videoBase = path.basename(item.file_path, path.extname(item.file_path));
@@ -592,11 +601,12 @@ function preCacheSubtitles(item) {
             return resolve();
           }
 
-          if (!sweStream) return resolve(); // No Swedish subtitle found, skip silently
+          // Pick best available stream: prefer Swedish, fall back to English
+          const targetStream = sweStream || engStream;
+          const targetLang = sweStream ? "swe" : "eng";
+          if (!targetStream) return resolve(); // No usable subtitle found, skip silently
           // Use subtitle-relative index for -map 0:s:N
-          const subIdx = streams.indexOf(sweStream);
-          // Use global stream index for cache file naming (consistent with playback extraction)
-          const globalIdx = sweStream.index;
+          const subIdx = streams.indexOf(targetStream);
 
           const cacheFile = path.join(cacheDir, item._id + "_" + subIdx + ".srt");
           if (fs.existsSync(cacheFile)) return resolve(); // already cached
@@ -608,9 +618,7 @@ function preCacheSubtitles(item) {
           }
 
           const ffmpegPathNow = getFfmpegPath();
-          if (item.type === "episode") _subtitleCacheWithSweEps++;
-          else _subtitleCacheWithSwe++;
-          console.log("[SUBTITLES] Pre-caching swe for:", item.title);
+          console.log(`[SUBTITLES] Pre-caching ${targetLang} for:`, item.title);
           execFile(ffmpegPathNow, [
             "-y", "-i", item.file_path,
             "-map", "0:s:" + subIdx,
@@ -631,8 +639,17 @@ function preCacheSubtitles(item) {
             } else {
               try {
                 fs.renameSync(tempFile, cacheFile);
-                console.log("[SUBTITLES] Pre-cached swe for:", item.title);
+                console.log(`[SUBTITLES] Pre-cached ${targetLang} for:`, item.title);
                 _subtitleCacheDone++;
+                if (item.type === "episode") {
+                  if (targetLang === "swe") _subtitleCacheWithSweEps++; else _subtitleCacheWithEngEps++;
+                } else {
+                  if (targetLang === "swe") _subtitleCacheWithSwe++; else _subtitleCacheWithEng++;
+                }
+                // Save the cached subtitle's language to DB for accurate re-counting later
+                dbUpdate(db.media, { _id: item._id }, { $set: { cached_subtitle_lang: targetLang } })
+                  .then(n => console.log(`[SUBTITLES] DB updated for ${item.title}, lang: ${targetLang}, affected: ${n}`))
+                  .catch(e => console.log(`[SUBTITLES] DB update FAILED for ${item.title}:`, e.message));
               } catch(e) {}
             }
             resolve();
@@ -2151,15 +2168,19 @@ app.get("/api/subtitles/cache-status", requireAuth, async (req, res) => {
   try {
     cached = fs.readdirSync(cacheDir).filter(f => f.endsWith(".srt") && !f.startsWith("test")).length;
   } catch {}
-  // Count unique shows
+  // Count unique shows and episodes from DB (always accurate, not just during scan)
   let totalShows = 0;
+  let totalEpsFromDb = 0;
   try {
     const shows = await dbFind(db.media, { type: "tvshow" });
     totalShows = shows.length;
+    totalEpsFromDb = await dbCount(db.media, { type: "episode" });
   } catch {}
+  // Re-count subtitle cache live if not currently scanning (always accurate)
+  if (!_subtitleCacheRunning) await countExistingSubtitleCache();
   res.json({
     total: _subtitleCacheTotal,
-    totalEps: _subtitleCacheTotalEps,
+    totalEps: _subtitleCacheTotalEps || totalEpsFromDb,
     totalShows,
     withSwe: _subtitleCacheWithSwe,
     withEng: _subtitleCacheWithEng,
@@ -2514,10 +2535,177 @@ app.delete("/api/spotify/cache", requireAdmin, async (req, res) => {
   res.json({ ok: true });
 });
 
+// ── LOCAL COVER ART LOOKUP ───────────────────────────────────────────────────
+const COVER_FILENAMES = ["cover.jpg","cover.jpeg","cover.png","folder.jpg","folder.jpeg","folder.png","artist.jpg","artist.png","album.jpg","album.png"];
+
+function findLocalCover(folderPath) {
+  try {
+    if (!fs.existsSync(folderPath)) return null;
+    const files = fs.readdirSync(folderPath);
+    for (const name of COVER_FILENAMES) {
+      const match = files.find(f => f.toLowerCase() === name);
+      if (match) return path.join(folderPath, match);
+    }
+  } catch {}
+  return null;
+}
+
+// Serve a local cover file by folder path (base64url encoded id, same as media _id)
+app.get("/api/music/local-cover/:folderId", async (req, res) => {
+  try {
+    const folderPath = Buffer.from(req.params.folderId, "base64url").toString();
+    const coverPath = findLocalCover(folderPath);
+    if (!coverPath) return res.status(404).end();
+    res.sendFile(coverPath);
+  } catch(e) { res.status(500).end(); }
+});
+
+// Check if a folder has a local cover (used by frontend before falling back to Spotify)
+app.get("/api/music/has-local-cover/:folderId", requireAuth, async (req, res) => {
+  try {
+    const folderPath = Buffer.from(req.params.folderId, "base64url").toString();
+    const coverPath = findLocalCover(folderPath);
+    res.json({ hasLocal: !!coverPath, url: coverPath ? `/api/music/local-cover/${req.params.folderId}` : null });
+  } catch(e) { res.json({ hasLocal: false }); }
+});
+
+// ── MUSIC COVER UPLOAD (manual image upload, base64) ─────────────────────────
+const COVER_UPLOAD_DIR = path.join(DATA_DIR, "music-covers");
+if (!fs.existsSync(COVER_UPLOAD_DIR)) fs.mkdirSync(COVER_UPLOAD_DIR, { recursive: true });
+
+app.post("/api/music/upload-cover", requireAuth, async (req, res) => {
+  try {
+    const { imageBase64, kind, folderKey, artistFolderKey } = req.body;
+    if (!imageBase64 || !folderKey) return res.status(400).json({ error: "Saknar data" });
+    const matches = imageBase64.match(/^data:image\/(\w+);base64,(.+)$/);
+    if (!matches) return res.status(400).json({ error: "Ogiltig bilddata" });
+    const ext = matches[1] === "jpeg" ? "jpg" : matches[1];
+    const buffer = Buffer.from(matches[2], "base64");
+    const fileName = `${Date.now()}_${Math.random().toString(36).slice(2,8)}.${ext}`;
+    const filePath = path.join(COVER_UPLOAD_DIR, fileName);
+    fs.writeFileSync(filePath, buffer);
+    const imageUrl = `/api/music/cover-upload/${fileName}`;
+
+    // Save as override (same as Spotify override)
+    const cacheKey = kind === "artist" ? "artist:" + decodeURIComponent(folderKey) : "album:" + decodeURIComponent(artistFolderKey) + ":" + decodeURIComponent(folderKey);
+    const result = { image: imageUrl, name: null, manual: true, uploaded: true };
+    _spotifyCache.set(cacheKey, result);
+    await dbUpdate(db.spotifyCache, { _id: cacheKey }, { _id: cacheKey, data: result }, { upsert: true });
+
+    res.json({ ok: true, url: imageUrl });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get("/api/music/cover-upload/:filename", async (req, res) => {
+  const filePath = path.join(COVER_UPLOAD_DIR, req.params.filename);
+  if (!fs.existsSync(filePath)) return res.status(404).end();
+  res.sendFile(filePath);
+});
+
+// ── MUSIC FIX META (manual artist/album search and override) ─────────────────
+app.get("/api/spotify/search-artists", requireAuth, async (req, res) => {
+  try {
+    const token = await getSpotifyToken();
+    if (!token) return res.json({ results: [] });
+    if (Date.now() < _spotifyRetryAfter) {
+      return res.json({ results: [], rateLimited: true, retryAfterSec: Math.ceil((_spotifyRetryAfter - Date.now())/1000) });
+    }
+    const now = Date.now();
+    const wait = Math.max(0, _spotifyLastCall + 1000 - now);
+    if (wait > 0) await new Promise(r => setTimeout(r, wait));
+    _spotifyLastCall = Date.now();
+    const search = await new Promise((resolve) => {
+      https.get({
+        hostname: "api.spotify.com",
+        path: `/v1/search?q=${encodeURIComponent(req.query.q||"")}&type=artist&limit=8`,
+        headers: { "Authorization": `Bearer ${token}` }
+      }, r => {
+        if (r.statusCode === 429) {
+          const retryAfter = parseInt(r.headers["retry-after"] || "30");
+          _spotifyRetryAfter = Date.now() + (retryAfter + 1) * 1000;
+          r.resume(); resolve(null); return;
+        }
+        let d = ""; r.on("data", c => d += c);
+        r.on("end", () => { try { resolve(JSON.parse(d)); } catch { resolve(null); } });
+      }).on("error", () => resolve(null));
+    });
+    const results = (search?.artists?.items || []).map(a => ({
+      id: a.id, name: a.name,
+      image: a.images?.[0]?.url ? `/api/proxy-image?url=${encodeURIComponent(a.images[0].url)}` : null,
+      popularity: a.popularity
+    }));
+    res.json({ results });
+  } catch(e) { res.json({ results: [] }); }
+});
+
+app.get("/api/spotify/search-albums", requireAuth, async (req, res) => {
+  try {
+    const token = await getSpotifyToken();
+    if (!token) return res.json({ results: [] });
+    if (Date.now() < _spotifyRetryAfter) {
+      return res.json({ results: [], rateLimited: true, retryAfterSec: Math.ceil((_spotifyRetryAfter - Date.now())/1000) });
+    }
+    const now = Date.now();
+    const wait = Math.max(0, _spotifyLastCall + 1000 - now);
+    if (wait > 0) await new Promise(r => setTimeout(r, wait));
+    _spotifyLastCall = Date.now();
+    const search = await new Promise((resolve) => {
+      https.get({
+        hostname: "api.spotify.com",
+        path: `/v1/search?q=${encodeURIComponent(req.query.q||"")}&type=album&limit=8`,
+        headers: { "Authorization": `Bearer ${token}` }
+      }, r => {
+        if (r.statusCode === 429) {
+          const retryAfter = parseInt(r.headers["retry-after"] || "30");
+          _spotifyRetryAfter = Date.now() + (retryAfter + 1) * 1000;
+          r.resume(); resolve(null); return;
+        }
+        let d = ""; r.on("data", c => d += c);
+        r.on("end", () => { try { resolve(JSON.parse(d)); } catch { resolve(null); } });
+      }).on("error", () => resolve(null));
+    });
+    const results = (search?.albums?.items || []).map(a => ({
+      id: a.id, name: a.name, artist: a.artists?.[0]?.name || "",
+      image: a.images?.[0]?.url ? `/api/proxy-image?url=${encodeURIComponent(a.images[0].url)}` : null
+    }));
+    res.json({ results });
+  } catch(e) { res.json({ results: [] }); }
+});
+
+// Manually override an artist's cached image (by original folder name)
+app.post("/api/spotify/artist-override", requireAuth, async (req, res) => {
+  try {
+    const { folderName, image, name } = req.body;
+    if (!folderName) return res.status(400).json({ error: "folderName krävs" });
+    const cacheKey = "artist:" + folderName;
+    const result = { image, name: name || null, searched: folderName, manual: true };
+    _spotifyCache.set(cacheKey, result);
+    await dbUpdate(db.spotifyCache, { _id: cacheKey }, { _id: cacheKey, data: result }, { upsert: true });
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Manually override an album's cached image
+app.post("/api/spotify/album-override", requireAuth, async (req, res) => {
+  try {
+    const { artistFolder, albumFolder, image, name } = req.body;
+    if (!artistFolder || !albumFolder) return res.status(400).json({ error: "artistFolder och albumFolder krävs" });
+    const cacheKey = "album:" + artistFolder + ":" + albumFolder;
+    const result = { image, name: name || null, manual: true };
+    _spotifyCache.set(cacheKey, result);
+    await dbUpdate(db.spotifyCache, { _id: cacheKey }, { _id: cacheKey, data: result }, { upsert: true });
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── LAST.FM ARTIST IMAGE ─────────────────────────────────────────────────────
 app.get("/api/lastfm/artist/:name", requireAuth, async (req, res) => {
-  if (!config.lastfm_api_key) return res.json({ image: null });
+  if (!config.lastfm_api_key) return res.json({ image: null, bio: null, tags: [] });
   try {
+    const cacheKey = "lastfm_bio:" + req.params.name;
+    const dbCached = await dbFindOne(db.spotifyCache, { _id: cacheKey });
+    if (dbCached) return res.json(dbCached.data);
+
     const name = encodeURIComponent(req.params.name);
     const url = `https://ws.audioscrobbler.com/2.0/?method=artist.getinfo&artist=${name}&api_key=${config.lastfm_api_key}&format=json`;
     const data = await new Promise(resolve => {
@@ -2529,10 +2717,29 @@ app.get("/api/lastfm/artist/:name", requireAuth, async (req, res) => {
     const images = data?.artist?.image || [];
     const large = images.find(i => i.size === "extralarge") || images.find(i => i.size === "large");
     const image = large?.["#text"] || null;
-    // Filter out Last.fm placeholder image
     const isPlaceholder = !image || image === "" || image.includes("2a96cbd8b46e442fc41c2b86b821562f");
-    res.json({ image: isPlaceholder ? null : image });
-  } catch(e) { res.json({ image: null }); }
+
+    // Extract bio - strip HTML and Last.fm's "Read more" link
+    let bio = data?.artist?.bio?.content || data?.artist?.bio?.summary || null;
+    if (bio) {
+      bio = bio.replace(/<a href="[^"]*">Read more on Last\.fm<\/a>\.?/i, "").trim();
+      bio = bio.replace(/<[^>]+>/g, "").trim(); // strip any remaining HTML
+    }
+    const tags = (data?.artist?.tags?.tag || []).slice(0, 5).map(t => t.name);
+    const listeners = data?.artist?.stats?.listeners || null;
+    const playcount = data?.artist?.stats?.playcount || null;
+
+    const result = {
+      image: isPlaceholder ? null : image,
+      bio, tags, listeners, playcount
+    };
+
+    // Only cache if we got useful data
+    if (bio || tags.length) {
+      dbInsert(db.spotifyCache, { _id: cacheKey, data: result }).catch(() => {});
+    }
+    res.json(result);
+  } catch(e) { res.json({ image: null, bio: null, tags: [] }); }
 });
 
 // ── COLLECTION FULL DATA (from TMDB) ─────────────────────────────────────────
@@ -2798,6 +3005,23 @@ app.post("/api/scan/full-rescan", requireAdmin, async (req, res) => {
     await dbRemove(db.media, {}, { multi: true });
     await dbRemove(db.history, {}, { multi: true });
     metaCache.clear();
+
+    // Clear subtitle cache directory so stale/orphaned files don't pollute stats
+    const subCacheDir = path.join(DATA_DIR, "subtitle-cache");
+    try {
+      if (fs.existsSync(subCacheDir)) {
+        fs.rmSync(subCacheDir, { recursive: true, force: true });
+        console.log("[RESCAN] Cleared subtitle-cache directory");
+      }
+      fs.mkdirSync(subCacheDir, { recursive: true });
+    } catch(e) { console.log("[RESCAN] Failed to clear subtitle-cache:", e.message); }
+
+    // Reset all subtitle counters
+    _subtitleCacheTotal = 0; _subtitleCacheTotalEps = 0;
+    _subtitleCacheWithSwe = 0; _subtitleCacheWithEng = 0; _subtitleCacheWithExtSrt = 0;
+    _subtitleCacheWithSweEps = 0; _subtitleCacheWithEngEps = 0; _subtitleCacheWithExtSrtEps = 0;
+    _subtitleCacheDone = 0; _subtitleCacheErrors = 0;
+
     console.log("Database cleared, starting full rescan...");
     await scanLibraries();
   } catch(e) { console.error("Full rescan error:", e); }
