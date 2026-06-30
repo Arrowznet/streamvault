@@ -73,6 +73,9 @@ try {
   const keys = require("./keys.js");
   if (!config.tmdb_api_key && keys.TMDB_KEY) config.tmdb_api_key = keys.TMDB_KEY;
   if (!config.opensubtitles_api_key && keys.OPENSUBTITLES_KEY) config.opensubtitles_api_key = keys.OPENSUBTITLES_KEY;
+  if (!config.lastfm_api_key && keys.LASTFM_KEY) config.lastfm_api_key = keys.LASTFM_KEY;
+  if (!config.spotify_client_id && keys.SPOTIFY_CLIENT_ID) config.spotify_client_id = keys.SPOTIFY_CLIENT_ID;
+  if (!config.spotify_client_secret && keys.SPOTIFY_CLIENT_SECRET) config.spotify_client_secret = keys.SPOTIFY_CLIENT_SECRET;
   if (keys.GITHUB_TOKEN && !process.env.GITHUB_TOKEN) process.env.GITHUB_TOKEN = keys.GITHUB_TOKEN;
 } catch {} // keys.js is optional
 
@@ -82,7 +85,8 @@ const db = {
   media: new Datastore({ filename: path.join(DATA_DIR, "media.db"), autoload: true }),
   history: new Datastore({ filename: path.join(DATA_DIR, "history.db"), autoload: true }),
   favorites: new Datastore({ filename: path.join(DATA_DIR, "favorites.db"), autoload: true }),
-  loginAttempts: new Datastore({ filename: path.join(DATA_DIR, "attempts.db"), autoload: true })
+  loginAttempts: new Datastore({ filename: path.join(DATA_DIR, "attempts.db"), autoload: true }),
+  spotifyCache: new Datastore({ filename: path.join(DATA_DIR, "spotify_cache.db"), autoload: true })
 };
 
 db.users.ensureIndex({ fieldName: "username", unique: true });
@@ -2297,10 +2301,18 @@ app.post("/api/media/:id/fix-meta", requireAdmin, async (req, res) => {
 // ── SPOTIFY ARTIST IMAGE ─────────────────────────────────────────────────────
 let _spotifyToken = null;
 let _spotifyTokenExpiry = 0;
+let _spotifyTokenPromise = null;
+const _spotifyCache = new Map(); // Cache artist/album results
+let _spotifyLastCall = 0;
+let _spotifyRetryAfter = 0; // Timestamp when we can call Spotify again
 
 async function getSpotifyToken() {
   if (_spotifyToken && Date.now() < _spotifyTokenExpiry) return _spotifyToken;
   if (!config.spotify_client_id || !config.spotify_client_secret) return null;
+  // If already fetching, wait for that promise
+  if (_spotifyTokenPromise) return _spotifyTokenPromise;
+  console.log("[SPOTIFY] Fetching new token...");
+  _spotifyTokenPromise = (async () => {
   try {
     const creds = Buffer.from(`${config.spotify_client_id}:${config.spotify_client_secret}`).toString("base64");
     const data = await new Promise((resolve, reject) => {
@@ -2319,10 +2331,14 @@ async function getSpotifyToken() {
     if (data.access_token) {
       _spotifyToken = data.access_token;
       _spotifyTokenExpiry = Date.now() + (data.expires_in - 60) * 1000;
+      _spotifyTokenPromise = null;
       return _spotifyToken;
     }
   } catch(e) { console.log("[SPOTIFY] Token error:", e.message); }
+  _spotifyTokenPromise = null;
   return null;
+  })();
+  return _spotifyTokenPromise;
 }
 
 function cleanArtistName(name) {
@@ -2338,18 +2354,49 @@ function cleanArtistName(name) {
 
 app.get("/api/spotify/artist/:name", requireAuth, async (req, res) => {
   try {
+    const cacheKey = "artist:" + req.params.name;
+    // Check memory cache first
+    if (_spotifyCache.has(cacheKey)) return res.json(_spotifyCache.get(cacheKey));
+    // Check DB cache
+    const dbCached = await dbFindOne(db.spotifyCache, { _id: cacheKey });
+    if (dbCached) {
+      _spotifyCache.set(cacheKey, dbCached.data);
+      return res.json(dbCached.data);
+    }
     const token = await getSpotifyToken();
     if (!token) return res.json({ image: null });
+    // Rate limit: wait if needed
+    if (Date.now() < _spotifyRetryAfter) {
+      await new Promise(r => setTimeout(r, _spotifyRetryAfter - Date.now()));
+    }
+    const now = Date.now();
+    const wait = Math.max(0, _spotifyLastCall + 1000 - now);
+    if (wait > 0) await new Promise(r => setTimeout(r, wait));
+    _spotifyLastCall = Date.now();
     const rawName = req.params.name;
     const cleanName = cleanArtistName(rawName);
     // Try clean name first, fall back to raw if no results
     const trySearch = async (name) => {
+      // Check if we're still in retry-after period
+      if (Date.now() < _spotifyRetryAfter) {
+        const wait = _spotifyRetryAfter - Date.now();
+        console.log(`[SPOTIFY] Waiting ${Math.ceil(wait/1000)}s for rate limit...`);
+        await new Promise(r => setTimeout(r, wait));
+      }
       return new Promise((resolve) => {
         https.get({
           hostname: "api.spotify.com",
           path: `/v1/search?q=${encodeURIComponent(name)}&type=artist&limit=1`,
           headers: { "Authorization": `Bearer ${token}` }
         }, r => {
+          if (r.statusCode === 429) {
+            const retryAfter = parseInt(r.headers["retry-after"] || "30");
+            _spotifyRetryAfter = Date.now() + (retryAfter + 1) * 1000;
+            console.log(`[SPOTIFY] Rate limited! Retry after ${retryAfter}s`);
+            r.resume();
+            resolve(null);
+            return;
+          }
           let d = ""; r.on("data", c => d += c);
           r.on("end", () => { try { resolve(JSON.parse(d)); } catch { resolve(null); } });
         }).on("error", () => resolve(null));
@@ -2365,7 +2412,13 @@ app.get("/api/spotify/artist/:name", requireAuth, async (req, res) => {
     const image = artist?.images?.[0]?.url || null;
     // Proxy the image through our server to avoid CORS issues
     const proxyImage = image ? `/api/proxy-image?url=${encodeURIComponent(image)}` : null;
-    res.json({ image: proxyImage, name: artist?.name || null, searched: cleanName });
+    const result = { image: proxyImage, name: artist?.name || null, searched: cleanName };
+    _spotifyCache.set(cacheKey, result);
+    // Only save to DB if we got an image (don't cache failures)
+    if (proxyImage) {
+      dbInsert(db.spotifyCache, { _id: cacheKey, data: result }).catch(() => {});
+    }
+    res.json(result);
   } catch(e) { res.json({ image: null }); }
 });
 
@@ -2382,6 +2435,83 @@ app.get("/api/proxy-image", async (req, res) => {
     });
     req2.on("error", () => res.status(500).end());
   } catch { res.status(500).end(); }
+});
+
+// ── SPOTIFY ALBUM IMAGE ──────────────────────────────────────────────────────
+app.get("/api/spotify/album/:artist/:album", requireAuth, async (req, res) => {
+  try {
+    const albumCacheKey = "album:" + req.params.artist + ":" + req.params.album;
+    if (_spotifyCache.has(albumCacheKey)) return res.json(_spotifyCache.get(albumCacheKey));
+    const dbCached = await dbFindOne(db.spotifyCache, { _id: albumCacheKey });
+    if (dbCached) {
+      _spotifyCache.set(albumCacheKey, dbCached.data);
+      return res.json(dbCached.data);
+    }
+    const token = await getSpotifyToken();
+    if (!token) return res.json({ image: null });
+    // Rate limit
+    if (Date.now() < _spotifyRetryAfter) {
+      await new Promise(r => setTimeout(r, _spotifyRetryAfter - Date.now()));
+    }
+    const nowAlbum = Date.now();
+    const waitAlbum = Math.max(0, _spotifyLastCall + 1000 - nowAlbum);
+    if (waitAlbum > 0) await new Promise(r => setTimeout(r, waitAlbum));
+    _spotifyLastCall = Date.now();
+    const artist = cleanArtistName(decodeURIComponent(req.params.artist));
+    let album = decodeURIComponent(req.params.album)
+      .replace(/[_]/g, " ")
+      .replace(/\s+(fr[åa]n|from|vol|volume|del|part)\.?\s+\d{2,4}/gi, "")
+      .replace(/(19|20)\d{2}/g, "")
+      .replace(/\([^)]*\)/g, "")
+      .replace(/\s+/g, " ").trim();
+    // Remove artist name from album name if present
+    const artistLower = artist.toLowerCase();
+    if (album.toLowerCase().startsWith(artistLower)) {
+      album = album.slice(artist.length).replace(/^[\s\-–]+/, "").trim();
+    }
+    // Remove leading/trailing dashes and years
+    album = album.replace(/^[\s\-–]+|[\s\-–]+$/g, "").trim();
+    const spotifySearch = async (q) => new Promise((resolve) => {
+      https.get({
+        hostname: "api.spotify.com",
+        path: `/v1/search?q=${encodeURIComponent(q)}&type=album&limit=1`,
+        headers: { "Authorization": `Bearer ${token}` }
+      }, r => {
+        if (r.statusCode === 429) {
+          const retryAfter = parseInt(r.headers["retry-after"] || "30");
+          _spotifyRetryAfter = Date.now() + (retryAfter + 1) * 1000;
+          r.resume();
+          resolve(null);
+          return;
+        }
+        let d = ""; r.on("data", c => d += c);
+        r.on("end", () => { try { resolve(JSON.parse(d)); } catch { resolve(null); } });
+      }).on("error", () => resolve(null));
+    });
+    let search = await spotifySearch(`album:${album} artist:${artist}`);
+    let albumResult = search?.albums?.items?.[0];
+    // Fallback: broader search if exact match fails
+    if (!albumResult) {
+      search = await spotifySearch(`${album} ${artist}`);
+      albumResult = search?.albums?.items?.[0];
+    }
+    const image = albumResult?.images?.[0]?.url || null;
+    const proxyImage = image ? `/api/proxy-image?url=${encodeURIComponent(image)}` : null;
+    const albumResultData = { image: proxyImage, name: albumResult?.name || null };
+    _spotifyCache.set(albumCacheKey, albumResultData);
+    if (proxyImage) {
+      dbInsert(db.spotifyCache, { _id: albumCacheKey, data: albumResultData }).catch(() => {});
+    }
+    res.json(albumResultData);
+  } catch(e) { res.json({ image: null }); }
+});
+
+// ── CLEAR SPOTIFY CACHE ──────────────────────────────────────────────────────
+app.delete("/api/spotify/cache", requireAdmin, async (req, res) => {
+  _spotifyCache.clear();
+  _spotifyRetryAfter = 0;
+  await new Promise(resolve => db.spotifyCache.remove({}, { multi: true }, resolve));
+  res.json({ ok: true });
 });
 
 // ── LAST.FM ARTIST IMAGE ─────────────────────────────────────────────────────

@@ -693,18 +693,20 @@ async function renderArtistGrid(byArtist) {
   });
   html += `</div></div>`;
   sec.innerHTML = html;
-  // Load Spotify images asynchronously for non-standalone artists
-  // Load Spotify images using same index as rendering
-  artists.forEach(([id, data]) => {
-    const artistKey = "aimg-" + encodeURIComponent(data.name).slice(0,30).replace(/%/g,"");
-    API.get("/spotify/artist/" + encodeURIComponent(data.name)).then(r => {
-      console.log("[SPOTIFY]", data.name, "-> image:", !!r.image, "searched:", r.searched);
-      if (r.image) {
-        const el = document.getElementById(artistKey);
-        if (el) el.outerHTML = `<img class="mcard-poster" src="${r.image}" alt="" loading="lazy" style="aspect-ratio:1/1;object-fit:cover">`;
-      }
-    }).catch(e => console.log("[SPOTIFY ERR]", data.name, e.message));
-  });
+  // Load Spotify images sequentially to avoid rate limiting
+  (async () => {
+    for (const [id, data] of artists) {
+      const artistKey = "aimg-" + encodeURIComponent(data.name).slice(0,30).replace(/%/g,"");
+      try {
+        const r = await API.get("/spotify/artist/" + encodeURIComponent(data.name));
+        if (r.image) {
+          const el = document.getElementById(artistKey);
+          if (el) el.outerHTML = `<img class="mcard-poster" src="${r.image}" alt="" loading="lazy" style="aspect-ratio:1/1;object-fit:cover">`;
+        }
+      } catch {}
+      await new Promise(res => setTimeout(res, 200));
+    }
+  })();
 }
 
 function openArtistById(safeId) {
@@ -726,12 +728,13 @@ function openArtistById(safeId) {
       <span class="row-count">${albums.length} album</span>
     </div>
     <div class="row-scroll">`;
-  albums.forEach(([albumId, albumData]) => {
+  albums.forEach(([albumId, albumData], idx) => {
     const safeArtistId = encodeURIComponent(id);
     const safeAlbumId = encodeURIComponent(albumId);
+    const albumImgId = "album-img-" + idx;
     html += `<div class="mcard" onclick="openAlbumById('${safeArtistId}', '${safeAlbumId}')">
       <div style="position:relative">
-        <div class="mcard-poster-ph"><span>💿</span><span>${esc(albumData.name.slice(0,14))}</span></div>
+        <div class="mcard-poster-ph" id="${albumImgId}"><span>💿</span><span>${esc(albumData.name.slice(0,14))}</span></div>
         <div class="mcard-overlay"><span class="mcard-play">▶</span></div>
       </div>
       <div class="mcard-info">
@@ -742,6 +745,17 @@ function openArtistById(safeId) {
   });
   html += `</div></div>`;
   sec.innerHTML = html;
+  // Load album images from Spotify
+  albums.forEach(([albumId, albumData], idx) => {
+    const albumImgId = "album-img-" + idx;
+    API.get("/spotify/album/" + encodeURIComponent(data.name) + "/" + encodeURIComponent(albumData.name))
+      .then(r => {
+        if (r.image) {
+          const el = document.getElementById(albumImgId);
+          if (el) el.outerHTML = `<img class="mcard-poster" src="${r.image}" alt="" loading="lazy" style="object-fit:cover">`;
+        }
+      }).catch(() => {});
+  });
 }
 
 function openAlbumById(safeArtistId, safeAlbumId) {
