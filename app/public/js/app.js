@@ -318,7 +318,7 @@ async function loadCollections() {
           <span class="row-title">Samlingar</span>
           <span class="row-count">${collections.length} samlingar</span>
         </div>
-        <div class="media-grid">
+        <div class="media-grid" id="lib-grid">
           ${collections.map(c => `
             <div class="mcard" onclick="openCollection('${c.id}')">
               <div style="position:relative">
@@ -333,7 +333,8 @@ async function loadCollections() {
               </div>
             </div>`).join("")}
         </div>
-      </div>`;
+      </div>
+      ${buildAbcNav(collections.map(c => ({ title: c.name })))}`;
     // Store for openCollection
     window._collectionsData = collections;
   } catch(e) {
@@ -2459,6 +2460,19 @@ function stopSubtitleOverlay() {
   }
   var overlay = document.getElementById("sv-subtitle-overlay");
   if (overlay) overlay.innerHTML = "";
+  // Also disable and remove any native HTML5 text tracks on the video element
+  var video = document.getElementById("main-video");
+  if (video) {
+    // Disable all text tracks
+    if (video.textTracks) {
+      for (var i = 0; i < video.textTracks.length; i++) {
+        video.textTracks[i].mode = "disabled";
+      }
+    }
+    // Remove all <track> elements
+    var tracks = video.querySelectorAll("track");
+    tracks.forEach(function(t) { t.remove(); });
+  }
 }
 
 function parseVTTTime(timeStr) {
