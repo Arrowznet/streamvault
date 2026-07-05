@@ -1660,8 +1660,8 @@ async function playItem(id, title) {
         player.updateSettings({
           streaming: {
             buffer: {
-              bufferTimeAtTopQuality: 30,
-              bufferToKeep: 20,
+              bufferTimeAtTopQuality: 12,
+              bufferToKeep: 8,
               stallThreshold: 0.5
             },
             gaps: { jumpGaps: true, jumpLargeGaps: true },
@@ -1686,6 +1686,11 @@ async function playItem(id, title) {
         // Edge caches old currentTime; dash.js resets it after manifest loads
         // Position tracked via wall clock timer, not video.currentTime
         window._dashPlayer = player;
+        // Ensure video is not muted (Edge auto-mutes on stream start)
+        setTimeout(function() {
+          var video = document.getElementById("main-video");
+          if (video) { video.muted = false; }
+        }, 500);
         return player;
       }
 
@@ -1901,6 +1906,14 @@ function initPlayerControls(duration) {
       subBtn.title = "Undertexter";
       subBtn.onclick = toggleSubtitleMenu;
       fsBtn.parentNode.insertBefore(subBtn, fsBtn);
+
+      var audioBtn = document.createElement("button");
+      audioBtn.className = "ctrl-btn";
+      audioBtn.id = "ctrl-audio";
+      audioBtn.textContent = "🎚️";
+      audioBtn.title = "Ljudspår";
+      audioBtn.onclick = toggleAudioTrackMenu;
+      fsBtn.parentNode.insertBefore(audioBtn, subBtn);
     }
   }
   console.log("[DURATION] playerDuration set to:", playerDuration, "seconds =", Math.floor(playerDuration/60), "min");
@@ -2283,6 +2296,93 @@ function activateSubtitle(url, label) {
   document.getElementById("subtitle-overlay")?.remove();
 }
 
+let _currentAudioTrack = null;
+
+async function toggleAudioTrackMenu() {
+  document.getElementById("audio-track-overlay")?.remove();
+  if (!currentItemId) return;
+
+  const overlay = document.createElement("div");
+  overlay.id = "audio-track-overlay";
+  overlay.style.cssText = "position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;background:rgba(0,0,0,0.7);display:flex;align-items:flex-end;justify-content:center;padding-bottom:100px";
+  overlay.onclick = function(e) { if (e.target === overlay) overlay.remove(); };
+
+  const box = document.createElement("div");
+  box.style.cssText = "background:var(--surface);border:1px solid var(--border);border-radius:14px;width:100%;max-width:400px;overflow:hidden";
+
+  const header = document.createElement("div");
+  header.style.cssText = "padding:16px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px";
+  var closeBtn = document.createElement("button");
+  closeBtn.style.cssText = "background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer";
+  closeBtn.textContent = "✕";
+  closeBtn.onclick = function() { overlay.remove(); };
+  header.innerHTML = "<span style='font-size:18px'>🎚️</span><div style='flex:1'><b style='font-size:15px'>Ljudspår</b></div>";
+  header.appendChild(closeBtn);
+  box.appendChild(header);
+
+  const list = document.createElement("div");
+  list.style.cssText = "max-height:300px;overflow-y:auto;padding:8px 0";
+  list.innerHTML = "<div style='padding:16px;text-align:center;color:var(--muted)'>Laddar...</div>";
+  box.appendChild(list);
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+
+  try {
+    const data = await API.get("/media/" + currentItemId + "/audio-tracks");
+    const tracks = data.tracks || [];
+    if (!tracks.length) {
+      list.innerHTML = "<div style='padding:16px;text-align:center;color:var(--muted)'>Inga ljudspår hittades</div>";
+      return;
+    }
+    list.innerHTML = tracks.map((t, i) => {
+      const isActive = _currentAudioTrack === t.trackIndex || (_currentAudioTrack === null && t.default);
+      const label = [
+        t.language !== "und" ? t.language.toUpperCase() : null,
+        t.codec,
+        t.channel_layout || (t.channels ? t.channels + "ch" : null),
+        t.title
+      ].filter(Boolean).join(" · ");
+      return `<div onclick="switchAudioTrack(${t.trackIndex})" style="padding:14px 20px;cursor:pointer;display:flex;align-items:center;gap:12px;background:${isActive ? "var(--card2)" : "none"};transition:background 0.15s" onmouseover="this.style.background='var(--card2)'" onmouseout="this.style.background='${isActive ? "var(--card2)" : "none"}'">
+        <span style="font-size:20px">${isActive ? "✅" : "🔊"}</span>
+        <div>
+          <div style="font-size:13px;font-weight:${isActive ? "600" : "400"}">${esc(label)}</div>
+        </div>
+      </div>`;
+    }).join("");
+  } catch(e) {
+    list.innerHTML = `<div style='padding:16px;text-align:center;color:var(--muted)'>Fel: ${e.message}</div>`;
+  }
+}
+
+async function switchAudioTrack(trackIndex) {
+  document.getElementById("audio-track-overlay")?.remove();
+  if (!currentItemId) return;
+  _currentAudioTrack = trackIndex;
+  toast("Byter ljudspår...", "info");
+
+  // Get current playback position
+  const video = document.getElementById("main-video");
+  const currentPos = video ? (window._dashStartSec || 0) + Math.max(0, video.currentTime - (window._dashFirstCT || 0)) : 0;
+
+  try {
+    // Restart DASH transcode with new audio track
+    const token = localStorage.getItem("sv_token") || "";
+    await fetch(`/api/dash/${currentItemId}/start?token=${token}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token },
+      body: JSON.stringify({ startSec: Math.floor(currentPos), audioTrack: trackIndex })
+    });
+    toast("✓ Ljudspår bytt!", "success");
+    // Ensure video is not muted (Edge auto-mutes on stream restart)
+    setTimeout(function() {
+      var video = document.getElementById("main-video");
+      if (video) { video.muted = false; video.volume = video.volume || 1; }
+    }, 500);
+  } catch(e) {
+    toast("Fel vid byte av ljudspår", "error");
+  }
+}
+
 function toggleSubtitleMenu() {
   if (currentItemId) openSubtitles(currentItemId, document.getElementById("pb-title")?.textContent || "");
 }
@@ -2353,25 +2453,15 @@ async function autoLoadSubtitles(mediaId, offsetSec) {
       checkReady();
       return;
     }
-    // Wait for video to be ready before adding track
+    // Use custom overlay system instead of <track> (works on all browsers including Android/LG TV)
     var video = document.getElementById("main-video");
     if (!video) return;
     var tryActivate = function() {
-      Array.from(video.querySelectorAll("track")).forEach(function(t) { t.remove(); });
-      var track = document.createElement("track");
-      track.kind = "subtitles";
-      track.label = sub.label || "Svenska";
-      track.srclang = "sv";
-      track.src = sub.url;
-      track.default = true;
-      video.appendChild(track);
-      // Need small delay for track to load
-      setTimeout(function() {
-        if (video.textTracks.length > 0) {
-          video.textTracks[0].mode = "showing";
-          console.log("[SUBTITLES] Auto-activated:", sub.label);
-        }
-      }, 1000);
+      // Remove any existing track elements
+      Array.from(video.querySelectorAll("track")).forEach(function(t) { t.src = ""; t.remove(); });
+      // Activate via our overlay system
+      activateSubtitle(sub.url, sub.label || "Svenska");
+      console.log("[SUBTITLES] Auto-activated:", sub.label);
     };
     if (video.readyState >= 1) {
       tryActivate();
@@ -2471,7 +2561,7 @@ function stopSubtitleOverlay() {
     }
     // Remove all <track> elements
     var tracks = video.querySelectorAll("track");
-    tracks.forEach(function(t) { t.remove(); });
+    tracks.forEach(function(t) { t.src = ""; t.remove(); });
   }
 }
 

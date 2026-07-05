@@ -1196,7 +1196,7 @@ async function startHlsTranscode(item, startSec = 0) {
     "-avoid_negative_ts", "make_zero",
     ...videoFilterArgs,
     "-c:v", encoder, ...extraArgs,
-    "-c:a", "aac", "-ac", "2", "-b:a", "128k",
+    "-c:a", "aac", "-profile:a", "aac_low", "-ac", "2", "-b:a", "128k",
     "-async", "1",
     "-hls_time", "4",
     "-hls_list_size", "0",
@@ -1239,7 +1239,7 @@ async function startHlsTranscode(item, startSec = 0) {
 const activeDashTranscodes = new Map();
 const seekLocks = new Map(); // Prevent concurrent seeks for same item
 
-async function startDashTranscode(item, seekSec = 0) {
+async function startDashTranscode(item, seekSec = 0, audioTrackIndex = null) {
   const itemId = item._id;
   const dashDir = path.join(DASH_CACHE, itemId);
   fs.mkdirSync(dashDir, { recursive: true });
@@ -1308,6 +1308,11 @@ async function startDashTranscode(item, seekSec = 0) {
     ? ["-c:v", "copy", "-bsf:v", "h264_mp4toannexb"]
     : [...videoFilterArgs, "-c:v", encoder, ...dashEncoderArgs, "-b:v", "4000k"];
 
+  // Audio stream selection - use specific track if requested
+  const audioSelectArgs = audioTrackIndex !== null
+    ? ["-map", "0:v:0", "-map", `0:a:${audioTrackIndex}`]
+    : [];
+
   const args = [
     "-hide_banner", "-loglevel", "warning",
     ...hwaccelArgs,
@@ -1316,8 +1321,9 @@ async function startDashTranscode(item, seekSec = 0) {
     ...(seekSec > 0 ? ["-ss", seekSec.toString()] : []),
     "-i", item.file_path,
     "-avoid_negative_ts", "make_zero",
+    ...(audioSelectArgs.length ? audioSelectArgs : []),
     ...videoArgs,
-    "-c:a", "aac", "-ac", "2", "-b:a", "128k",
+    "-c:a", "aac", "-profile:a", "aac_low", "-ac", "2", "-b:a", "128k",
     "-async", "1",
     "-af", "aresample=async=1000",
     ...(canCopyVideo ? [] : ["-force_key_frames", "expr:gte(t,n_forced*2)"]),
@@ -1375,6 +1381,7 @@ app.post("/api/dash/:id/start", requireAuth, async (req, res) => {
   const mpdPath = path.join(dashDir, "manifest.mpd");
 
   const startSec = parseInt(req.body?.startSec || "0");
+  const audioTrack = req.body?.audioTrack !== undefined ? parseInt(req.body.audioTrack) : null;
 
   // Kill existing transcode if starting from different position
   const existing = activeDashTranscodes.get(item._id);
@@ -1385,11 +1392,11 @@ app.post("/api/dash/:id/start", requireAuth, async (req, res) => {
       try { oldProc.kill("SIGKILL"); } catch {}
       // Wait for old process to fully release file locks on Windows
       await new Promise(r => setTimeout(r, 3000));
-      startDashTranscode(item, startSec);
+      startDashTranscode(item, startSec, audioTrack);
     }
     // else reuse existing
   } else {
-    startDashTranscode(item, startSec);
+    startDashTranscode(item, startSec, audioTrack);
   }
 
   // Wait for first media segment (means FFmpeg is running and writing data)
@@ -1434,7 +1441,8 @@ app.post("/api/dash/:id/seek", requireAuth, async (req, res) => {
   const firstSeg = path.join(dashDir, "chunk-stream0-00001.m4s");
 
   // startDashTranscode handles kill + 2s wait + clear internally
-  await startDashTranscode(item, seekSec);
+  const seekAudioTrack = req.body?.audioTrack !== undefined ? parseInt(req.body.audioTrack) : null;
+  await startDashTranscode(item, seekSec, seekAudioTrack);
 
   // Wait for MPD + first segment (or init segment as fallback)
   const initSeg = path.join(dashDir, "init-stream0.mp4");
@@ -2281,6 +2289,29 @@ app.get("/api/media/:id/fileinfo", requireAdmin, async (req, res) => {
         size: fmt.size ? (fmt.size/1024/1024/1024).toFixed(2)+" GB" : null
       }
     });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── AUDIO TRACKS (for player audio track selection) ──────────────────────────
+app.get("/api/media/:id/audio-tracks", requireAuth, async (req, res) => {
+  try {
+    const item = await dbFindOne(db.media, { _id: req.params.id });
+    if (!item) return res.status(404).json({ error: "Hittades inte" });
+    const { execSync } = require("child_process");
+    const ffprobePath = getFfprobePath();
+    const cmd = `"${ffprobePath}" -v quiet -print_format json -show_streams -select_streams a "${item.file_path.replace(/"/g, '')}"`;
+    const probe = JSON.parse(execSync(cmd, { timeout: 10000 }).toString());
+    const tracks = (probe.streams || []).map((a, i) => ({
+      index: a.index,
+      trackIndex: i, // relative audio track index for -map 0:a:N
+      codec: a.codec_name?.toUpperCase(),
+      channels: a.channels,
+      channel_layout: a.channel_layout,
+      language: a.tags?.language || "und",
+      title: a.tags?.title || null,
+      default: a.disposition?.default === 1
+    }));
+    res.json({ tracks });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
