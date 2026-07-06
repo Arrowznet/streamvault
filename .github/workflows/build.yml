@@ -53,6 +53,7 @@ jobs:
         with:
           files: Output\StreamVault-Setup.exe
           name: StreamVault ${{ github.ref_name }}
+          prerelease: ${{ contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') || contains(github.ref_name, '-alpha') }}
           body: |
             ## StreamVault ${{ github.ref_name }}
             
