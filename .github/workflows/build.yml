@@ -36,7 +36,8 @@ jobs:
       - name: Sync version from package.json to ISS
         run: |
           $version = (Get-Content app/package.json | ConvertFrom-Json).version
-          (Get-Content StreamVault.iss) -replace '#define AppVersion ".*"', "#define AppVersion `"$version`"" | Set-Content StreamVault.iss
+          $versionClean = $version -replace '[-+].*$', ''
+          (Get-Content StreamVault.iss) -replace '#define AppVersion ".*"', "#define AppVersion `"$versionClean`"" | Set-Content StreamVault.iss
         shell: powershell
       - name: Build installer
         run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" StreamVault.iss'
