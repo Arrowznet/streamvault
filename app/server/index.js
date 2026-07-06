@@ -71,6 +71,17 @@ const DATA_DIR = process.env.STREAMVAULT_DATA
 const CONFIG_PATH = path.join(DATA_DIR, "config.json");
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
+// Tools directory for PgsToSrt and Tesseract
+const TOOLS_DIR = path.join(DATA_DIR, "tools");
+const PGSTOSRT_DIR = path.join(TOOLS_DIR, "PgsToSrt");
+const PGSTOSRT_EXE = path.join(PGSTOSRT_DIR, "PgsToSrt.exe");
+const TESSDATA_DIR = path.join(PGSTOSRT_DIR, "tessdata");
+fs.mkdirSync(TOOLS_DIR, { recursive: true });
+
+function isPgsToSrtInstalled() {
+  return fs.existsSync(PGSTOSRT_EXE) && fs.existsSync(TESSDATA_DIR);
+}
+
 function loadConfig() {
   if (!fs.existsSync(CONFIG_PATH)) {
     const defaults = { port: 7000, jwt_secret: uuidv4()+uuidv4()+uuidv4(), tmdb_api_key: "", opensubtitles_api_key: "", language: "auto", transcoding: { enabled: true, hardware_accel: "auto" }, libraries: [], version: STREAMVAULT_VERSION };
@@ -285,10 +296,11 @@ app.get("/api/version", (req, res) => {
 
 app.get("/api/updates/check", requireAuth, async (req, res) => {
   try {
-    const data = await new Promise((resolve, reject) => {
+    const channel = config.update_channel || "stable"; // "stable" or "beta"
+    const releases = await new Promise((resolve, reject) => {
       https.get({
         hostname: "api.github.com",
-        path: "/repos/" + GITHUB_REPO + "/releases/latest",
+        path: "/repos/" + GITHUB_REPO + "/releases",
         headers: {
           "User-Agent": "StreamVault/" + STREAMVAULT_VERSION,
           ...(process.env.GITHUB_TOKEN ? { "Authorization": "token " + process.env.GITHUB_TOKEN } : {})
@@ -298,10 +310,18 @@ app.get("/api/updates/check", requireAuth, async (req, res) => {
         r.on("end", () => { try { resolve(JSON.parse(d)); } catch { reject(new Error("parse")); } });
       }).on("error", reject);
     });
+    // Filter based on channel
+    const eligible = (Array.isArray(releases) ? releases : [releases]).filter(r => {
+      if (!r.tag_name) return false;
+      if (channel === "beta") return true; // include pre-releases
+      return !r.prerelease; // stable only
+    });
+    const data = eligible[0]; // newest eligible release
+    if (!data) return res.json({ current: STREAMVAULT_VERSION, latest: STREAMVAULT_VERSION, hasUpdate: false });
     const latest = (data.tag_name || "v" + STREAMVAULT_VERSION).replace(/^v/, "");
     const hasUpdate = latest !== STREAMVAULT_VERSION;
     const downloadUrl = (data.assets || []).find(a => a.name && a.name.endsWith(".exe"))?.browser_download_url || null;
-    res.json({ current: STREAMVAULT_VERSION, latest, hasUpdate, releaseNotes: data.body || "", htmlUrl: data.html_url || null, downloadUrl });
+    res.json({ current: STREAMVAULT_VERSION, latest, hasUpdate, releaseNotes: data.body || "", htmlUrl: data.html_url || null, downloadUrl, channel, isBeta: !!data.prerelease });
   } catch {
     res.json({ current: STREAMVAULT_VERSION, latest: STREAMVAULT_VERSION, hasUpdate: false });
   }
@@ -2220,7 +2240,7 @@ app.get("/api/config", requireAdmin, (req, res) => {
 });
 
 app.patch("/api/config", requireAdmin, (req, res) => {
-  ["tmdb_api_key","opensubtitles_api_key","lastfm_api_key","spotify_client_id","spotify_client_secret","port","language"].forEach(k=>{if(req.body[k]!==undefined)config[k]=req.body[k];});
+  ["tmdb_api_key","opensubtitles_api_key","lastfm_api_key","spotify_client_id","spotify_client_secret","port","language","update_channel"].forEach(k=>{if(req.body[k]!==undefined)config[k]=req.body[k];});
   fs.writeFileSync(CONFIG_PATH,JSON.stringify(config,null,2));
   res.json({ok:true});
 });
@@ -3027,6 +3047,107 @@ app.post("/api/media/:id/edit", requireAdmin, async (req, res) => {
     res.json({ ok: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
+
+// ── PGSTOSRT INSTALL ──────────────────────────────────────────────────────────
+const PGSTOSRT_RELEASE_URL = "https://github.com/Tentacule/PgsToSrt/releases/download/v1.4.8/PgsToSrt-1.4.8.zip";
+const TESSDATA_BASE_URL = "https://github.com/tesseract-ocr/tessdata/raw/main/";
+const TESSDATA_LANGUAGES = { "swe": "swe.traineddata", "eng": "eng.traineddata", "nor": "nor.traineddata", "dan": "dan.traineddata", "fin": "fin.traineddata", "deu": "deu.traineddata", "fra": "fra.traineddata", "spa": "spa.traineddata", "nld": "nld.traineddata" };
+
+let _pgsInstallProgress = null; // { step, percent, message, error, done }
+
+app.get("/api/tools/pgstosrt-status", requireAuth, (req, res) => {
+  res.json({
+    installed: isPgsToSrtInstalled(),
+    installing: !!_pgsInstallProgress && !_pgsInstallProgress.done,
+    progress: _pgsInstallProgress
+  });
+});
+
+app.post("/api/tools/pgstosrt-install", requireAdmin, async (req, res) => {
+  if (_pgsInstallProgress && !_pgsInstallProgress.done) {
+    return res.json({ ok: false, message: "Installation pågår redan" });
+  }
+  const extraLangs = req.body?.languages || [];
+  res.json({ ok: true, message: "Installation startad" });
+  _pgsInstallProgress = { step: 1, percent: 0, message: "Förbereder...", error: null, done: false };
+
+  (async () => {
+    try {
+      fs.mkdirSync(PGSTOSRT_DIR, { recursive: true });
+      fs.mkdirSync(TESSDATA_DIR, { recursive: true });
+
+      // Step 1: Download PgsToSrt zip
+      _pgsInstallProgress = { step: 1, percent: 5, message: "Laddar ner PgsToSrt...", error: null, done: false };
+      const zipPath = path.join(TOOLS_DIR, "PgsToSrt.zip");
+      await downloadFile(PGSTOSRT_RELEASE_URL, zipPath, (p) => {
+        _pgsInstallProgress.percent = Math.round(5 + p * 0.35);
+        _pgsInstallProgress.message = `Laddar ner PgsToSrt... ${Math.round(p * 100)}%`;
+      });
+
+      // Step 2: Extract zip
+      _pgsInstallProgress = { step: 2, percent: 40, message: "Packar upp PgsToSrt...", error: null, done: false };
+      await extractZip(zipPath, PGSTOSRT_DIR);
+      try { fs.unlinkSync(zipPath); } catch {}
+
+      // Step 3: Download tessdata - always get swe + eng + any extras
+      const langs = ["swe", "eng", ...extraLangs].filter((v, i, a) => a.indexOf(v) === i);
+      for (let i = 0; i < langs.length; i++) {
+        const lang = langs[i];
+        const filename = TESSDATA_LANGUAGES[lang] || lang + ".traineddata";
+        _pgsInstallProgress = { step: 3, percent: 50 + Math.round((i / langs.length) * 45), message: `Laddar ner ${lang} undertextdata...`, error: null, done: false };
+        await downloadFile(TESSDATA_BASE_URL + filename, path.join(TESSDATA_DIR, filename), () => {});
+      }
+
+      _pgsInstallProgress = { step: 4, percent: 100, message: "Installation klar!", error: null, done: true };
+      console.log("[TOOLS] PgsToSrt installed successfully");
+    } catch(e) {
+      console.error("[TOOLS] PgsToSrt install failed:", e.message);
+      _pgsInstallProgress = { step: 0, percent: 0, message: "Installation misslyckades", error: e.message, done: true };
+    }
+  })();
+});
+
+// Helper: download file with progress callback
+function downloadFile(url, dest, onProgress) {
+  return new Promise((resolve, reject) => {
+    const followRedirects = (url, depth = 0) => {
+      if (depth > 5) return reject(new Error("Too many redirects"));
+      const mod = url.startsWith("https") ? require("https") : require("http");
+      mod.get(url, { headers: { "User-Agent": "StreamVault" } }, (r) => {
+        if (r.statusCode === 301 || r.statusCode === 302 || r.statusCode === 307 || r.statusCode === 308) {
+          r.resume();
+          return followRedirects(r.headers.location, depth + 1);
+        }
+        if (r.statusCode !== 200) { r.resume(); return reject(new Error("HTTP " + r.statusCode)); }
+        const total = parseInt(r.headers["content-length"] || "0");
+        let received = 0;
+        const file = fs.createWriteStream(dest);
+        r.on("data", chunk => { received += chunk.length; if (total) onProgress(received / total); });
+        r.pipe(file);
+        file.on("finish", () => { file.close(); resolve(); });
+        file.on("error", reject);
+        r.on("error", reject);
+      }).on("error", reject);
+    };
+    followRedirects(url);
+  });
+}
+
+// Helper: extract zip
+function extractZip(zipPath, destDir) {
+  return new Promise((resolve, reject) => {
+    const AdmZip = (() => { try { return require("adm-zip"); } catch { return null; } })();
+    if (AdmZip) {
+      try { new AdmZip(zipPath).extractAllTo(destDir, true); resolve(); }
+      catch(e) { reject(e); }
+    } else {
+      // Fallback: use PowerShell on Windows
+      const { execFile } = require("child_process");
+      execFile("powershell", ["-Command", `Expand-Archive -Path "${zipPath}" -DestinationPath "${destDir}" -Force`],
+        { windowsHide: true, timeout: 60000 }, (err) => err ? reject(err) : resolve());
+    }
+  });
+}
 
 // ── RESCAN ALL (clear + rescan) ────────────────────────────────────────────────
 app.post("/api/scan/full-rescan", requireAdmin, async (req, res) => {

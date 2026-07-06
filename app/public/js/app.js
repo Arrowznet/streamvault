@@ -2383,6 +2383,53 @@ async function switchAudioTrack(trackIndex) {
   }
 }
 
+async function saveChannelSetting(channel) {
+  try {
+    await API.post("/config", { update_channel: channel });
+    toast(channel === "beta" ? "🧪 Beta-kanal aktiverad" : "🟢 Stabil kanal aktiverad", "success");
+  } catch(e) {
+    toast("Fel: " + e.message, "error");
+  }
+}
+
+async function installPgsToSrt() {
+  const btn = document.getElementById("pgstosrt-install-btn");
+  const progressDiv = document.getElementById("pgstosrt-progress");
+  const progressMsg = document.getElementById("pgstosrt-progress-msg");
+  const progressBar = document.getElementById("pgstosrt-progress-bar");
+  if (btn) btn.style.display = "none";
+  if (progressDiv) progressDiv.style.display = "block";
+
+  try {
+    await API.post("/tools/pgstosrt-install", {});
+    // Poll progress
+    const poll = setInterval(async () => {
+      const status = await API.get("/tools/pgstosrt-status").catch(() => null);
+      if (!status) return;
+      const p = status.progress;
+      if (p) {
+        if (progressMsg) progressMsg.textContent = p.message;
+        if (progressBar) progressBar.style.width = p.percent + "%";
+        if (p.done) {
+          clearInterval(poll);
+          if (p.error) {
+            toast("Installation misslyckades: " + p.error, "error");
+            if (btn) btn.style.display = "block";
+            if (progressDiv) progressDiv.style.display = "none";
+          } else {
+            toast("✓ PgsToSrt installerat!", "success");
+            setTimeout(() => loadSettings(), 1000);
+          }
+        }
+      }
+    }, 500);
+  } catch(e) {
+    toast("Fel: " + e.message, "error");
+    if (btn) btn.style.display = "block";
+    if (progressDiv) progressDiv.style.display = "none";
+  }
+}
+
 function toggleSubtitleMenu() {
   if (currentItemId) openSubtitles(currentItemId, document.getElementById("pb-title")?.textContent || "");
 }
@@ -2734,10 +2781,11 @@ async function loadSettings() {
     // Start updating next scan label
     setTimeout(updateNextScanLabel, 500);
     setInterval(updateNextScanLabel, 30000);
-    const [cfg, users, libs, scanStatus, updateInfo, cacheStatus] = await Promise.all([
+    const [cfg, users, libs, scanStatus, updateInfo, cacheStatus, pgsStatus] = await Promise.all([
       API.get("/config"), API.get("/users"), API.get("/libraries"),
       API.get("/scan/status"), API.get("/updates/check").catch(() => null),
-      API.get("/subtitles/cache-status").catch(() => null)
+      API.get("/subtitles/cache-status").catch(() => null),
+      API.get("/tools/pgstosrt-status").catch(() => ({ installed: false }))
     ]);
     console.log("[SETTINGS] cacheStatus:", JSON.stringify(cacheStatus)?.slice(0,100));
     const counts = Object.fromEntries((scanStatus.counts || []).map(c => [c.type, c.c]));
@@ -2804,6 +2852,47 @@ async function loadSettings() {
         </div>
         <div id="subtitle-cache-cached" style="font-size:12px;color:var(--muted)">💾 ${cacheStatus.done > 0 ? cacheStatus.done : cacheStatus.cached} undertextfiler extraherade och sparade</div>
       </div>` : ''}
+
+      <div class="settings-section">
+        <div class="settings-section-title">Uppdateringskanal</div>
+        <div style="margin-bottom:12px">
+          <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Välj vilken kanal du vill ta emot uppdateringar från.</div>
+          <div style="display:flex;gap:12px">
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:14px">
+              <input type="radio" name="update_channel" value="stable" ${(cfg.update_channel||"stable")==="stable"?"checked":""} onchange="saveChannelSetting('stable')">
+              <span>🟢 Stabil</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:14px">
+              <input type="radio" name="update_channel" value="beta" ${cfg.update_channel==="beta"?"checked":""} onchange="saveChannelSetting('beta')">
+              <span>🧪 Beta</span>
+            </label>
+          </div>
+          <div style="font-size:11px;color:var(--muted);margin-top:6px">Beta-kanalen kan innehålla instabila funktioner under testning.</div>
+        </div>
+      </div>
+      <div class="settings-section">
+        <div class="settings-section-title">Bildbaserade undertexter (PGS/VOBSUB)</div>
+        <div id="pgstosrt-status-section">
+          ${pgsStatus.installed ? `
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+            <span style="color:var(--accent)">✅</span>
+            <span style="font-size:13px">PgsToSrt är installerat och redo</span>
+          </div>` : `
+          <div style="font-size:13px;color:var(--muted);margin-bottom:12px">
+            Krävs för att konvertera bildbaserade undertexter (PGS/VOBSUB) till text. 
+            Utan detta kan dessa undertexter inte visas.
+          </div>
+          <button class="s-btn s-btn-primary" onclick="installPgsToSrt()" id="pgstosrt-install-btn">
+            📥 Installera nu (~50MB)
+          </button>`}
+          <div id="pgstosrt-progress" style="display:none;margin-top:12px">
+            <div style="font-size:13px;margin-bottom:6px" id="pgstosrt-progress-msg">Förbereder...</div>
+            <div style="background:var(--card2);border-radius:4px;height:8px;overflow:hidden">
+              <div id="pgstosrt-progress-bar" style="height:100%;background:var(--accent);border-radius:4px;width:0%;transition:width 0.3s"></div>
+            </div>
+          </div>
+        </div>
+      </div>
 
       <div class="settings-section">
 
