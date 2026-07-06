@@ -3052,7 +3052,11 @@ app.post("/api/media/:id/edit", requireAdmin, async (req, res) => {
 });
 
 // ── PGSTOSRT INSTALL ──────────────────────────────────────────────────────────
-const PGSTOSRT_RELEASE_URL = "https://github.com/Tentacule/PgsToSrt/releases/download/v1.4.8/PgsToSrt-1.4.8.zip";
+const PGSTOSRT_VERSION = "1.4.8";
+const PGSTOSRT_RELEASE_URLS = [
+  `https://github.com/Tentacule/PgsToSrt/releases/download/v${PGSTOSRT_VERSION}/PgsToSrt-${PGSTOSRT_VERSION}.zip`,
+  `https://github.com/Tentacule/PgsToSrt/releases/download/v${PGSTOSRT_VERSION}/PgsToStr-${PGSTOSRT_VERSION}.zip`
+];
 const TESSDATA_BASE_URL = "https://github.com/tesseract-ocr/tessdata/raw/main/";
 const TESSDATA_LANGUAGES = { "swe": "swe.traineddata", "eng": "eng.traineddata", "nor": "nor.traineddata", "dan": "dan.traineddata", "fin": "fin.traineddata", "deu": "deu.traineddata", "fra": "fra.traineddata", "spa": "spa.traineddata", "nld": "nld.traineddata" };
 
@@ -3079,13 +3083,25 @@ app.post("/api/tools/pgstosrt-install", requireAdmin, async (req, res) => {
       fs.mkdirSync(PGSTOSRT_DIR, { recursive: true });
       fs.mkdirSync(TESSDATA_DIR, { recursive: true });
 
-      // Step 1: Download PgsToSrt zip
+      // Step 1: Download PgsToSrt zip - try both filename variants
       _pgsInstallProgress = { step: 1, percent: 5, message: "Laddar ner PgsToSrt...", error: null, done: false };
       const zipPath = path.join(TOOLS_DIR, "PgsToSrt.zip");
-      await downloadFile(PGSTOSRT_RELEASE_URL, zipPath, (p) => {
-        _pgsInstallProgress.percent = Math.round(5 + p * 0.35);
-        _pgsInstallProgress.message = `Laddar ner PgsToSrt... ${Math.round(p * 100)}%`;
-      });
+      let downloadError = null;
+      for (const url of PGSTOSRT_RELEASE_URLS) {
+        try {
+          await downloadFile(url, zipPath, (p) => {
+            _pgsInstallProgress.percent = Math.round(5 + p * 0.35);
+            _pgsInstallProgress.message = `Laddar ner PgsToSrt... ${Math.round(p * 100)}%`;
+          });
+          downloadError = null;
+          break; // success
+        } catch(e) {
+          downloadError = e;
+          console.log(`[TOOLS] Download failed for ${url}:`, e.message);
+          try { fs.unlinkSync(zipPath); } catch {}
+        }
+      }
+      if (downloadError) throw downloadError;
 
       // Step 2: Extract zip
       _pgsInstallProgress = { step: 2, percent: 40, message: "Packar upp PgsToSrt...", error: null, done: false };
