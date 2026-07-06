@@ -2385,7 +2385,7 @@ async function switchAudioTrack(trackIndex) {
 
 async function saveChannelSetting(channel) {
   try {
-    await API.post("/config", { update_channel: channel });
+    await API.patch("/config", { update_channel: channel });
     toast(channel === "beta" ? "🧪 Beta-kanal aktiverad" : "🟢 Stabil kanal aktiverad", "success");
   } catch(e) {
     toast("Fel: " + e.message, "error");
