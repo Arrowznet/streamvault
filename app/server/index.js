@@ -319,10 +319,13 @@ app.get("/api/updates/check", requireAuth, async (req, res) => {
     const data = eligible[0]; // newest eligible release
     if (!data) return res.json({ current: STREAMVAULT_VERSION, latest: STREAMVAULT_VERSION, hasUpdate: false });
     const latest = (data.tag_name || "v" + STREAMVAULT_VERSION).replace(/^v/, "");
-    // Compare base versions only (strip beta/rc suffixes for comparison)
+    // On beta channel: compare full version including suffix
+    // On stable channel: compare base versions only
     const latestBase = latest.replace(/[-+].*$/, "");
     const currentBase = STREAMVAULT_VERSION.replace(/[-+].*$/, "");
-    const hasUpdate = latest !== STREAMVAULT_VERSION && latestBase !== currentBase;
+    const hasUpdate = channel === "beta"
+      ? latest !== STREAMVAULT_VERSION
+      : latestBase !== currentBase;
     const downloadUrl = (data.assets || []).find(a => a.name && a.name.endsWith(".exe"))?.browser_download_url || null;
     res.json({ current: STREAMVAULT_VERSION, latest, hasUpdate, releaseNotes: data.body || "", htmlUrl: data.html_url || null, downloadUrl, channel, isBeta: !!data.prerelease });
   } catch {
