@@ -568,6 +568,59 @@ async function processSubtitleCacheQueue() {
   _subtitleCacheRunning = false;
 }
 
+// Convert bitmap subtitle (PGS/VOBSUB) to SRT using PgsToSrt + Tesseract
+async function convertPgsTosrt(item, subIdx, cacheFile, targetLang) {
+  const { execFile } = require("child_process");
+  const supFile = cacheFile.replace(".srt", ".sup");
+  try {
+    // Step 1: Extract .sup file with FFmpeg
+    await new Promise((resolve, reject) => {
+      execFile(getFfmpegPath(), [
+        "-y", "-i", item.file_path,
+        "-map", "0:s:" + subIdx,
+        "-c:s", "copy",
+        supFile
+      ], { timeout: 300000, windowsHide: true }, (err) => {
+        if (err) reject(err); else resolve();
+      });
+    });
+
+    // Step 2: Convert .sup to .srt using PgsToSrt
+    const tessLang = targetLang === "swe" ? "swe" : "eng";
+    await new Promise((resolve, reject) => {
+      execFile(PGSTOSRT_EXE, [
+        "--input", supFile,
+        "--output", cacheFile,
+        "--tesseractdata", TESSDATA_DIR,
+        "--tesseractlanguage", tessLang
+      ], { timeout: 600000, windowsHide: true }, (err) => {
+        if (err) reject(err); else resolve();
+      });
+    });
+
+    // Cleanup .sup file
+    try { fs.unlinkSync(supFile); } catch {}
+
+    if (fs.existsSync(cacheFile)) {
+      console.log(`[SUBTITLES] PgsToSrt converted ${targetLang} for:`, item.title);
+      _subtitleCacheDone++;
+      if (item.type === "episode") {
+        if (targetLang === "swe") _subtitleCacheWithSweEps++; else _subtitleCacheWithEngEps++;
+      } else {
+        if (targetLang === "swe") _subtitleCacheWithSwe++; else _subtitleCacheWithEng++;
+      }
+      dbUpdate(db.media, { _id: item._id }, { $set: { cached_subtitle_lang: targetLang } }).catch(() => {});
+      return true;
+    }
+    return false;
+  } catch(e) {
+    console.log("[SUBTITLES] PgsToSrt failed for", item.title, ":", e.message?.split("\n")[0]);
+    try { fs.unlinkSync(supFile); } catch {}
+    try { fs.unlinkSync(cacheFile); } catch {}
+    return false;
+  }
+}
+
 // Pre-cache Swedish subtitles for a media file (runs sequentially via queue)
 function preCacheSubtitles(item) {
   return new Promise((resolve) => {
@@ -653,11 +706,20 @@ function preCacheSubtitles(item) {
           ], { timeout: 300000, windowsHide: true }, (err2) => {
             if (err2) {
               try { fs.unlinkSync(tempFile); } catch {}
-              // Check if it's a bitmap subtitle (PGS/VOBSUB) - can't convert to SRT
               const errMsg = err2.message || String(err2);
               if (errMsg.includes("bitmap to bitmap") || errMsg.includes("only possible from text")) {
-                console.log("[SUBTITLES] Skipping bitmap subtitle for:", item.title, "(PGS/VOBSUB not supported)");
-                _subtitleCacheErrors++;
+                // Bitmap subtitle - try PgsToSrt if installed
+                if (isPgsToSrtInstalled()) {
+                  console.log("[SUBTITLES] Bitmap subtitle detected, trying PgsToSrt for:", item.title);
+                  convertPgsTosrt(item, subIdx, cacheFile, targetLang).then(ok => {
+                    if (!ok) _subtitleCacheErrors++;
+                    resolve();
+                  });
+                  return; // resolve() called inside convertPgsTosrt callback
+                } else {
+                  console.log("[SUBTITLES] Skipping bitmap subtitle for:", item.title, "(PgsToSrt not installed)");
+                  _subtitleCacheErrors++;
+                }
               } else {
                 console.log("[SUBTITLES] Pre-cache error for", item.title, ":", errMsg.split("\n")[0]);
                 _subtitleCacheErrors++;
@@ -1218,6 +1280,8 @@ async function startHlsTranscode(item, startSec = 0) {
     ...(startSec > 0 ? ["-ss", startSec.toString()] : []),
     "-fflags", "+genpts+igndts+discardcorrupt",
     "-err_detect", "ignore_err",
+    "-analyzeduration", "100M",
+    "-probesize", "100M",
     "-i", item.file_path,
     "-avoid_negative_ts", "make_zero",
     ...videoFilterArgs,
@@ -1300,12 +1364,10 @@ async function startDashTranscode(item, seekSec = 0, audioTrackIndex = null) {
       ? Math.round((item.height / item.width) * targetW / 2) * 2
       : 800;
     if (encoder === "h264_nvenc") {
-      // NVENC: use cuda hwaccel for GPU-accelerated decoding, scale on CPU
       console.log(`[DASH] 4K HDR detected (${item.width}x${item.height} 10-bit HEVC) - using cuda hwaccel + scale`);
       hwaccelArgs = ["-hwaccel", "cuda"];
       videoFilterArgs = ["-vf", `scale=${targetW}:${targetH},format=yuv420p`, "-pix_fmt", "yuv420p"];
     } else {
-      // AMD/CPU fallback: software decode + scale
       console.log(`[DASH] 4K HDR detected (${item.width}x${item.height} 10-bit HEVC) - using software decode + scale`);
       hwaccelArgs = [];
       videoFilterArgs = ["-vf", `scale=${targetW}:${targetH},format=yuv420p`];
@@ -1334,16 +1396,39 @@ async function startDashTranscode(item, seekSec = 0, audioTrackIndex = null) {
     ? ["-c:v", "copy", "-bsf:v", "h264_mp4toannexb"]
     : [...videoFilterArgs, "-c:v", encoder, ...dashEncoderArgs, "-b:v", "4000k"];
 
-  // Audio stream selection - use specific track if requested
+  // Audio stream selection - use specific track if requested, otherwise pick best audio stream
+  // Prefer AC3/EAC3/AAC over TrueHD/DTS (TrueHD causes FFmpeg errors in DASH)
+  let bestAudioIndex = 0;
+  if (audioTrackIndex === null) {
+    try {
+      const { execFileSync } = require("child_process");
+      const ffprobePath = getFfmpegPath().replace("ffmpeg.exe", "ffprobe.exe");
+      const probeOut = execFileSync(ffprobePath, [
+        "-v", "quiet", "-print_format", "json", "-show_streams",
+        "-select_streams", "a", item.file_path
+      ], { timeout: 8000, windowsHide: true }).toString();
+      const audioStreams = JSON.parse(probeOut).streams || [];
+      const preferred = audioStreams.find(s => ["ac3","eac3","aac","mp3"].includes((s.codec_name||"").toLowerCase()));
+      if (preferred) {
+        // Find relative audio index
+        bestAudioIndex = audioStreams.indexOf(preferred);
+        console.log(`[DASH] Auto-selected audio stream: ${bestAudioIndex} (${preferred.codec_name})`);
+      }
+    } catch(e) {
+      console.log("[DASH] Audio probe failed, using default:", e.message);
+    }
+  }
   const audioSelectArgs = audioTrackIndex !== null
     ? ["-map", "0:v:0", "-map", `0:a:${audioTrackIndex}`]
-    : [];
+    : ["-map", "0:v:0", "-map", `0:a:${bestAudioIndex}`];
 
   const args = [
     "-hide_banner", "-loglevel", "warning",
     ...hwaccelArgs,
     "-fflags", "+genpts+igndts+discardcorrupt",
     "-err_detect", "ignore_err",
+    "-analyzeduration", "100M",
+    "-probesize", "100M",
     ...(seekSec > 0 ? ["-ss", seekSec.toString()] : []),
     "-i", item.file_path,
     "-avoid_negative_ts", "make_zero",
@@ -1796,6 +1881,44 @@ app.get("/api/media/:id/subtitles", requireAuth, async (req, res) => {
       });
     } catch {}
 
+    // 3. Check for cached subtitle (PgsToSrt-converted or pre-extracted)
+    try {
+      const cacheDir = path.join(DATA_DIR, "subtitle-cache");
+      const shortId = require("crypto").createHash("md5").update(item._id).digest("hex");
+      const cacheFiles = fs.existsSync(cacheDir) ? fs.readdirSync(cacheDir) : [];
+      // Find any cached SRT for this item (format: md5hash_subIdx.srt)
+      const cachedSrts = cacheFiles.filter(f => f.startsWith(shortId + "_") && f.endsWith(".srt") && !f.endsWith("_ext.srt"));
+      for (const cachedFile of cachedSrts) {
+        const lang = item.cached_subtitle_lang || "swe";
+        const label = lang === "swe" ? "Svenska (Cachad)" : "English (Cached)";
+        // Only add if not already covered by an external SRT
+        const alreadyHave = subtitles.some(s => s.type === "srt" && (s.lang === lang || s.lang === (lang === "swe" ? "sv" : "en")));
+        if (!alreadyHave) {
+          subtitles.push({
+            id: "cached_" + cachedFile,
+            type: "srt",
+            lang: lang === "swe" ? "sv" : "en",
+            label,
+            url: "/api/media/" + item._id + "/subtitle-cache?file=" + encodeURIComponent(cachedFile)
+          });
+        }
+      }
+      // Also check for external cached SRT (_ext.srt)
+      const extCached = cacheFiles.find(f => f.startsWith(shortId + "_") && f.endsWith("_ext.srt"));
+      if (extCached) {
+        const alreadyHave = subtitles.some(s => s.type === "srt");
+        if (!alreadyHave) {
+          subtitles.push({
+            id: "cached_ext_" + extCached,
+            type: "srt",
+            lang: "sv",
+            label: "Svenska (Extern)",
+            url: "/api/media/" + item._id + "/subtitle-cache?file=" + encodeURIComponent(extCached)
+          });
+        }
+      }
+    } catch {}
+
     // Sort: Swedish first, then English, then others
     subtitles.sort((a, b) => {
       const priority = (l) => (l === "sv" || l === "swe") ? 0 : (l === "en" || l === "eng") ? 1 : 2;
@@ -1806,6 +1929,43 @@ app.get("/api/media/:id/subtitles", requireAuth, async (req, res) => {
   } catch(e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// Serve a cached subtitle file (PgsToSrt-converted or pre-extracted)
+app.get("/api/media/:id/subtitle-cache", async (req, res) => {
+  try {
+    const item = await dbFindOne(db.media, { _id: req.params.id });
+    if (!item) return res.status(404).json({ error: "Not found" });
+    const cacheDir = path.join(DATA_DIR, "subtitle-cache");
+    const file = req.query.file;
+    if (!file || file.includes("..")) return res.status(400).json({ error: "Invalid" });
+    const filePath = path.join(cacheDir, file);
+    if (!fs.existsSync(filePath)) return res.status(404).json({ error: "Not found" });
+    const offsetSec = parseFloat(req.query.offset || "0");
+    let srt;
+    const rawBuffer = fs.readFileSync(filePath);
+    try {
+      srt = rawBuffer.toString("utf8");
+      if (srt.includes("\uFFFD")) throw new Error("not utf8");
+    } catch { srt = rawBuffer.toString("latin1"); }
+    if (srt.charCodeAt(0) === 0xFEFF) srt = srt.slice(1);
+    function shiftTime(h, m, s, ms, offset) {
+      let totalMs = (parseInt(h)*3600 + parseInt(m)*60 + parseInt(s))*1000 + parseInt(ms) - Math.round(offset*1000);
+      if (totalMs < 0) totalMs = 0;
+      const oh = Math.floor(totalMs/3600000); totalMs %= 3600000;
+      const om = Math.floor(totalMs/60000); totalMs %= 60000;
+      const os = Math.floor(totalMs/1000);
+      const oms = totalMs % 1000;
+      return String(oh).padStart(2,'0')+':'+String(om).padStart(2,'0')+':'+String(os).padStart(2,'0')+'.'+String(oms).padStart(3,'0');
+    }
+    let vttBody = srt.replace(/\r\n/g,"\n").replace(/\r/g,"\n")
+      .replace(/(\d+)\n(\d{2}):(\d{2}):(\d{2}),(\d{3}) --> (\d{2}):(\d{2}):(\d{2}),(\d{3})/g, function(match,idx,h1,m1,s1,ms1,h2,m2,s2,ms2) {
+        return shiftTime(h1,m1,s1,ms1,offsetSec) + " --> " + shiftTime(h2,m2,s2,ms2,offsetSec);
+      });
+    const vtt = "WEBVTT\n\n" + vttBody;
+    res.setHeader("Content-Type", "text/vtt; charset=utf-8");
+    res.send(vtt);
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 // Serve a .srt file as WebVTT for browser playback
@@ -1878,6 +2038,31 @@ app.get("/api/media/:id/subtitle-extract", async (req, res) => {
 
     const tempFile = cacheFile + ".tmp";
     if (!fs.existsSync(cacheFile)) {
+      // Check if this is a bitmap subtitle (PGS/VOBSUB) - don't try to extract, check PgsToSrt cache instead
+      try {
+        const { execFileSync } = require("child_process");
+        const ffprobePath = getFfmpegPath().replace("ffmpeg.exe", "ffprobe.exe");
+        const probeOut = execFileSync(ffprobePath, [
+          "-v", "quiet", "-print_format", "json", "-show_streams",
+          "-select_streams", "s:" + trackIndex, item.file_path
+        ], { timeout: 8000, windowsHide: true }).toString();
+        const streams = JSON.parse(probeOut).streams || [];
+        const codec = streams[0]?.codec_name || "";
+        const bitmapCodecs = ["hdmv_pgs_subtitle", "dvd_subtitle", "dvdsub", "xsub", "dvb_subtitle"];
+        if (bitmapCodecs.includes(codec)) {
+          // Check if PgsToSrt has already converted this
+          const shortId = require("crypto").createHash("md5").update(item._id).digest("hex");
+          const cacheDir2 = path.join(DATA_DIR, "subtitle-cache");
+          const cachedFiles = fs.existsSync(cacheDir2) ? fs.readdirSync(cacheDir2) : [];
+          const pgsCached = cachedFiles.find(f => f.startsWith(shortId + "_") && f.endsWith(".srt") && !f.endsWith("_ext.srt"));
+          if (pgsCached) {
+            // Redirect to cached file
+            return res.redirect("/api/media/" + item._id + "/subtitle-cache?file=" + encodeURIComponent(pgsCached) + (offsetSec ? "&offset=" + offsetSec : ""));
+          }
+          return res.status(404).json({ error: "Bitmap subtitle not supported without PgsToSrt cache" });
+        }
+      } catch {}
+
       // Already extracting?
       if (fs.existsSync(tempFile)) {
         return res.status(202).json({ status: "extracting", retryAfter: 3 });

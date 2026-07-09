@@ -1682,6 +1682,29 @@ async function playItem(id, title) {
           }
         });
         player.on(dashjs.MediaPlayer.events.ERROR, (e) => { console.error("[DASH] Error:", e); });
+
+        // Auto-resume on DEMUXER_UNDERFLOW (Chrome HDR issue)
+        // Only activate after video has been playing for 30+ seconds
+        let _lowReadyStateCount = 0;
+        let _stallMonitorActive = false;
+        setTimeout(() => { _stallMonitorActive = true; }, 30000);
+        const _stallMonitor = setInterval(() => {
+          const video = document.getElementById("main-video");
+          if (!video || video.paused || video.ended || !_stallMonitorActive) return;
+          if (video.currentTime < 10) return; // Don't trigger during initial buffering
+          if (video.readyState <= 2) {
+            _lowReadyStateCount++;
+            if (_lowReadyStateCount >= 3) {
+              console.log("[DASH] DEMUXER_UNDERFLOW recovery: seeking +2s at", Math.round(video.currentTime));
+              _lowReadyStateCount = 0;
+              video.currentTime += 2;
+            }
+          } else {
+            _lowReadyStateCount = 0;
+          }
+        }, 1000);
+
+        player.on(dashjs.MediaPlayer.events.ERROR, (e) => { clearInterval(_stallMonitor); });
         // Wait for MANIFEST_PARSED then sample currentTime to find true start value
         // Edge caches old currentTime; dash.js resets it after manifest loads
         // Position tracked via wall clock timer, not video.currentTime
@@ -2168,7 +2191,7 @@ async function openSubtitles(mediaId, title) {
     var removeBtn = document.createElement("button");
     removeBtn.textContent = "Ta bort";
     removeBtn.style.cssText = "background:var(--danger,#e53);border:none;color:white;font-size:12px;padding:6px 12px;border-radius:6px;cursor:pointer";
-    removeBtn.onclick = function() { stopSubtitleOverlay(); _currentSubtitleTrack = null; overlay.remove(); toast("Undertext borttagen", "info"); };
+    removeBtn.onclick = function() { stopSubtitleOverlay(); _currentSubtitleTrack = null; _activeSubtitleUrl = null; overlay.remove(); toast("Undertext borttagen", "info"); };
     removeRow.appendChild(removeBtn);
     contentEl.appendChild(removeRow);
 
@@ -2189,8 +2212,11 @@ async function openSubtitles(mediaId, title) {
         row.innerHTML = "<span style='font-size:18px'>" + flag + "</span><div style='flex:1'><div style='font-size:13px;font-weight:500'>" + esc(s.label) + "</div><div style='font-size:11px;color:var(--muted)'>" + (s.type === "embedded" ? "Inbakad" : "SRT-fil") + "</div></div>";
         if (s.url) {
           var btn = document.createElement("button");
-          btn.textContent = "Aktivera";
-          btn.style.cssText = "background:var(--accent);border:none;color:white;font-size:12px;padding:6px 12px;border-radius:6px;cursor:pointer";
+          var isActiveSub = _activeSubtitleUrl && s.url && s.url.split("?")[0] === _activeSubtitleUrl;
+          btn.textContent = isActiveSub ? "✅ Aktiv" : "Aktivera";
+          btn.style.cssText = isActiveSub
+            ? "background:#1a7a3c;border:none;color:#4eff8a;font-size:12px;padding:6px 12px;border-radius:6px;cursor:default;font-weight:700"
+            : "background:var(--accent);border:none;color:white;font-size:12px;padding:6px 12px;border-radius:6px;cursor:pointer";
           var subUrl = s.url, subLabel = s.label;
           btn.onclick = function() { 
             if (s.type === "embedded") {
@@ -2253,6 +2279,7 @@ async function downloadSubtitle(fileId, mediaId) {
 }
 
 function activateSubtitle(url, label) {
+  _activeSubtitleUrl = url ? url.split("?")[0] : null; // Store base URL without params
   var video = document.getElementById("main-video");
   if (!video) { toast("Starta filmen först för att aktivera undertext", "info"); return; }
   
@@ -2297,6 +2324,9 @@ function activateSubtitle(url, label) {
 }
 
 let _currentAudioTrack = null;
+let _activeSubtitleUrl = null; // Track active subtitle URL
+// Restore saved audio track preference
+try { _currentAudioTrack = JSON.parse(sessionStorage.getItem("sv_audioTrack") || "null"); } catch {}
 
 async function toggleAudioTrackMenu() {
   document.getElementById("audio-track-overlay")?.remove();
@@ -2335,7 +2365,7 @@ async function toggleAudioTrackMenu() {
       return;
     }
     list.innerHTML = tracks.map((t, i) => {
-      const isActive = _currentAudioTrack === t.trackIndex || (_currentAudioTrack === null && t.default);
+      const isActive = _currentAudioTrack === t.trackIndex;
       const label = [
         t.language !== "und" ? t.language.toUpperCase() : null,
         t.codec,
@@ -2343,7 +2373,7 @@ async function toggleAudioTrackMenu() {
         t.title
       ].filter(Boolean).join(" · ");
       return `<div onclick="switchAudioTrack(${t.trackIndex})" style="padding:14px 20px;cursor:pointer;display:flex;align-items:center;gap:12px;background:${isActive ? "var(--card2)" : "none"};transition:background 0.15s" onmouseover="this.style.background='var(--card2)'" onmouseout="this.style.background='${isActive ? "var(--card2)" : "none"}'">
-        <span style="font-size:20px">${isActive ? "✅" : "🔊"}</span>
+        ${isActive ? '<span style="font-size:20px">✅</span>' : ''}
         <div>
           <div style="font-size:13px;font-weight:${isActive ? "600" : "400"}">${esc(label)}</div>
         </div>
@@ -2358,6 +2388,7 @@ async function switchAudioTrack(trackIndex) {
   document.getElementById("audio-track-overlay")?.remove();
   if (!currentItemId) return;
   _currentAudioTrack = trackIndex;
+  try { sessionStorage.setItem("sv_audioTrack", JSON.stringify(trackIndex)); } catch {}
   toast("Byter ljudspår...", "info");
 
   // Get current playback position
