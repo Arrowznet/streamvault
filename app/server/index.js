@@ -2985,6 +2985,51 @@ app.get("/api/lastfm/artist/:name", requireAuth, async (req, res) => {
 });
 
 // ── COLLECTION FULL DATA (from TMDB) ─────────────────────────────────────────
+app.patch("/api/collections/:collection_id", requireAdmin, async (req, res) => {
+  try {
+    const { collection_id } = req.params;
+    const { name, poster_url, backdrop_url, movie_ids } = req.body;
+
+    // Update all movies: remove from collection if not in movie_ids, add if in movie_ids
+    const allMovies = await dbFind(db.media, { type: "movie" });
+    for (const movie of allMovies) {
+      const shouldBeInCollection = movie_ids && movie_ids.includes(movie._id);
+      const isInCollection = String(movie.collection_id) === String(collection_id);
+
+      if (shouldBeInCollection && !isInCollection) {
+        await dbUpdate(db.media, { _id: movie._id }, { $set: { collection_id: parseInt(collection_id) || collection_id } });
+      } else if (!shouldBeInCollection && isInCollection) {
+        await dbUpdate(db.media, { _id: movie._id }, { $unset: { collection_id: true, collection_name: true } });
+      }
+    }
+
+    // Update collection metadata on all movies in collection
+    if (name || poster_url !== undefined || backdrop_url !== undefined) {
+      const updates = {};
+      if (name) updates.collection_name = name;
+      if (poster_url !== undefined) updates.collection_poster = poster_url;
+      if (backdrop_url !== undefined) updates.collection_backdrop = backdrop_url;
+      if (Object.keys(updates).length) {
+        await dbUpdate(db.media, { collection_id: parseInt(collection_id) || collection_id }, { $set: updates }, { multi: true });
+      }
+    }
+
+    res.json({ ok: true });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/api/tmdb/collection-images", requireAuth, async (req, res) => {
+  try {
+    if (!config.tmdb_api_key) return res.json({ posters: [], backdrops: [] });
+    const id = req.query.id;
+    if (!id) return res.status(400).json({ error: "id required" });
+    const data = await tmdbFetch(`/collection/${id}/images`);
+    res.json({ posters: data?.posters || [], backdrops: data?.backdrops || [] });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get("/api/collections/:collection_id/full", requireAuth, async (req, res) => {
   try {
     if (!config.tmdb_api_key) return res.json({ parts: [] });

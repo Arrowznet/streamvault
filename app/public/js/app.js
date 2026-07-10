@@ -342,6 +342,170 @@ async function loadCollections() {
   }
 }
 
+async function editCollection(collectionId) {
+  const collection = window._collectionsData?.find(c => String(c.id) === String(collectionId));
+  if (!collection) return;
+
+  // Fetch all movies for linking
+  let allMovies = [];
+  try { allMovies = (await API.get("/media?type=movie&limit=9999")).items || []; } catch {}
+
+  const linkedIds = new Set((collection.movies || []).map(m => m._id || m.id));
+  window._collEditMovies = allMovies.sort((a,b) => (a.title||"").localeCompare(b.title||""));
+  window._collEditLinkedIds = new Set(linkedIds);
+
+  const modal = document.createElement("div");
+  modal.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,0.8);z-index:1000;display:flex;align-items:center;justify-content:center;padding:20px";
+  modal.innerHTML = `
+    <div style="background:var(--card);border-radius:16px;padding:28px;width:100%;max-width:600px;max-height:85vh;overflow-y:auto;display:flex;flex-direction:column;gap:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <h2 style="margin:0;font-size:18px">Redigera samling</h2>
+        <button onclick="this.closest('[style*=fixed]').remove()" style="background:none;border:none;color:var(--muted);font-size:22px;cursor:pointer">✕</button>
+      </div>
+
+      <div>
+        <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px">Namn</label>
+        <input id="coll-edit-name" type="text" value="${esc(collection.name||"")}" style="width:100%;background:var(--card2);border:1px solid var(--border);color:var(--text);font-size:14px;padding:9px 12px;border-radius:8px;outline:none;box-sizing:border-box">
+      </div>
+
+      <div style="display:flex;gap:16px">
+        <div style="flex:1">
+          <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:6px">Poster</label>
+          <div style="position:relative;width:120px">
+            <img id="coll-poster-preview" src="${collection.poster_url||''}" style="width:120px;height:180px;object-fit:cover;border-radius:8px;background:var(--card2);display:${collection.poster_url?'block':'none'}">
+            <div id="coll-poster-ph" style="width:120px;height:180px;background:var(--card2);border-radius:8px;display:${collection.poster_url?'none':'flex'};align-items:center;justify-content:center;font-size:32px">🎬</div>
+            <div style="display:flex;gap:4px;margin-top:6px">
+              <button onclick="browseCollectionImages('${collectionId}','poster',-1)" style="flex:1;background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px;cursor:pointer;font-size:12px">◀</button>
+              <button onclick="browseCollectionImages('${collectionId}','poster',1)" style="flex:1;background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px;cursor:pointer;font-size:12px">▶</button>
+            </div>
+          </div>
+          <input id="coll-edit-poster" type="hidden" value="${esc(collection.poster_url||'')}">
+        </div>
+        <div style="flex:2">
+          <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:6px">Bakgrundsbild</label>
+          <img id="coll-backdrop-preview" src="${collection.backdrop_url||''}" style="width:100%;height:120px;object-fit:cover;border-radius:8px;background:var(--card2);display:${collection.backdrop_url?'block':'none'}">
+          <div id="coll-backdrop-ph" style="width:100%;height:120px;background:var(--card2);border-radius:8px;display:${collection.backdrop_url?'none':'flex'};align-items:center;justify-content:center;font-size:32px">🖼️</div>
+          <div style="display:flex;gap:4px;margin-top:6px">
+            <button onclick="browseCollectionImages('${collectionId}','backdrop',-1)" style="flex:1;background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px;cursor:pointer;font-size:12px">◀ Föregående</button>
+            <button onclick="browseCollectionImages('${collectionId}','backdrop',1)" style="flex:1;background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px;cursor:pointer;font-size:12px">Nästa ▶</button>
+          </div>
+          <input id="coll-edit-backdrop" type="hidden" value="${esc(collection.backdrop_url||'')}">
+        </div>
+      </div>
+
+      <div>
+        <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:6px">Filmer i samlingen</label>
+        <input id="coll-movie-search" type="text" placeholder="Sök film..." oninput="filterCollectionMovies()" style="width:100%;background:var(--card2);border:1px solid var(--border);color:var(--text);font-size:13px;padding:8px 12px;border-radius:8px;outline:none;box-sizing:border-box;margin-bottom:8px">
+        <div id="coll-edit-movies" style="display:flex;flex-direction:column;gap:4px;max-height:220px;overflow-y:auto"></div>
+      </div>
+
+      <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px">
+        <button onclick="this.closest('[style*=fixed]').remove()" style="background:var(--card2);border:1px solid var(--border);color:var(--text);padding:10px 20px;border-radius:8px;cursor:pointer;font-size:14px">Avbryt</button>
+        <button onclick="saveCollectionEdit('${collectionId}')" style="background:var(--accent);border:none;color:white;padding:10px 20px;border-radius:8px;cursor:pointer;font-size:14px;font-weight:600">💾 Spara</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+
+  // Initial render - show only linked movies + search results
+  renderCollectionMovieList("");
+}
+
+function renderCollectionMovieList(query) {
+  const container = document.getElementById("coll-edit-movies");
+  if (!container) return;
+  const movies = window._collEditMovies || [];
+  const linkedIds = window._collEditLinkedIds || new Set();
+  const q = query.toLowerCase().trim();
+
+  // Show linked movies always, plus search results
+  const filtered = movies.filter(m => {
+    const isLinked = linkedIds.has(m._id);
+    const matchesSearch = q && (m.title||"").toLowerCase().includes(q);
+    return isLinked || matchesSearch;
+  });
+
+  if (!q && filtered.length === 0) {
+    container.innerHTML = "<div style='font-size:12px;color:var(--muted);padding:8px'>Inga filmer länkade. Sök för att lägga till.</div>";
+    return;
+  }
+
+  container.innerHTML = filtered.map(m => {
+    const isLinked = linkedIds.has(m._id);
+    return `<label style="display:flex;align-items:center;gap:10px;padding:8px;border-radius:8px;cursor:pointer;background:var(--card2)">
+      <input type="checkbox" data-movie-id="${m._id}" ${isLinked ? "checked" : ""} style="width:16px;height:16px;cursor:pointer" onchange="toggleCollectionMovie('${m._id}', this.checked)">
+      <span style="font-size:13px">${esc(m.title||"")} ${m.year ? '<span style="color:var(--muted)">('+m.year+')</span>' : ""}</span>
+    </label>`;
+  }).join("");
+}
+
+function toggleCollectionMovie(movieId, checked) {
+  if (!window._collEditLinkedIds) window._collEditLinkedIds = new Set();
+  if (checked) window._collEditLinkedIds.add(movieId);
+  else window._collEditLinkedIds.delete(movieId);
+}
+
+// Collection image browsing
+let _collImages = { poster: [], backdrop: [], posterIdx: 0, backdropIdx: 0, loadedFor: null };
+
+async function browseCollectionImages(collectionId, type, direction) {
+  // Reset if different collection
+  if (_collImages.loadedFor !== collectionId) {
+    _collImages = { poster: [], backdrop: [], posterIdx: 0, backdropIdx: 0, loadedFor: collectionId };
+  }
+  // Load images if not loaded yet
+  if (_collImages[type].length === 0) {
+    try {
+      const data = await API.get("/tmdb/collection-images?id=" + collectionId);
+      _collImages.poster = (data.posters || []).map(p => "https://image.tmdb.org/t/p/w500" + p.file_path);
+      _collImages.backdrop = (data.backdrops || []).map(b => "https://image.tmdb.org/t/p/w1280" + b.file_path);
+      _collImages.posterIdx = 0;
+      _collImages.backdropIdx = 0;
+    } catch(e) {
+      toast("Kunde inte hämta bilder från TMDB", "error");
+      return;
+    }
+  }
+
+  const images = _collImages[type];
+  if (!images.length) { toast("Inga bilder hittades", "info"); return; }
+
+  const idxKey = type + "Idx";
+  _collImages[idxKey] = (_collImages[idxKey] + direction + images.length) % images.length;
+  const url = images[_collImages[idxKey]];
+
+  // Update preview
+  const preview = document.getElementById("coll-" + (type === "poster" ? "poster" : "backdrop") + "-preview");
+  const ph = document.getElementById("coll-" + (type === "poster" ? "poster" : "backdrop") + "-ph");
+  const input = document.getElementById("coll-edit-" + (type === "poster" ? "poster" : "backdrop"));
+  if (preview) { preview.src = url; preview.style.display = "block"; }
+  if (ph) ph.style.display = "none";
+  if (input) input.value = url;
+}
+
+function filterCollectionMovies() {
+  const q = document.getElementById("coll-movie-search")?.value || "";
+  renderCollectionMovieList(q);
+}
+
+async function saveCollectionEdit(collectionId) {
+  const name = document.getElementById("coll-edit-name")?.value?.trim();
+  const poster_url = document.getElementById("coll-edit-poster")?.value?.trim();
+  const backdrop_url = document.getElementById("coll-edit-backdrop")?.value?.trim();
+  const movieIds = Array.from(window._collEditLinkedIds || []);
+
+  try {
+    await API.patch("/collections/" + collectionId, { name, poster_url, backdrop_url, movie_ids: movieIds });
+    toast("✓ Samling sparad!", "success");
+    document.querySelector("[style*=fixed]")?.remove();
+    // Reload collections data and re-open collection
+    const fresh = await API.get("/collections");
+    window._collectionsData = Array.isArray(fresh) ? fresh : (fresh.collections || []);
+    await openCollection(collectionId);
+  } catch(e) {
+    toast("Fel: " + e.message, "error");
+  }
+}
+
 async function openCollection(collectionId) {
   const collection = window._collectionsData?.find(c => String(c.id) === String(collectionId));
   if (!collection) return;
@@ -417,6 +581,9 @@ async function openCollection(collectionId) {
             <h1 class="detail-page-title">${esc(collection.name||"")}</h1>
             <div class="detail-meta-row">
               <span class="detail-meta-item">${localMovies.length} av ${allParts?.parts?.length||localMovies.length} filmer i ditt bibliotek</span>
+            </div>
+            <div style="display:flex;gap:10px;margin-top:16px;flex-wrap:wrap">
+              <button class="s-btn s-btn-primary" onclick="editCollection('${collectionId}')">✏️ Redigera samling</button>
             </div>
           </div>
         </div>
