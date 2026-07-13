@@ -8,7 +8,9 @@ window.addEventListener("DOMContentLoaded", async () => {
   const token = localStorage.getItem("sv_token");
   if (token) {
     const user = JSON.parse(localStorage.getItem("sv_user") || "null");
-    if (user) { currentUser = user; showApp(); return; }
+    if (user) { currentUser = user; showApp(); 
+      API.get("/config").then(c => { window._serverName = c.server_name || "StreamVault"; }).catch(()=>{});
+      return; }
   }
   try {
     const data = await API.post("/auth/refresh", { refreshToken: API._refresh });
@@ -350,9 +352,10 @@ async function editCollection(collectionId) {
   let allMovies = [];
   try { allMovies = (await API.get("/media?type=movie&limit=9999")).items || []; } catch {}
 
-  const linkedIds = new Set((collection.movies || []).map(m => m._id || m.id));
+  // Get locally linked movies by collection_id
+  const linkedMovies = allMovies.filter(m => String(m.collection_id) === String(collectionId));
   window._collEditMovies = allMovies.sort((a,b) => (a.title||"").localeCompare(b.title||""));
-  window._collEditLinkedIds = new Set(linkedIds);
+  window._collEditLinkedIds = new Set(linkedMovies.map(m => m._id || m.id));
 
   const modal = document.createElement("div");
   modal.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,0.8);z-index:1000;display:flex;align-items:center;justify-content:center;padding:20px";
@@ -415,24 +418,29 @@ function renderCollectionMovieList(query) {
   if (!container) return;
   const movies = window._collEditMovies || [];
   const linkedIds = window._collEditLinkedIds || new Set();
-  const q = query.toLowerCase().trim();
+  const q = (query || "").toLowerCase().trim();
+  const getId = m => m._id || m.id;
 
-  // Show linked movies always, plus search results
-  const filtered = movies.filter(m => {
-    const isLinked = linkedIds.has(m._id);
-    const matchesSearch = q && (m.title||"").toLowerCase().includes(q);
-    return isLinked || matchesSearch;
-  });
-
-  if (!q && filtered.length === 0) {
-    container.innerHTML = "<div style='font-size:12px;color:var(--muted);padding:8px'>Inga filmer länkade. Sök för att lägga till.</div>";
-    return;
+  let toShow = [];
+  if (!q) {
+    // No search - only show linked movies
+    toShow = movies.filter(m => linkedIds.has(getId(m)));
+    if (toShow.length === 0) {
+      container.innerHTML = "<div style='font-size:12px;color:var(--muted);padding:8px'>Inga filmer länkade. Sök för att lägga till.</div>";
+      return;
+    }
+  } else {
+    // Search - show matching movies (max 30) + always show linked
+    const linked = movies.filter(m => linkedIds.has(getId(m)));
+    const matching = movies.filter(m => !linkedIds.has(getId(m)) && (m.title||"").toLowerCase().includes(q)).slice(0, 30);
+    toShow = [...linked, ...matching];
   }
 
-  container.innerHTML = filtered.map(m => {
-    const isLinked = linkedIds.has(m._id);
+  container.innerHTML = toShow.map(m => {
+    const isLinked = linkedIds.has(getId(m));
+    const mid = getId(m);
     return `<label style="display:flex;align-items:center;gap:10px;padding:8px;border-radius:8px;cursor:pointer;background:var(--card2)">
-      <input type="checkbox" data-movie-id="${m._id}" ${isLinked ? "checked" : ""} style="width:16px;height:16px;cursor:pointer" onchange="toggleCollectionMovie('${m._id}', this.checked)">
+      <input type="checkbox" data-movie-id="${mid}" ${isLinked ? "checked" : ""} style="width:16px;height:16px;cursor:pointer" onchange="toggleCollectionMovie('${mid}', this.checked)">
       <span style="font-size:13px">${esc(m.title||"")} ${m.year ? '<span style="color:var(--muted)">('+m.year+')</span>' : ""}</span>
     </label>`;
   }).join("");
@@ -583,7 +591,7 @@ async function openCollection(collectionId) {
               <span class="detail-meta-item">${localMovies.length} av ${allParts?.parts?.length||localMovies.length} filmer i ditt bibliotek</span>
             </div>
             <div style="display:flex;gap:10px;margin-top:16px;flex-wrap:wrap">
-              <button class="s-btn s-btn-primary" onclick="editCollection('${collectionId}')">✏️ Redigera samling</button>
+              ${currentUser?.role === "admin" ? `<button class="s-btn s-btn-primary" onclick="editCollection('${collectionId}')">✏️ Redigera samling</button>` : ""}
             </div>
           </div>
         </div>
@@ -914,7 +922,7 @@ function openArtistById(safeId) {
           <div id="artist-genres" class="detail-genres"></div>
           <p id="artist-bio-text" class="detail-page-overview"></p>
           <div class="detail-actions">
-            <button class="btn-fav" onclick='openMusicFixMeta("artist","${encodeURIComponent(data.name)}","${esc(data.name)}")'>🔍 Fixa info</button>
+            ${currentUser?.role === "admin" ? `<button class="btn-fav" onclick='openMusicFixMeta("artist","${encodeURIComponent(data.name)}","${esc(data.name)}")'>🔍 Fixa info</button>` : ""}
           </div>
         </div>
       </div>
@@ -1004,7 +1012,7 @@ function openAlbumById(safeArtistId, safeAlbumId) {
     <div class="row-header" style="margin-bottom:20px">
       <span class="row-title">💿 ${esc(albumData.name)}</span>
       <span class="row-count">${albumData.tracks.length} låtar</span>
-      <button class="btn-fav" style="margin-left:12px" onclick='openMusicFixMeta("${artistData.isStandalone ? "artist" : "album"}","${artistData.isStandalone ? encodeURIComponent(artistData.name) : encodeURIComponent(albumData.name)}","${esc(albumData.name)}","${encodeURIComponent(artistData.name)}")'>🔍 Fixa info</button>
+      ${currentUser?.role === "admin" ? `<button class="btn-fav" style="margin-left:12px" onclick='openMusicFixMeta("${artistData.isStandalone ? "artist" : "album"}","${artistData.isStandalone ? encodeURIComponent(artistData.name) : encodeURIComponent(albumData.name)}","${esc(albumData.name)}","${encodeURIComponent(artistData.name)}")'>🔍 Fixa info</button>` : ""}
     </div>
     <div>${albumData.tracks.map(t => buildMusicRow(t)).join("")}</div>
   </div>`;
@@ -1135,8 +1143,8 @@ async function openShowDetail(id) {
               ${genresHtml ? `<div class="detail-genres">${genresHtml}</div>` : ""}
               ${item.overview ? `<p class="detail-page-overview">${esc(item.overview)}</p>` : ""}
               <div class="detail-actions">
-                <button class="btn-fav" onclick='openFixMeta("${item.id}","${esc(item.title)}","tv")'>🔍 Fixa info</button>
-                <button class="btn-fav" onclick='openEditMedia("${item.id}")'>✏ Redigera</button>
+                ${currentUser?.role === "admin" ? `<button class="btn-fav" onclick='openFixMeta("${item.id}","${esc(item.title)}","tv")'>🔍 Fixa info</button>` : ""}
+                ${currentUser?.role === "admin" ? `<button class="btn-fav" onclick='openEditMedia("${item.id}")'>✏ Redigera</button>` : ""}
               </div>
             </div>
           </div>
@@ -1356,8 +1364,8 @@ async function openDetail(id) {
               <div class="detail-actions">
                 <button class="btn-play" onclick='playItem("${item.id}","${esc(item.title)}")'>${playLabel}</button>
                 <button class="btn-fav" onclick="toggleFav('${item.id}',this)">♡ Favorit</button>
-                <button class="btn-fav" onclick='openFixMeta("${item.id}","${esc(item.title)}","${item.type==="tvshow"?"tv":"movie"}")'>🔍 Fixa info</button>
-                <button class="btn-fav" onclick='openEditMedia("${item.id}")'>✏ Redigera</button>
+                ${currentUser?.role === "admin" ? `<button class="btn-fav" onclick='openFixMeta("${item.id}","${esc(item.title)}","${item.type==="tvshow"?"tv":"movie"}")'>🔍 Fixa info</button>` : ""}
+                ${currentUser?.role === "admin" ? `<button class="btn-fav" onclick='openEditMedia("${item.id}")'>✏ Redigera</button>` : ""}
                 <button class="btn-fav" onclick='openSubtitles("${item.id}","${esc(item.title)}")'>🔤 Undertexter</button>
                 ${currentUser?.role === "admin" ? `<button class="btn-fav" onclick='openMediaInfo("${item.id}")'>ℹ Filinfo</button>` : ""}
                 ${progress?.completed
@@ -1366,9 +1374,12 @@ async function openDetail(id) {
               </div>
               <div class="wtw-section">
                 <div class="wtw-title">Var kan du se den?</div>
-                <div class="wtw-providers" id="wtw-${id}">
+                <div style="margin-bottom:14px">
+                  <div style="font-size:11px;color:var(--muted);margin-bottom:6px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">${window._serverName || "StreamVault"}</div>
                   <span class="wtw-pill stream">✓ ${esc((allLibraries.find(l => l.id === item.library_id)||{}).name || "Ditt bibliotek")}</span>
-                  ${item.tmdb_id && item.type === "movie" ? `<span style="font-size:13px;color:var(--muted)">Hämtar streaming...</span>` : ""}
+                </div>
+                <div id="wtw-${id}">
+                  ${item.tmdb_id && item.type === "movie" ? `<div style="font-size:11px;color:var(--muted);margin-bottom:4px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">Fler sätt att se den på</div><span style="font-size:13px;color:var(--muted)">Hämtar streaming...</span>` : ""}
                 </div>
               </div>
             </div>
@@ -1383,9 +1394,10 @@ async function openDetail(id) {
         if (!el) return;
         const flat = new Set((data.flatrate||[]).map(p => p.provider_name));
         const providers = [...new Set([...(data.flatrate||[]),...(data.rent||[])].map(p => p.provider_name))];
-        const lib = allLibraries.find(l => l.id === item?.library_id);
-        const libraryPill = `<span class="wtw-pill stream">✓ ${esc(lib?.name || "Ditt bibliotek")}</span>`;
-        el.innerHTML = libraryPill + (providers.length ? providers.map(n => `<span class="wtw-pill ${flat.has(n)?"stream":"rent"}">${esc(n)}</span>`).join("") : "");
+        const providerHtml = providers.length
+          ? `<div style="font-size:11px;color:var(--muted);margin-bottom:4px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">Fler sätt att se den på</div>` + providers.map(n => `<span class="wtw-pill ${flat.has(n)?"stream":"rent"}">${esc(n)}</span>`).join("")
+          : "";
+        el.innerHTML = providerHtml;
       }).catch(()=>{});
     }
   } catch(e) {
@@ -2581,6 +2593,25 @@ async function switchAudioTrack(trackIndex) {
   }
 }
 
+async function saveUserLanguage(userId) {
+  const language = document.getElementById("up-language")?.value || "";
+  try {
+    await API.patch("/users/" + userId + "/language", { language: language || null });
+    toast("✓ Språk sparat!", "success");
+  } catch(e) {
+    toast("Fel: " + e.message, "error");
+  }
+}
+
+async function saveLanguageSetting(language) {
+  try {
+    await API.patch("/config", { language });
+    toast("✓ Språk sparat! Ny metadata hämtas med valt språk.", "success");
+  } catch(e) {
+    toast("Fel: " + e.message, "error");
+  }
+}
+
 async function saveChannelSetting(channel) {
   try {
     await API.patch("/config", { update_channel: channel });
@@ -3144,6 +3175,32 @@ async function loadSettings() {
       </div>
 
       <div class="settings-section">
+        <div class="settings-section-title">Server</div>
+        <div class="setting-row">
+          <div><div class="setting-label">Servernamn</div><div class="setting-desc">Visas på filmsidan under "Var kan du se den?"</div></div>
+          <input class="s-input" type="text" id="s-server-name" value="${esc(cfg.server_name || "StreamVault")}" placeholder="StreamVault"/>
+        </div>
+      </div>
+      <div class="settings-section">
+        <div class="settings-section-title">Språk</div>
+        <div class="setting-row">
+          <div><div class="setting-label">Gränssnittsspråk & metadata</div><div class="setting-desc">Styr språk för filmbeskrivningar från TMDB och OCR-undertexter</div></div>
+          <select class="s-input" id="s-language" onchange="saveLanguageSetting(this.value)" style="cursor:pointer">
+            <option value="en-US" ${(cfg.language||'en-US')==='en-US'?'selected':''}>🇺🇸 English</option>
+            <option value="sv-SE" ${cfg.language==='sv-SE'?'selected':''}>🇸🇪 Svenska</option>
+            <option value="no-NO" ${cfg.language==='no-NO'?'selected':''}>🇳🇴 Norsk</option>
+            <option value="da-DK" ${cfg.language==='da-DK'?'selected':''}>🇩🇰 Dansk</option>
+            <option value="fi-FI" ${cfg.language==='fi-FI'?'selected':''}>🇫🇮 Suomi</option>
+            <option value="de-DE" ${cfg.language==='de-DE'?'selected':''}>🇩🇪 Deutsch</option>
+            <option value="fr-FR" ${cfg.language==='fr-FR'?'selected':''}>🇫🇷 Français</option>
+            <option value="es-ES" ${cfg.language==='es-ES'?'selected':''}>🇪🇸 Español</option>
+            <option value="nl-NL" ${cfg.language==='nl-NL'?'selected':''}>🇳🇱 Nederlands</option>
+            <option value="ja-JP" ${cfg.language==='ja-JP'?'selected':''}>🇯🇵 日本語</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="settings-section">
         <div class="settings-section-title">API-nycklar</div>
         <div class="setting-row">
           <div><div class="setting-label">TMDB API-nyckel</div><div class="setting-desc">Filmaffischer och beskrivningar</div></div>
@@ -3247,6 +3304,13 @@ async function loadUserPage(userId) {
 }
 
 async function renderUserPage(user) {
+  // Refresh user data from server to get latest language setting
+  if (user.id === currentUser?.id || user._id === currentUser?.id) {
+    try {
+      const fresh = await API.get("/me");
+      if (fresh) user = { ...user, ...fresh };
+    } catch {}
+  }
   const main = document.getElementById("sec-settings");
   main.innerHTML = `
     <div style="max-width:600px;margin:0 auto;padding:24px">
@@ -3269,6 +3333,24 @@ async function renderUserPage(user) {
         <div id="lib-access-list" style="display:flex;flex-direction:column;gap:8px"></div>
         <button class="s-btn primary" style="margin-top:12px" onclick="saveLibraryAccess('${user.id}')">Spara behörigheter</button>
       </div>` : ""}
+      <div class="settings-section">
+        <div class="settings-section-title">Språkinställning</div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Välj språk för undertexter och sökning. Åsidosätter serverns globala inställning.</div>
+        <select class="s-input" id="up-language" style="cursor:pointer">
+          <option value="" ${!user.language?'selected':''}>🌐 Använd serverns inställning</option>
+          <option value="en-US" ${user.language==='en-US'?'selected':''}>🇺🇸 English</option>
+          <option value="sv-SE" ${user.language==='sv-SE'?'selected':''}>🇸🇪 Svenska</option>
+          <option value="no-NO" ${user.language==='no-NO'?'selected':''}>🇳🇴 Norsk</option>
+          <option value="da-DK" ${user.language==='da-DK'?'selected':''}>🇩🇰 Dansk</option>
+          <option value="fi-FI" ${user.language==='fi-FI'?'selected':''}>🇫🇮 Suomi</option>
+          <option value="de-DE" ${user.language==='de-DE'?'selected':''}>🇩🇪 Deutsch</option>
+          <option value="fr-FR" ${user.language==='fr-FR'?'selected':''}>🇫🇷 Français</option>
+          <option value="es-ES" ${user.language==='es-ES'?'selected':''}>🇪🇸 Español</option>
+          <option value="nl-NL" ${user.language==='nl-NL'?'selected':''}>🇳🇱 Nederlands</option>
+        </select>
+        <button class="s-btn s-btn-primary" style="margin-top:10px" onclick="saveUserLanguage('${user.id}')">Spara språk</button>
+      </div>
+
       <div class="settings-section">
         <div class="settings-section-title">Byt lösenord</div>
         <div style="display:flex;flex-direction:column;gap:10px;max-width:320px">
@@ -3346,6 +3428,7 @@ async function removeLib(id) {
 async function saveApiKeys() {
   try {
     await API.patch("/config", {
+      server_name: document.getElementById("s-server-name")?.value?.trim() || "StreamVault",
       tmdb_api_key: document.getElementById("s-tmdb").value.trim(),
       opensubtitles_api_key: document.getElementById("s-opensub").value.trim(),
       lastfm_api_key: document.getElementById("s-lastfm")?.value?.trim() || "",

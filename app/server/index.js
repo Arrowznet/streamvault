@@ -266,6 +266,18 @@ app.delete("/api/users/:id", requireAdmin, async (req, res) => {
   res.json({ ok: true });
 });
 
+app.patch("/api/users/:id/language", requireAuth, async (req, res) => {
+  try {
+    const { language } = req.body;
+    // Users can only change their own language, admins can change anyone's
+    if (req.params.id !== req.user._id && req.user.role !== "admin") {
+      return res.status(403).json({ error: "Ej tillåtet" });
+    }
+    await dbUpdate(db.users, { _id: req.params.id }, { $set: { language } });
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 app.patch("/api/users/:id/library-access", requireAdmin, async (req, res) => {
   try {
     const { library_ids } = req.body;
@@ -442,11 +454,12 @@ function cleanTitle(name) {
 }
 
 const metaCache = new Map();
-function tmdbFetch(endpoint) {
+function tmdbFetch(endpoint, userLanguage) {
   return new Promise(resolve => {
     if (!config.tmdb_api_key) return resolve(null);
     const sep = endpoint.includes("?") ? "&" : "?";
-    https.get(`https://api.themoviedb.org/3${endpoint}${sep}api_key=${config.tmdb_api_key}&language=en-US`, res => {
+    const lang = userLanguage || (config.language && config.language !== "auto" ? config.language : "en-US");
+    https.get(`https://api.themoviedb.org/3${endpoint}${sep}api_key=${config.tmdb_api_key}&language=${lang}`, res => {
       let d=""; res.on("data",c=>d+=c); res.on("end",()=>{ try{resolve(JSON.parse(d))}catch{resolve(null)} });
     }).on("error",()=>resolve(null));
   });
@@ -586,7 +599,8 @@ async function convertPgsTosrt(item, subIdx, cacheFile, targetLang) {
     });
 
     // Step 2: Convert .sup to .srt using PgsToSrt
-    const tessLang = targetLang === "swe" ? "swe" : "eng";
+    const langMap = { "sv-SE": "swe", "no-NO": "nor", "da-DK": "dan", "fi-FI": "fin", "de-DE": "deu", "fr-FR": "fra", "es-ES": "spa", "nl-NL": "nld", "ja-JP": "jpn", "en-US": "eng" };
+    const tessLang = targetLang === "swe" ? "swe" : (langMap[config.language] || "eng");
     await new Promise((resolve, reject) => {
       execFile(PGSTOSRT_EXE, [
         "--input", supFile,
@@ -2168,7 +2182,8 @@ app.get("/api/tmdb/lookup", requireAuth, async (req, res) => {
   if (!config.tmdb_api_key) return res.status(400).json({ error: "No TMDB API key" });
   try {
     const endpoint = type === "tv" ? "tv" : "movie";
-    const url = `https://api.themoviedb.org/3/${endpoint}/${id}?api_key=${config.tmdb_api_key}&language=en-US`;
+    const lang = config.language && config.language !== "auto" ? config.language : "en-US";
+    const url = `https://api.themoviedb.org/3/${endpoint}/${id}?api_key=${config.tmdb_api_key}&language=${lang}`;
     const data = await new Promise((resolve, reject) => {
       https.get(url, r => {
         let d = ""; r.on("data", c => d += c);
@@ -2341,14 +2356,15 @@ app.get("/api/search/cast", requireAuth, async (req, res) => {
   if (!query || !config.tmdb_api_key) return res.json({ items: [] });
   try {
     // Search for person on TMDB
-    const data = await tmdbFetch(`/search/person?query=${encodeURIComponent(query)}`);
+    const userLang = req.user?.language || null;
+    const data = await tmdbFetch(`/search/person?query=${encodeURIComponent(query)}`, userLang);
     const persons = (data?.results || []).slice(0, 3);
     const allMedia = await dbFind(db.media, { type: { $in: ["movie","tvshow"] } });
     const tmdbIds = new Set(allMedia.filter(m => m.tmdb_id).map(m => String(m.tmdb_id)));
     // For each person, find their movies in our library
     const found = [];
     for (const person of persons) {
-      const credits = await tmdbFetch(`/person/${person.id}?append_to_response=movie_credits`);
+      const credits = await tmdbFetch(`/person/${person.id}?append_to_response=movie_credits`, userLang);
       if (!credits) continue;
       for (const movie of (credits.movie_credits?.cast || [])) {
         if (tmdbIds.has(String(movie.id))) {
@@ -2366,7 +2382,8 @@ app.get("/api/search/cast", requireAuth, async (req, res) => {
 app.get("/api/search/streaming", requireAuth, async (req, res) => {
   const {query}=req.query;
   if (!query||!config.tmdb_api_key) return res.json({results:[]});
-  const data = await tmdbFetch(`/search/multi?query=${encodeURIComponent(query)}`);
+  const userLang = req.user?.language || null;
+  const data = await tmdbFetch(`/search/multi?query=${encodeURIComponent(query)}`, userLang);
   res.json({results:(data?.results||[]).slice(0,10).map(r=>({
     id:r.id,
     title:r.title||r.name,
@@ -2431,7 +2448,7 @@ app.get("/api/config", requireAdmin, (req, res) => {
 });
 
 app.patch("/api/config", requireAdmin, (req, res) => {
-  ["tmdb_api_key","opensubtitles_api_key","lastfm_api_key","spotify_client_id","spotify_client_secret","port","language","update_channel"].forEach(k=>{if(req.body[k]!==undefined)config[k]=req.body[k];});
+  ["tmdb_api_key","opensubtitles_api_key","lastfm_api_key","spotify_client_id","spotify_client_secret","port","language","update_channel","server_name"].forEach(k=>{if(req.body[k]!==undefined)config[k]=req.body[k];});
   fs.writeFileSync(CONFIG_PATH,JSON.stringify(config,null,2));
   res.json({ok:true});
 });
@@ -3216,8 +3233,14 @@ app.get("/api/tvshow/:id/season/:season", requireAuth, async (req, res) => {
 app.get("/api/person/:tmdb_id", requireAuth, async (req, res) => {
   try {
     if (!config.tmdb_api_key) return res.status(503).json({ error: "Ingen TMDB-nyckel" });
-    const data = await tmdbFetch(`/person/${req.params.tmdb_id}?append_to_response=combined_credits,movie_credits`);
+    const userLang = req.user?.language || null;
+    let data = await tmdbFetch(`/person/${req.params.tmdb_id}?append_to_response=combined_credits,movie_credits`, userLang);
     if (!data) return res.status(404).json({ error: "Hittades inte" });
+    // Fallback to English if biography is empty
+    if (!data.biography && userLang && userLang !== "en-US") {
+      const enData = await tmdbFetch(`/person/${req.params.tmdb_id}?append_to_response=combined_credits,movie_credits`, "en-US");
+      if (enData?.biography) data.biography = enData.biography;
+    }
     const allMedia = await dbFind(db.media, {});
     const tmdbToLocalTitle = new Map(allMedia.filter(m => m.tmdb_id).map(m => [String(m.tmdb_id), (m.title||"").toLowerCase()]));
     function titlesSimilar(t1, t2) {
@@ -3247,7 +3270,8 @@ app.get("/api/person/:tmdb_id", requireAuth, async (req, res) => {
 app.get("/api/tmdb/movie/:tmdb_id", requireAuth, async (req, res) => {
   if (!config.tmdb_api_key) return res.status(503).json({ error: "Ingen TMDB-nyckel" });
   try {
-    const data = await tmdbFetch(`/movie/${req.params.tmdb_id}?append_to_response=credits,videos`);
+    const userLang = req.user?.language || null;
+    const data = await tmdbFetch(`/movie/${req.params.tmdb_id}?append_to_response=credits,videos`, userLang);
     if (!data) return res.status(404).json({ error: "Hittades inte" });
     res.json({
       tmdb_id: data.id,
@@ -3341,8 +3365,10 @@ app.post("/api/tools/pgstosrt-install", requireAdmin, async (req, res) => {
       await extractZip(zipPath, PGSTOSRT_DIR);
       try { fs.unlinkSync(zipPath); } catch {}
 
-      // Step 3: Download tessdata - always get swe + eng + any extras
-      const langs = ["swe", "eng", ...extraLangs].filter((v, i, a) => a.indexOf(v) === i);
+      // Step 3: Download tessdata - always get configured language + eng + any extras
+      const langMap = { "sv-SE": "swe", "no-NO": "nor", "da-DK": "dan", "fi-FI": "fin", "de-DE": "deu", "fr-FR": "fra", "es-ES": "spa", "nl-NL": "nld", "ja-JP": "jpn", "en-US": "eng" };
+      const configLang = langMap[config.language] || "eng";
+      const langs = [configLang, "eng", ...extraLangs].filter((v, i, a) => a.indexOf(v) === i);
       for (let i = 0; i < langs.length; i++) {
         const lang = langs[i];
         const filename = TESSDATA_LANGUAGES[lang] || lang + ".traineddata";
