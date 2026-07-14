@@ -486,6 +486,12 @@ async function getMovieMeta(title, year) {
     collection_poster: collection?.poster_path ? `https://image.tmdb.org/t/p/w500${collection.poster_path}` : null,
     collection_backdrop: collection?.backdrop_path ? `https://image.tmdb.org/t/p/w1280${collection.backdrop_path}` : null
   };
+// Fetch English title and poster separately so we always keep originals
+  if (config.language && config.language !== "en-US" && config.language !== "auto") {
+    const enData = await tmdbFetch(`/movie/${m.id}`, "en-US");
+    if (enData?.title) meta.title_en = enData.title;
+    if (enData?.poster_path) meta.poster_url = `https://image.tmdb.org/t/p/w500${enData.poster_path}`;
+  }
   metaCache.set(key, meta);
   return meta;
 }
@@ -524,7 +530,7 @@ async function scanLibraries() {
           const {cleanName,year} = cleanTitle(entry.isDirectory()?entry.name:path.basename(filePath));
           const meta = await getMovieMeta(cleanName,year);
           const stat = fs.statSync(filePath);
-          const newItem = {_id:id,library_id:lib.id,type:"movie",title:cleanName,year:meta?.year||year,file_path:filePath,file_size:stat.size,tmdb_id:meta?.tmdb_id||null,poster_url:meta?.poster_url||null,backdrop_url:meta?.backdrop_url||null,overview:meta?.overview||null,rating:meta?.rating||null,collection_id:meta?.collection_id||null,collection_name:meta?.collection_name||null,collection_poster:meta?.collection_poster||null,collection_backdrop:meta?.collection_backdrop||null,added_at:new Date().toISOString()};
+          const newItem = {_id:id,library_id:lib.id,type:"movie",title:meta?.title_en || cleanName,year:meta?.year||year,file_path:filePath,file_size:stat.size,tmdb_id:meta?.tmdb_id||null,poster_url:meta?.poster_url||null,backdrop_url:meta?.backdrop_url||null,overview:meta?.overview||null,rating:meta?.rating||null,collection_id:meta?.collection_id||null,collection_name:meta?.collection_name||null,collection_poster:meta?.collection_poster||null,collection_backdrop:meta?.collection_backdrop||null,added_at:new Date().toISOString()};
           await dbInsert(db.media, newItem);
           queueSubtitleCache(newItem); // queue Swedish subtitle pre-cache (sequential)
           added++;
@@ -2544,6 +2550,7 @@ app.get("/api/media/:id/audio-tracks", requireAuth, async (req, res) => {
 });
 
 // ── MANUAL METADATA SEARCH ────────────────────────────────────────────────────
+// ── MANUAL METADATA SEARCH ────────────────────────────────────────────────────
 app.get("/api/search-meta", requireAuth, async (req, res) => {
   const { query, type = "movie" } = req.query;
   if (!query) return res.status(400).json({ error: "Ange sökterm" });
@@ -2553,9 +2560,11 @@ app.get("/api/search-meta", requireAuth, async (req, res) => {
       ? `/search/tv?query=${encodeURIComponent(query)}`
       : `/search/movie?query=${encodeURIComponent(query)}`;
     const data = await tmdbFetch(endpoint);
+    const enData = await tmdbFetch(endpoint, "en-US");
+    const enMap = new Map((enData?.results || []).map(r => [r.id, r.title || r.name]));
     const results = (data?.results || []).slice(0, 10).map(r => ({
       tmdb_id: r.id,
-      title: r.title || r.name,
+      title: enMap.get(r.id) || r.title || r.name,
       year: (r.release_date || r.first_air_date || "").slice(0, 4),
       overview: r.overview || "",
       poster_url: r.poster_path ? `https://image.tmdb.org/t/p/w200${r.poster_path}` : null,
@@ -3273,12 +3282,15 @@ app.get("/api/tmdb/movie/:tmdb_id", requireAuth, async (req, res) => {
     const userLang = req.user?.language || null;
     const data = await tmdbFetch(`/movie/${req.params.tmdb_id}?append_to_response=credits,videos`, userLang);
     if (!data) return res.status(404).json({ error: "Hittades inte" });
+    const enData = (userLang && userLang !== "en-US")
+      ? await tmdbFetch(`/movie/${req.params.tmdb_id}`, "en-US")
+      : null;
     res.json({
       tmdb_id: data.id,
-      title: data.title,
+      title: enData?.title || data.title,
       year: data.release_date ? parseInt(data.release_date) : null,
       overview: data.overview,
-      poster_url: data.poster_path ? `https://image.tmdb.org/t/p/w500${data.poster_path}` : null,
+      poster_url: (enData?.poster_path || data.poster_path) ? `https://image.tmdb.org/t/p/w500${enData?.poster_path || data.poster_path}` : null,
       backdrop_url: data.backdrop_path ? `https://image.tmdb.org/t/p/w1280${data.backdrop_path}` : null,
       rating: data.vote_average || null,
       runtime: data.runtime || null,
