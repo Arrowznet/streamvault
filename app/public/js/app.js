@@ -2271,15 +2271,22 @@ function toggleFullscreen() {
 document.addEventListener("fullscreenchange", function() {
   var bar = document.getElementById("player-bar");
   var controls = document.getElementById("custom-controls");
+  var subOverlay = document.getElementById("sv-subtitle-overlay");
   if (document.fullscreenElement) {
     bar.addEventListener("mousemove", showFsControls);
     bar.addEventListener("click", showFsControls);
     showFsControls();
+    // Move subtitle overlay into fullscreen element so position:fixed works
+    if (subOverlay && bar) bar.appendChild(subOverlay);
   } else {
     clearTimeout(_fsHideTimer);
     if (controls) controls.style.opacity = "1";
     if (bar) { bar.removeEventListener("mousemove", showFsControls); bar.removeEventListener("click", showFsControls); bar.style.cursor = "default"; }
+    // Move subtitle overlay back to body
+    if (subOverlay) document.body.appendChild(subOverlay);
   }
+  // Reposition overlay after fullscreen change
+  if (window._subtitleOverlayResize) window._subtitleOverlayResize();
 });
 
 
@@ -3122,8 +3129,6 @@ async function loadSettings() {
           </div>
         </div>
       </div>
-
-      <div class="settings-section">
 
       <div class="settings-section">
         <div class="settings-section-title">Bibliotek</div>
