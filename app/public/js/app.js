@@ -318,7 +318,10 @@ async function loadCollections() {
       <div class="grid-wrap" style="padding-right:32px">
         <div class="row-header" style="margin-bottom:20px">
           <span class="row-title">Samlingar</span>
-          <span class="row-count">${collections.length} samlingar</span>
+          <div style="display:flex;align-items:center;gap:12px">
+  <span class="row-count">${collections.length} samlingar</span>
+  ${currentUser?.role === "admin" ? `<button class="s-btn s-btn-primary" onclick="createCollection()" style="padding:6px 14px;font-size:13px">➕ Ny samling</button>` : ""}
+</div>
         </div>
         <div class="media-grid" id="lib-grid">
           ${collections.map(c => `
@@ -343,7 +346,80 @@ async function loadCollections() {
     sec.innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><h3>${e.message}</h3></div>`;
   }
 }
+async function createCollection() {
+  const modal = document.createElement("div");
+  modal.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,0.8);z-index:1000;display:flex;align-items:center;justify-content:center;padding:20px";
+  modal.innerHTML = `
+    <div style="background:var(--card);border-radius:16px;padding:28px;width:100%;max-width:500px;display:flex;flex-direction:column;gap:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <h2 style="margin:0;font-size:18px">Ny samling</h2>
+        <button onclick="this.closest('[style*=fixed]').remove()" style="background:none;border:none;color:var(--muted);font-size:22px;cursor:pointer">✕</button>
+      </div>
+      <div>
+        <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px">Namn</label>
+        <input id="new-coll-name" type="text" placeholder="t.ex. Johan Falk" style="width:100%;background:var(--card2);border:1px solid var(--border);color:var(--text);font-size:14px;padding:9px 12px;border-radius:8px;outline:none;box-sizing:border-box">
+      </div>
+      <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px">
+        <button onclick="this.closest('[style*=fixed]').remove()" style="background:var(--card2);border:1px solid var(--border);color:var(--text);padding:10px 20px;border-radius:8px;cursor:pointer;font-size:14px">Avbryt</button>
+        <button onclick="saveNewCollection()" style="background:var(--accent);border:none;color:white;padding:10px 20px;border-radius:8px;cursor:pointer;font-size:14px;font-weight:600">➕ Skapa</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  setTimeout(() => document.getElementById("new-coll-name")?.focus(), 100);
+}
 
+async function saveNewCollection() {
+  const name = document.getElementById("new-coll-name")?.value?.trim();
+  if (!name) { toast("Ange ett namn!", "error"); return; }
+  document.querySelector("[style*=fixed]")?.remove();
+  openNewCollectionEditor(name);
+}
+
+async function openNewCollectionEditor(name) {
+  let allMovies = [];
+  try { allMovies = (await API.get("/media?type=movie&limit=9999")).items || []; } catch {}
+  window._collEditMovies = allMovies.sort((a,b) => (a.title||"").localeCompare(b.title||""));
+  window._collEditLinkedIds = new Set();
+  window._newCollectionName = name;
+  const modal = document.createElement("div");
+  modal.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,0.8);z-index:1000;display:flex;align-items:center;justify-content:center;padding:20px";
+  modal.innerHTML = `
+    <div style="background:var(--card);border-radius:16px;padding:28px;width:100%;max-width:600px;max-height:85vh;overflow-y:auto;display:flex;flex-direction:column;gap:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <h2 style="margin:0;font-size:18px">Ny samling – ${esc(name)}</h2>
+        <button onclick="this.closest('[style*=fixed]').remove()" style="background:none;border:none;color:var(--muted);font-size:22px;cursor:pointer">✕</button>
+      </div>
+      <div>
+        <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:6px">Lägg till filmer</label>
+        <input id="coll-movie-search" type="text" placeholder="Sök film..." oninput="filterCollectionMovies()" style="width:100%;background:var(--card2);border:1px solid var(--border);color:var(--text);font-size:13px;padding:8px 12px;border-radius:8px;outline:none;box-sizing:border-box;margin-bottom:8px">
+        <div id="coll-edit-movies" style="display:flex;flex-direction:column;gap:4px;max-height:300px;overflow-y:auto">
+          <div style="font-size:12px;color:var(--muted);padding:8px">Sök för att hitta filmer att lägga till.</div>
+        </div>
+      </div>
+      <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px">
+        <button onclick="this.closest('[style*=fixed]').remove()" style="background:var(--card2);border:1px solid var(--border);color:var(--text);padding:10px 20px;border-radius:8px;cursor:pointer;font-size:14px">Avbryt</button>
+        <button onclick="saveNewCollectionWithMovies()" style="background:var(--accent);border:none;color:white;padding:10px 20px;border-radius:8px;cursor:pointer;font-size:14px;font-weight:600">💾 Spara samling</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+}
+
+async function saveNewCollectionWithMovies() {
+  const name = window._newCollectionName;
+  const movieIds = Array.from(window._collEditLinkedIds || []);
+  if (!movieIds.length) { toast("Lägg till minst en film!", "error"); return; }
+  try {
+    const collId = 9000000 + Date.now() % 1000000;
+    await API.patch("/collections/" + collId, { name, movie_ids: movieIds });
+    toast("✓ Samling skapad!", "success");
+    document.querySelector("[style*=fixed]")?.remove();
+    const fresh = await API.get("/collections");
+    window._collectionsData = Array.isArray(fresh) ? fresh : [];
+    switchSection("collections");
+  } catch(e) {
+    toast("Fel: " + e.message, "error");
+  }
+}
 async function editCollection(collectionId) {
   const collection = window._collectionsData?.find(c => String(c.id) === String(collectionId));
   if (!collection) return;
@@ -3059,6 +3135,7 @@ async function loadSettings() {
         </div>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
           <button class="s-btn primary" onclick="rescan()">↻ Skanna efter nya filer</button>
+          <button class="s-btn" onclick="updateCollections()">🎬 Uppdatera samlingar</button>
           <button class="s-btn" onclick="fullRescan()" style="border-color:#e74c3c;color:#e74c3c;">🗑 Rensa och skanna om allt</button>
         </div>
         <div style="font-size:12px;color:var(--muted);margin-top:8px;">👁 Filbevakning aktiv · <span id="next-scan-label">Beräknar...</span></div>
@@ -3247,6 +3324,18 @@ async function rescan() {
     setTimeout(() => loadSettings(), 3000);
   }
   catch (e) { toast(e.message, "error"); }
+}
+
+async function updateCollections() {
+  if (!confirm("Uppdatera samlingar? Detta kör igenom alla matchade filmer och söker efter samlingstillhörighet på TMDB.")) return;
+  try {
+    toast("⏳ Uppdaterar samlingar...", "info");
+    const result = await API.post("/scan/update-collections", {});
+    toast(`✓ ${result.updated} filmer uppdaterade i samlingar!`, "success");
+    setTimeout(() => loadSettings(), 1000);
+  } catch(e) {
+    toast("Fel: " + e.message, "error");
+  }
 }
 
 async function fullRescan() {

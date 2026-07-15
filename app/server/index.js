@@ -3438,7 +3438,36 @@ function extractZip(zipPath, destDir) {
     }
   });
 }
-
+app.post("/api/scan/update-collections", requireAdmin, async (req, res) => {
+  try {
+    const movies = await dbFind(db.media, { type: "movie", tmdb_id: { $exists: true } });
+    let updated = 0;
+    for (const movie of movies) {
+      if (!movie.tmdb_id) continue;
+      try {
+        const details = await tmdbFetch(`/movie/${movie.tmdb_id}`);
+        const collection = details?.belongs_to_collection;
+        if (collection) {
+          const updates = {
+            collection_id: collection.id,
+            collection_name: collection.name,
+            collection_poster: collection.poster_path ? `https://image.tmdb.org/t/p/w500${collection.poster_path}` : null,
+            collection_backdrop: collection.backdrop_path ? `https://image.tmdb.org/t/p/w1280${collection.backdrop_path}` : null
+          };
+          await dbUpdate(db.media, { _id: movie._id }, { $set: updates });
+          updated++;
+        } else if (movie.collection_id) {
+          await dbUpdate(db.media, { _id: movie._id }, { $unset: { collection_id: true, collection_name: true, collection_poster: true, collection_backdrop: true } });
+        }
+        await new Promise(r => setTimeout(r, 100));
+      } catch(e) {
+        console.log("[COLLECTIONS] Error for", movie.title, ":", e.message);
+      }
+    }
+    console.log(`[COLLECTIONS] Updated ${updated} movies`);
+    res.json({ ok: true, updated });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
 // ── RESCAN ALL (clear + rescan) ────────────────────────────────────────────────
 app.post("/api/scan/full-rescan", requireAdmin, async (req, res) => {
   res.json({ message: "Rensar databas och skannar om allt..." });
