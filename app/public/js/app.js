@@ -56,7 +56,38 @@ async function showApp() {
   document.getElementById("userName").textContent = currentUser.username;
   loadSidebarLibraries();
   loadHome();
-  if (currentUser.role === "admin") checkForUpdates();
+  if (currentUser.role === "admin") {
+    checkForUpdates();
+    checkPendingOcrRequests();
+  }
+}
+
+// Active admin notification: shows a badge on the "Inställningar" nav item and a toast
+// when one or more users are waiting on a new bitmap-subtitle (OCR) language.
+async function checkPendingOcrRequests() {
+  try {
+    const data = await API.get("/subtitles/ocr-pending");
+    const pending = data.pending || [];
+    const sbEl = document.getElementById("sb-settings");
+    if (sbEl) {
+      let dot = document.getElementById("sb-settings-badge");
+      if (pending.length > 0) {
+        if (!dot) {
+          dot = document.createElement("span");
+          dot.id = "sb-settings-badge";
+          dot.style.cssText = "background:var(--danger,#e74c3c);color:#fff;border-radius:10px;font-size:10px;font-weight:600;padding:1px 6px;margin-left:6px;line-height:1.4";
+          sbEl.appendChild(dot);
+        }
+        dot.textContent = pending.length;
+      } else if (dot) {
+        dot.remove();
+      }
+    }
+    if (pending.length > 0) {
+      const names = pending.map(p => `${SUBTITLE_LANG_ADJ[p.lang] || p.lang} (${p.username})`).join(", ");
+      toast(`🔔 ${pending.length} väntar på nytt undertextspråk: ${names}`, "info");
+    }
+  } catch {}
 }
 
 async function loadSidebarLibraries() {
@@ -1436,7 +1467,7 @@ async function openDetail(id) {
                 ${directors ? `<span class="detail-meta-item">🎬 ${directors}</span>` : ""}
               </div>
               ${genresHtml ? `<div class="detail-genres">${genresHtml}</div>` : ""}
-              ${item.overview ? `<p class="detail-page-overview">${esc(item.overview)}</p>` : ""}
+              ${(details.overview || item.overview) ? `<p class="detail-page-overview">${esc(details.overview || item.overview)}</p>` : ""}
               <div class="detail-actions">
                 <button class="btn-play" onclick='playItem("${item.id}","${esc(item.title)}")'>${playLabel}</button>
                 <button class="btn-fav" onclick="toggleFav('${item.id}',this)">♡ Favorit</button>
@@ -2500,6 +2531,78 @@ async function openSubtitles(mediaId, title) {
   }
 }
 
+// Admin-only: shows recent subtitle-cache log entries (successes, warnings, failures)
+// so it's easy to see what went wrong, for which file, and when.
+async function openSubtitleLog(onlyErrors) {
+  document.getElementById("subtitle-log-overlay")?.remove();
+  const overlay = document.createElement("div");
+  overlay.id = "subtitle-log-overlay";
+  overlay.style.cssText = "position:fixed;inset:0;z-index:10002;background:rgba(0,0,0,0.85);display:flex;align-items:center;justify-content:center;padding:20px";
+
+  const modal = document.createElement("div");
+  modal.style.cssText = "background:var(--surface);border:1px solid var(--border);border-radius:14px;width:100%;max-width:640px;max-height:80vh;display:flex;flex-direction:column;overflow:hidden";
+
+  const header = document.createElement("div");
+  header.style.cssText = "padding:16px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px";
+  header.innerHTML = "<span style='font-size:18px'>📋</span><div style='flex:1'><b style='font-size:15px'>Undertext-logg</b><div style='font-size:12px;color:var(--muted)'>Senaste händelserna från undertextcachning</div></div>";
+  const filterBtn = document.createElement("button");
+  filterBtn.textContent = onlyErrors ? "Visa alla" : "Visa endast fel";
+  filterBtn.style.cssText = "background:var(--card2);border:1px solid var(--border);color:var(--text);font-size:12px;padding:6px 10px;border-radius:8px;cursor:pointer;white-space:nowrap";
+  filterBtn.onclick = function() { openSubtitleLog(!onlyErrors); };
+  header.appendChild(filterBtn);
+  const closeBtn = document.createElement("button");
+  closeBtn.textContent = "✕";
+  closeBtn.style.cssText = "background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer";
+  closeBtn.onclick = function() { overlay.remove(); };
+  header.appendChild(closeBtn);
+  modal.appendChild(header);
+
+  const contentEl = document.createElement("div");
+  contentEl.style.cssText = "flex:1;overflow-y:auto;padding:12px;font-family:monospace;font-size:12px";
+  contentEl.innerHTML = "<div style='text-align:center;padding:20px;color:var(--muted)'>⏳ Hämtar logg...</div>";
+  modal.appendChild(contentEl);
+
+  overlay.appendChild(modal);
+  overlay.addEventListener("click", function(e) { if (e.target === overlay) overlay.remove(); });
+  document.body.appendChild(overlay);
+
+  try {
+    var url = "/subtitles/log" + (onlyErrors ? "?level=error" : "");
+    var data = await API.get(url);
+    var entries = data.entries || [];
+    if (!entries.length) {
+      contentEl.innerHTML = "<div style='text-align:center;padding:20px;color:var(--muted)'>Inga" + (onlyErrors ? " fel" : " loggposter") + " ännu.</div>";
+      return;
+    }
+    var colors = { error: "var(--danger)", warn: "#e0a030", info: "var(--muted)" };
+    var icons = { error: "❌", warn: "⚠️", info: "ℹ️" };
+    contentEl.innerHTML = entries.map(function(e) {
+      var time = new Date(e.time).toLocaleString("sv-SE");
+      var color = colors[e.level] || "var(--muted)";
+      return "<div style='padding:6px 0;border-bottom:1px solid var(--border)'>" +
+        "<div style='color:" + color + "'>" + (icons[e.level]||"") + " " + esc(time) + (e.title ? " – <b>" + esc(e.title) + "</b>" : "") + "</div>" +
+        "<div style='color:var(--text);margin-top:2px'>" + esc(e.message) + "</div>" +
+        (e.extra ? "<div style='color:var(--muted);margin-top:2px'>" + esc(JSON.stringify(e.extra)) + "</div>" : "") +
+        "</div>";
+    }).join("");
+  } catch(e) {
+    contentEl.innerHTML = "<div style='text-align:center;padding:20px;color:var(--danger);font-size:13px'>Fel: " + e.message + "</div>";
+  }
+}
+
+// Admin-only: re-queues subtitle caching for the ENTIRE existing library. Needed once
+// after upgrading, since a normal scan only picks up new files, not already-added ones.
+async function recacheAllSubtitles() {
+  if (!confirm("Detta köar om undertextcachning för hela biblioteket. Det kan ta lång tid (timmar/dagar) för stora bibliotek, men körs i bakgrunden utan att störa uppspelning. Fortsätt?")) return;
+  try {
+    var data = await API.post("/subtitles/recache-all", {});
+    toast(data.message || "Omcachning startad", "success");
+    startCacheStatusPolling();
+  } catch(e) {
+    toast("Fel: " + e.message, "error");
+  }
+}
+
 async function searchSubtitles(mediaId) {
   var query = document.getElementById("sub-search-input")?.value?.trim();
   var lang = document.getElementById("sub-lang-select")?.value || "sv";
@@ -2679,8 +2782,84 @@ async function switchAudioTrack(trackIndex) {
 async function saveUserLanguage(userId) {
   const language = document.getElementById("up-language")?.value || "";
   try {
-    await API.patch("/users/" + userId + "/language", { language: language || null });
+    const result = await API.patch("/users/" + userId + "/language", { language: language || null });
     toast("✓ Språk sparat!", "success");
+    if (result?.needsOcrLanguage) {
+      if (currentUser?.role === "admin") {
+        promptAddOcrLanguage(result.needsOcrLanguage);
+      } else {
+        // Regular users can't add OCR languages themselves (admin-only endpoint) —
+        // just let them know who to ask, instead of showing a button that would 403.
+        var label = SUBTITLE_LANG_ADJ[result.needsOcrLanguage] || result.needsOcrLanguage;
+        toast(`ℹ️ Bildbaserade undertexter på ${label} är inte aktiverat än – be en administratör lägga till det i Inställningar`, "info");
+      }
+    }
+  } catch(e) {
+    toast("Fel: " + e.message, "error");
+  }
+}
+
+// Half-automatic step: a user just got a language that isn't in the bitmap-subtitle
+// OCR allowlist yet. Ask before kicking off any conversion work.
+function promptAddOcrLanguage(lang) {
+  var label = SUBTITLE_LANG_ADJ[lang] || lang;
+  if (!confirm(`Lägg till ${label} i undertext-OCR-listan?\n\nDetta köar en riktad omcachning som bara konverterar bildbaserade undertexter på ${label} – övriga språk påverkas inte.`)) return;
+  API.post("/subtitles/ocr-languages", { lang: lang, backfill: true })
+    .then(function(res) {
+      toast(`✓ ${label} tillagt – ${res.queued || 0} filer köade`, "success");
+      startCacheStatusPolling();
+      checkPendingOcrRequests();
+    })
+    .catch(function(e) { toast("Fel: " + e.message, "error"); });
+}
+
+async function saveOcrMode(mode) {
+  try {
+    await API.post("/subtitles/ocr-mode", { mode });
+    toast(mode === "all" ? "✓ Cachar nu alla språk automatiskt" : "✓ Bara valda språk cachas", "success");
+    loadSettings();
+  } catch(e) {
+    toast("Fel: " + e.message, "error");
+  }
+}
+
+async function addOcrLanguage(explicitLang) {
+  var lang = explicitLang || document.getElementById("ocr-add-lang-select")?.value;
+  if (!lang) return;
+  var label = SUBTITLE_LANG_ADJ[lang] || lang;
+  if (!confirm(`Lägg till ${label} i OCR-listan och köa en riktad omcachning för det språket?`)) return;
+  try {
+    var res = await API.post("/subtitles/ocr-languages", { lang: lang, backfill: true });
+    toast(`✓ ${label} tillagt – ${res.queued || 0} filer köade`, "success");
+    startCacheStatusPolling();
+    checkPendingOcrRequests();
+    loadSettings();
+  } catch(e) {
+    toast("Fel: " + e.message, "error");
+  }
+}
+
+async function removeOcrLanguage(lang) {
+  var label = SUBTITLE_LANG_ADJ[lang] || lang;
+  if (!confirm(`Ta bort ${label} från OCR-listan? Redan cachade filer på ${label} rörs inte, men inga nya konverteras.`)) return;
+  try {
+    await API.delete("/subtitles/ocr-languages/" + encodeURIComponent(lang));
+    toast(`✓ ${label} borttaget från listan`, "success");
+    loadSettings();
+  } catch(e) {
+    toast("Fel: " + e.message, "error");
+  }
+}
+
+// Dismiss a pending "someone wants a new language" notification without adding it.
+async function dismissOcrRequest(lang, userId) {
+  var label = SUBTITLE_LANG_ADJ[lang] || lang;
+  if (!confirm(`Avvisa förfrågan om ${label}? Notisen försvinner, men inget cachas.`)) return;
+  try {
+    await API.post("/subtitles/ocr-pending/dismiss", { lang: lang, userId: userId });
+    toast(`Förfrågan om ${label} avvisad`, "info");
+    checkPendingOcrRequests();
+    loadSettings();
   } catch(e) {
     toast("Fel: " + e.message, "error");
   }
@@ -2750,13 +2929,22 @@ async function autoLoadSubtitles(mediaId, offsetSec) {
   try {
     var data = await API.get("/media/" + mediaId + "/subtitles");
     var subs = data.subtitles || [];
-    // Swedish first, then English, then anything
-    // Priority: 1) Any SRT file (always Swedish), 2) Embedded SV/SWE/Swedish, 3) Nothing
+    // Map the user's UI language (e.g. "sv-SE") to the 3-letter subtitle code used by the server
+    var USER_LANG_TO_SUB_LANG = { "sv-SE":"swe","en-US":"eng","no-NO":"nor","da-DK":"dan","de-DE":"deu","fr-FR":"fra","es-ES":"spa","nl-NL":"nld","fi-FI":"fin","ja-JP":"jpn" };
+    var userSubLang = USER_LANG_TO_SUB_LANG[currentUser?.language] || null;
+    function matchesLang(s, code) {
+      if (!code) return false;
+      var l = (s.lang || "").toLowerCase();
+      return l === code || (code === "swe" && l === "sv") || (code === "eng" && l === "en");
+    }
+    // Priority: 1) Any subtitle matching the user's own language, 2) Any SRT file (legacy default,
+    // usually Swedish), 3) Embedded Swedish, 4) Nothing
+    var userSub = subs.find(function(s) { return matchesLang(s, userSubLang); });
     var srtSub = subs.find(function(s) { return s.type === "srt"; });
     var embeddedSv = subs.find(function(s) { 
       return s.type === "embedded" && (s.lang === "sv" || s.lang === "swe" || (s.label || "").toLowerCase().includes("swedish")); 
     });
-    var sub = srtSub || embeddedSv || null;
+    var sub = userSub || srtSub || embeddedSv || null;
     if (!sub || !sub.url) return;
     // Apply offset to URL only for SRT files, not embedded (embedded have absolute times)
     if (offsetSec && offsetSec > 0 && sub.url && sub.type !== "embedded") {
@@ -2765,8 +2953,10 @@ async function autoLoadSubtitles(mediaId, offsetSec) {
     }
     // For embedded subtitles, check if extraction is ready (may need retries)
     if (sub.type === "embedded") {
-      // Embedded subtitles have absolute times - never apply offset
-      var subUrl = sub.url.split("?")[0] + "?index=" + sub.index;
+      // Embedded subtitles have absolute times - never apply offset (offset is only ever
+      // added above for non-embedded types, so sub.url is already correct as-is here —
+      // including the ?token= the server appended, which must NOT be stripped).
+      var subUrl = sub.url;
       var subLabel = sub.label;
       // Store as pending - will be injected on next DASH session reset
       _pendingSubtitle = { url: subUrl, label: subLabel };
@@ -3035,6 +3225,28 @@ async function handleSearch(q) {
 // ── SETTINGS ──────────────────────────────────────────────────────────────────
 var _cacheStatusInterval = null;
 
+// Adjective forms for the "X med Y text" lines in the subtitle-cache dashboard.
+// Falls back to the raw code for anything not in the list, so new/rare languages still show up.
+var SUBTITLE_LANG_ADJ = { swe:"svensk", eng:"engelsk", nor:"norsk", dan:"dansk", deu:"tysk", fra:"fransk", spa:"spansk", nld:"nederländsk", fin:"finsk", ita:"italiensk", por:"portugisisk", pol:"polsk", jpn:"japansk", und:"okänd" };
+function subtitleLangBreakdownHtml(counts, featured) {
+  counts = counts || {};
+  featured = featured && featured.length ? featured : ["eng"];
+  var seen = {};
+  var lines = featured.map(function(l) {
+    seen[l] = true;
+    var adj = SUBTITLE_LANG_ADJ[l] || l;
+    return `<div style="padding-left:12px">${counts[l] || 0} med ${adj} text</div>`;
+  });
+  var otherCount = 0;
+  Object.keys(counts).forEach(function(l) {
+    if (!seen[l]) otherCount += counts[l];
+  });
+  if (otherCount > 0) {
+    lines.push(`<div style="padding-left:12px;color:var(--muted)">${otherCount} med övriga språk</div>`);
+  }
+  return lines.join("");
+}
+
 function startCacheStatusPolling() {
   if (_cacheStatusInterval) return; // already polling
   _cacheStatusInterval = setInterval(async () => {
@@ -3044,32 +3256,29 @@ function startCacheStatusPolling() {
       const label = document.getElementById("subtitle-cache-label");
       const status = document.getElementById("subtitle-cache-status");
       const cached = document.getElementById("subtitle-cache-cached");
-      const withSweEl = document.getElementById("subtitle-cache-withswe");
       const isDone = !cs.running && cs.queued === 0;
-      const pct = cs.withSwe > 0 ? Math.round((cs.done / cs.withSwe) * 100) : 0;
+      const totalQueued = (cs.total || 0) + (cs.totalEps || 0);
+      const pct = totalQueued > 0 ? Math.round((cs.done / totalQueued) * 100) : 0;
       if (bar) bar.style.width = pct + "%";
-      if (label) label.textContent = cs.done + " av " + cs.withSwe + " klara";
+      if (label) label.textContent = cs.done + " av " + totalQueued + " klara";
       if (status) status.textContent = cs.running ? "⏳ Extraherar undertexter..." : cs.queued > 0 ? "⏳ Väntar i kö..." : "✅ Alla undertexter är redo!";
       const statsEl = document.getElementById("subtitle-cache-stats");
       if (statsEl) {
         let html = "";
-        const hasMovieStats = (cs.withSwe||0) + (cs.withEng||0) + (cs.withExtSrt||0) > 0;
-        const hasEpStats = (cs.withSweEps||0) + (cs.withEngEps||0) + (cs.withExtSrtEps||0) > 0;
+        const lb = cs.languageBreakdown || { movies: {}, episodes: {} };
+        const hasMovieStats = Object.keys(lb.movies || {}).length > 0;
+        const hasEpStats = Object.keys(lb.episodes || {}).length > 0;
         if (hasMovieStats || cs.total > 0) {
           html += `<div style="font-weight:500;margin-bottom:2px">Filmer</div>`;
-          html += `<div style="padding-left:12px">${cs.withSwe||0} med inbyggd svensk text</div>`;
-          html += `<div style="padding-left:12px">${cs.withEng||0} med inbyggd engelsk text</div>`;
-          html += `<div style="padding-left:12px">${cs.withExtSrt||0} med extern SRT-fil</div>`;
+          html += subtitleLangBreakdownHtml(lb.movies, cs.featuredLanguages);
         }
-        if (hasEpStats || (cs.totalEps||0) > 0) {
-          html += `<div style="font-weight:500;margin-top:6px;margin-bottom:2px">Serier → ${cs.totalShows||0} serier · ${cs.totalEps||0} avsnitt</div>`;
-          html += `<div style="padding-left:12px">${cs.withSweEps||0} med inbyggd svensk text</div>`;
-          html += `<div style="padding-left:12px">${cs.withEngEps||0} med inbyggd engelsk text</div>`;
-          html += `<div style="padding-left:12px">${cs.withExtSrtEps||0} med extern SRT-fil</div>`;
+        if (hasEpStats || (cs.totalEps || 0) > 0) {
+          html += `<div style="font-weight:500;margin-top:6px;margin-bottom:2px">Serier → ${cs.totalShows || 0} serier · ${cs.totalEps || 0} avsnitt</div>`;
+          html += subtitleLangBreakdownHtml(lb.episodes, cs.featuredLanguages);
         }
         statsEl.innerHTML = html;
       }
-      if (cached) cached.textContent = "💾 " + cs.cached + " svenska undertextfiler extraherade och sparade";
+      if (cached) cached.textContent = "💾 " + cs.cached + " undertextfiler extraherade och sparade";
       if (isDone) {
         clearInterval(_cacheStatusInterval);
         _cacheStatusInterval = null;
@@ -3093,11 +3302,13 @@ async function loadSettings() {
     // Start updating next scan label
     setTimeout(updateNextScanLabel, 500);
     setInterval(updateNextScanLabel, 30000);
-    const [cfg, users, libs, scanStatus, updateInfo, cacheStatus, pgsStatus] = await Promise.all([
+    const [cfg, users, libs, scanStatus, updateInfo, cacheStatus, pgsStatus, ocrLangConfig, pendingOcr] = await Promise.all([
       API.get("/config"), API.get("/users"), API.get("/libraries"),
       API.get("/scan/status"), API.get("/updates/check").catch(() => null),
       API.get("/subtitles/cache-status").catch(() => null),
-      API.get("/tools/pgstosrt-status").catch(() => ({ installed: false }))
+      API.get("/tools/pgstosrt-status").catch(() => ({ installed: false })),
+      API.get("/subtitles/ocr-languages").catch(() => ({ mode: "selected", languages: [] })),
+      currentUser?.role === "admin" ? API.get("/subtitles/ocr-pending").catch(() => ({ pending: [] })) : Promise.resolve({ pending: [] })
     ]);
     console.log("[SETTINGS] cacheStatus:", JSON.stringify(cacheStatus)?.slice(0,100));
     const counts = Object.fromEntries((scanStatus.counts || []).map(c => [c.type, c.c]));
@@ -3115,7 +3326,23 @@ async function loadSettings() {
     sec.innerHTML = `<div class="settings-wrap">
       <div class="settings-title">Inställningar</div>
 
-
+      ${(pendingOcr.pending || []).length > 0 ? `<div class="settings-section" style="border:1px solid var(--danger,#e74c3c);background:rgba(231,76,60,0.08)">
+        <div class="settings-section-title">🔔 Väntande undertextspråk (${pendingOcr.pending.length})</div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:10px">Dessa användare har valt ett språk som inte cachas för bildbaserade (OCR) undertexter än.</div>
+        <div style="display:flex;flex-direction:column;gap:8px">
+          ${pendingOcr.pending.map(p => `
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;background:var(--card2);border-radius:8px;padding:8px 12px">
+              <div style="font-size:13px">
+                <b>${esc(SUBTITLE_LANG_ADJ[p.lang] || p.lang)}</b> – begärt av ${esc(p.username)}
+                <div style="font-size:11px;color:var(--muted)">${new Date(p.requestedAt).toLocaleString("sv-SE")}</div>
+              </div>
+              <div style="display:flex;gap:6px;flex-shrink:0">
+                <button class="btn-fav" style="font-size:12px" onclick="addOcrLanguage('${p.lang}')">+ Lägg till</button>
+                <button class="btn-fav" style="font-size:12px" onclick="dismissOcrRequest('${p.lang}','${p.userId}')">Avvisa</button>
+              </div>
+            </div>`).join("")}
+        </div>
+      </div>` : ""}
 
       <div class="settings-section">
         <div class="settings-section-title">Biblioteksstatus</div>
@@ -3144,14 +3371,10 @@ async function loadSettings() {
       ${cacheStatus ? `<div class="settings-section" id="subtitle-cache-section">
         <div class="settings-section-title">Automatiska undertexter</div>
         <div style="font-size:13px;color:var(--muted);margin-bottom:8px" id="subtitle-cache-stats">
-          ${((cacheStatus.withSwe||0)+(cacheStatus.withEng||0)+(cacheStatus.withExtSrt||0)) > 0 ? `<div style="font-weight:500;margin-bottom:2px">Filmer</div>
-            <div style="padding-left:12px">${cacheStatus.withSwe || 0} med inbyggd svensk text</div>
-            <div style="padding-left:12px">${cacheStatus.withEng || 0} med inbyggd engelsk text</div>
-            <div style="padding-left:12px">${cacheStatus.withExtSrt || 0} med extern SRT-fil</div>` : ""}
-          ${((cacheStatus.withSweEps||0)+(cacheStatus.withEngEps||0)+(cacheStatus.withExtSrtEps||0)) > 0 || (cacheStatus.totalEps || 0) > 0 ? `<div style="font-weight:500;margin-top:6px;margin-bottom:2px">Serier${cacheStatus.totalEps ? ` → ${cacheStatus.totalShows || "?"} serier · ${cacheStatus.totalEps} avsnitt` : ""}</div>
-            <div style="padding-left:12px">${cacheStatus.withSweEps || 0} med inbyggd svensk text</div>
-            <div style="padding-left:12px">${cacheStatus.withEngEps || 0} med inbyggd engelsk text</div>
-            <div style="padding-left:12px">${cacheStatus.withExtSrtEps || 0} med extern SRT-fil</div>` : ''}
+          ${(Object.keys(cacheStatus.languageBreakdown?.movies || {}).length > 0 || (cacheStatus.total || 0) > 0) ? `<div style="font-weight:500;margin-bottom:2px">Filmer</div>
+            ${subtitleLangBreakdownHtml(cacheStatus.languageBreakdown?.movies, cacheStatus.featuredLanguages)}` : ""}
+          ${(Object.keys(cacheStatus.languageBreakdown?.episodes || {}).length > 0 || (cacheStatus.totalEps || 0) > 0) ? `<div style="font-weight:500;margin-top:6px;margin-bottom:2px">Serier${cacheStatus.totalEps ? ` → ${cacheStatus.totalShows || "?"} serier · ${cacheStatus.totalEps} avsnitt` : ""}</div>
+            ${subtitleLangBreakdownHtml(cacheStatus.languageBreakdown?.episodes, cacheStatus.featuredLanguages)}` : ''}
         </div>
         <div style="margin-bottom:10px">
           <div style="font-size:13px;font-weight:500;margin-bottom:6px">
@@ -3161,9 +3384,39 @@ async function loadSettings() {
           <div style="background:var(--card2);border-radius:4px;height:8px;overflow:hidden;margin-bottom:6px">
             <div id="subtitle-cache-bar" style="height:100%;background:var(--accent);border-radius:4px;animation:pulse 1.5s ease-in-out infinite;width:100%"></div>
           </div>` : ''}
-          ${cacheStatus.errors > 0 ? `<div style="font-size:11px;color:var(--muted);margin-top:4px">⚠️ ${cacheStatus.errors} filer hoppades över (bildbaserade undertexter stöds ej)</div>` : ''}
+          ${((cacheStatus.gated||0) + (cacheStatus.gatedEps||0)) > 0 ? `<div style="font-size:11px;color:var(--muted);margin-top:4px">⏸ ${(cacheStatus.gated||0) + (cacheStatus.gatedEps||0)} filer har bildbaserade spår som väntar på OCR (inte i språklistan än, eller PgsToSrt ej installerat)</div>` : ''}
+          ${(cacheStatus.errors||0) > 0 ? `<div style="font-size:11px;color:var(--danger,#e74c3c);margin-top:4px">⚠️ ${cacheStatus.errors} filer misslyckades – se undertext-loggen för orsak</div>` : ''}
         </div>
         <div id="subtitle-cache-cached" style="font-size:12px;color:var(--muted)">💾 ${cacheStatus.done > 0 ? cacheStatus.done : cacheStatus.cached} undertextfiler extraherade och sparade</div>
+        ${currentUser?.role === "admin" ? `<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+          <button class="btn-fav" style="font-size:12px" onclick="openSubtitleLog()">📋 Visa undertext-logg${cacheStatus.errors > 0 ? ` (${cacheStatus.errors} fel)` : ""}</button>
+          <button class="btn-fav" style="font-size:12px" onclick="recacheAllSubtitles()">🔄 Cacha om alla undertexter</button>
+        </div>` : ""}
+      </div>` : ''}
+
+      ${currentUser?.role === "admin" ? `<div class="settings-section" id="subtitle-ocr-section">
+        <div class="settings-section-title">Bildbaserade undertexter (OCR)</div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:10px">Textbaserade undertexter cachas alltid för alla språk – det är billigt. Bildbaserade (PGS/VOBSUB) kräver tung OCR-konvertering, så det styrs separat här.</div>
+        <div style="margin-bottom:10px">
+          <select class="s-input" id="s-ocr-mode" onchange="saveOcrMode(this.value)" style="cursor:pointer">
+            <option value="selected" ${ocrLangConfig.mode !== "all" ? "selected" : ""}>Cacha bara valda språk (rekommenderas)</option>
+            <option value="all" ${ocrLangConfig.mode === "all" ? "selected" : ""}>Cacha alla språk automatiskt (för stora bibliotek/många användare)</option>
+          </select>
+        </div>
+        ${ocrLangConfig.mode !== "all" ? `
+        <div id="ocr-lang-chips" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">
+          ${(ocrLangConfig.languages || []).map(l => `
+            <span style="background:var(--card2);border:1px solid var(--border);border-radius:20px;padding:4px 6px 4px 12px;font-size:12px;display:flex;align-items:center;gap:6px">
+              ${esc(SUBTITLE_LANG_ADJ[l] || l)}
+              <button onclick="removeOcrLanguage('${l}')" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px;line-height:1;padding:2px">✕</button>
+            </span>`).join("")}
+        </div>
+        <div style="display:flex;gap:8px">
+          <select class="s-input" id="ocr-add-lang-select" style="flex:1">
+            ${Object.keys(SUBTITLE_LANG_ADJ).filter(l => l !== "und" && !(ocrLangConfig.languages || []).includes(l)).map(l => `<option value="${l}">${esc(SUBTITLE_LANG_ADJ[l])}</option>`).join("")}
+          </select>
+          <button class="btn-fav" style="font-size:12px" onclick="addOcrLanguage()">+ Lägg till</button>
+        </div>` : ''}
       </div>` : ''}
 
       <div class="settings-section">
@@ -3252,6 +3505,18 @@ async function loadSettings() {
           <input class="s-input" id="new-user" placeholder="Användarnamn"/>
           <input class="s-input" type="password" id="new-pass" placeholder="Lösenord"/>
           <select class="filter-select" id="new-role"><option value="user">Användare</option><option value="admin">Admin</option></select>
+          <select class="s-input" id="new-user-language" style="cursor:pointer">
+            <option value="">🌐 Använd serverns inställning</option>
+            <option value="en-US">🇺🇸 English</option>
+            <option value="sv-SE">🇸🇪 Svenska</option>
+            <option value="no-NO">🇳🇴 Norsk</option>
+            <option value="da-DK">🇩🇰 Dansk</option>
+            <option value="fi-FI">🇫🇮 Suomi</option>
+            <option value="de-DE">🇩🇪 Deutsch</option>
+            <option value="fr-FR">🇫🇷 Français</option>
+            <option value="es-ES">🇪🇸 Español</option>
+            <option value="nl-NL">🇳🇱 Nederlands</option>
+          </select>
           <button class="s-btn primary" onclick="addUser()">Lägg till</button>
         </div>
       </div>
@@ -3370,8 +3635,21 @@ async function addUser() {
   const username = document.getElementById("new-user").value.trim();
   const password = document.getElementById("new-pass").value;
   const role = document.getElementById("new-role").value;
+  const language = document.getElementById("new-user-language")?.value || "";
   if (!username || !password) { toast("Ange användarnamn och lösenord", "error"); return; }
-  try { await API.post("/users", { username, password, role }); toast(`✓ ${username} skapad!`, "success"); loadSettings(); }
+  try {
+    const result = await API.post("/users", { username, password, role, language: language || null });
+    toast(`✓ ${username} skapad!`, "success");
+    if (result?.needsOcrLanguage) {
+      if (currentUser?.role === "admin") {
+        promptAddOcrLanguage(result.needsOcrLanguage);
+      } else {
+        var label = SUBTITLE_LANG_ADJ[result.needsOcrLanguage] || result.needsOcrLanguage;
+        toast(`ℹ️ Bildbaserade undertexter på ${label} är inte aktiverat än – be en administratör lägga till det i Inställningar`, "info");
+      }
+    }
+    loadSettings();
+  }
   catch (e) { toast(e.message, "error"); }
 }
 

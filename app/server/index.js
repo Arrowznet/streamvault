@@ -20,49 +20,170 @@ const _subtitleCacheQueue = [];
 let _subtitleCacheRunning = false;
 let _subtitleCacheTotal = 0;       // total movies queued
 let _subtitleCacheTotalEps = 0;    // total episodes queued
-let _subtitleCacheWithSwe = 0;        // movies with embedded Swedish
-let _subtitleCacheWithEng = 0;        // movies with embedded English
-let _subtitleCacheWithExtSrt = 0;     // movies with external SRT
-let _subtitleCacheWithSweEps = 0;     // episodes with embedded Swedish
-let _subtitleCacheWithEngEps = 0;     // episodes with embedded English
-let _subtitleCacheWithExtSrtEps = 0;  // episodes with external SRT
+let _subtitleCacheWithSwe = 0;        // movies with a cached Swedish subtitle (any source)
+let _subtitleCacheWithEng = 0;        // movies with a cached English subtitle (any source)
+let _subtitleCacheWithExtSrt = 0;     // movies with an external SRT cached
+let _subtitleCacheWithSweEps = 0;     // episodes with a cached Swedish subtitle
+let _subtitleCacheWithEngEps = 0;     // episodes with a cached English subtitle
+let _subtitleCacheWithExtSrtEps = 0;  // episodes with an external SRT cached
+let _subtitleCacheDone = 0;           // items with at least one language successfully cached
+let _subtitleCacheErrors = 0;         // items where a genuine failure occurred (kept for backward compat)
+let _subtitleCacheFailed = 0;         // movies: genuine extraction/conversion failure
+let _subtitleCacheFailedEps = 0;      // episodes: genuine extraction/conversion failure
+let _subtitleCacheGated = 0;          // movies: bitmap subtitle exists but isn't OCR'd (allowlist/missing tool) — expected, not an error
+let _subtitleCacheGatedEps = 0;       // episodes: same
+let _subtitleCacheNoSubs = 0;         // movies: no subtitles found at all — normal, not an error
+let _subtitleCacheNoSubsEps = 0;      // episodes: same
+// Dynamic per-language breakdown, e.g. { movies: { swe: 29, eng: 24, nor: 5 }, episodes: {...} }
+// Rebuilt by countExistingSubtitleCache() so the dashboard reflects whatever languages actually exist.
+let _subtitleLangBreakdown = { movies: {}, episodes: {} };
 
-// Count existing cache files on startup
+// ── SUBTITLE LOGGING ──────────────────────────────────────────────────────────
+// Keeps a rolling in-memory log plus a persistent log file so failures are easy
+// to trace after the fact (which file, which language, when, and why).
+const _subtitleLogBuffer = []; // most recent first
+const SUBTITLE_LOG_MAX = 500;
+function subtitleLogPath() { return path.join(DATA_DIR, "logs", "subtitles.log"); }
+function logSubtitle(level, item, message, extra) {
+  const entry = {
+    time: new Date().toISOString(),
+    level,
+    mediaId: item?._id || null,
+    title: item?.title || null,
+    message,
+    extra: extra || null
+  };
+  _subtitleLogBuffer.unshift(entry);
+  if (_subtitleLogBuffer.length > SUBTITLE_LOG_MAX) _subtitleLogBuffer.length = SUBTITLE_LOG_MAX;
+  const line = `[${entry.time}] [${level.toUpperCase()}]${item?.title ? ` "${item.title}" –` : ""} ${message}${extra ? " | " + JSON.stringify(extra) : ""}`;
+  console.log("[SUBTITLES]", line);
+  try {
+    const logDir = path.join(DATA_DIR, "logs");
+    if (!fs.existsSync(logDir)) fs.mkdirSync(logDir, { recursive: true });
+    fs.appendFileSync(subtitleLogPath(), line + "\n");
+  } catch(e) {
+    console.log("[SUBTITLES] Kunde inte skriva till loggfilen:", e.message);
+  }
+}
+
+// ── LANGUAGE CODE NORMALIZATION ────────────────────────────────────────────────
+// Maps whatever ffprobe/filename gives us (2-letter, 3-letter, or full name) to a
+// stable 3-letter code used consistently in cache filenames and the DB.
+const SUBTITLE_LANG_ALIASES = {
+  sv:"swe", swe:"swe", svenska:"swe", swedish:"swe",
+  en:"eng", eng:"eng", english:"eng",
+  no:"nor", nor:"nor", nb:"nor", nn:"nor", norsk:"nor", norwegian:"nor",
+  da:"dan", dan:"dan", dansk:"dan", danish:"dan",
+  de:"deu", deu:"deu", ger:"deu", german:"deu", tysk:"deu",
+  fr:"fra", fra:"fra", fre:"fra", french:"fra", franska:"fra",
+  es:"spa", spa:"spa", spanish:"spa", spanska:"spa",
+  nl:"nld", nld:"nld", dut:"nld", dutch:"nld",
+  fi:"fin", fin:"fin", finnish:"fin", finska:"fin",
+  it:"ita", ita:"ita", italian:"ita", italienska:"ita",
+  pt:"por", por:"por", portuguese:"por", portugisiska:"por",
+  pl:"pol", pol:"pol", polish:"pol", polska:"pol",
+  ja:"jpn", jpn:"jpn", japanese:"jpn", japanska:"jpn"
+};
+const SUBTITLE_LANG_LABELS = { swe:"Svenska", eng:"English", nor:"Norsk", dan:"Dansk", deu:"Deutsch", fra:"Français", spa:"Español", nld:"Nederlands", fin:"Suomi", ita:"Italiano", por:"Português", pol:"Polski", jpn:"日本語", und:"Okänt språk" };
+const TESSERACT_LANG_MAP = { swe:"swe", eng:"eng", nor:"nor", dan:"dan", deu:"deu", fra:"fra", spa:"spa", nld:"nld", fin:"fin", ita:"ita", por:"por", pol:"pol", jpn:"jpn" };
+// Maps a user's UI language setting (e.g. "sv-SE") to the 3-letter subtitle code
+const USER_LANG_TO_SUB_LANG = { "sv-SE":"swe","en-US":"eng","no-NO":"nor","da-DK":"dan","de-DE":"deu","fr-FR":"fra","es-ES":"spa","nl-NL":"nld","fi-FI":"fin","ja-JP":"jpn" };
+
+function normalizeLangCode(raw) {
+  const l = (raw || "").toLowerCase().trim();
+  if (!l) return "und";
+  if (SUBTITLE_LANG_ALIASES[l]) return SUBTITLE_LANG_ALIASES[l];
+  const safe = l.replace(/[^a-z0-9]/g, "");
+  return safe || "und";
+}
+function subtitleLangLabel(lang) { return SUBTITLE_LANG_LABELS[lang] || lang; }
+
+// ── OCR LANGUAGE ALLOWLIST ─────────────────────────────────────────────────────
+// Text-based subtitles and external .srt files are cheap, so we always cache every
+// language found. Bitmap (PGS/VOBSUB) OCR conversion is expensive (30s–minutes per
+// language per file), so by default it's limited to a small allowlist the admin
+// controls, instead of blindly OCR'ing every language a disc happens to contain.
+function getServerDefaultSubLang() {
+  return USER_LANG_TO_SUB_LANG[config.language] || "eng";
+}
+// Returns null if OCR should run for ANY language (admin picked "cacha alla"),
+// otherwise a Set of the 3-letter codes currently allowed.
+function getEffectiveOcrLanguages() {
+  if (config.subtitle_ocr_mode === "all") return null;
+  const list = (config.subtitle_ocr_languages && config.subtitle_ocr_languages.length)
+    ? config.subtitle_ocr_languages
+    : [getServerDefaultSubLang(), "eng"];
+  return new Set(list);
+}
+
+// ── PENDING OCR-LANGUAGE REQUESTS ──────────────────────────────────────────────
+// An active, persistent "someone wants a new language" notification for the admin —
+// not just a log line easy to miss. Stored in config.json so it survives a restart;
+// cleared once the admin either adds the language or explicitly dismisses it.
+function addPendingOcrRequest(lang, userId) {
+  if (!Array.isArray(config.pending_ocr_requests)) config.pending_ocr_requests = [];
+  // Dedupe: one open request per (lang, user) pair — refresh the timestamp instead of piling up
+  const existing = config.pending_ocr_requests.find(r => r.lang === lang && r.userId === userId);
+  if (existing) { existing.requestedAt = new Date().toISOString(); }
+  else config.pending_ocr_requests.push({ lang, userId, requestedAt: new Date().toISOString() });
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
+}
+function clearPendingOcrRequests(lang) {
+  if (!Array.isArray(config.pending_ocr_requests)) return;
+  config.pending_ocr_requests = config.pending_ocr_requests.filter(r => r.lang !== lang);
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
+}
+async function getPendingOcrRequestsWithUsernames() {
+  const list = config.pending_ocr_requests || [];
+  const out = [];
+  for (const r of list) {
+    const user = await dbFindOne(db.users, { _id: r.userId });
+    out.push({ lang: r.lang, userId: r.userId, username: user?.username || "(borttagen användare)", requestedAt: r.requestedAt });
+  }
+  return out;
+}
+
+// Count existing cache files on startup (and whenever the dashboard asks, if idle)
 async function countExistingSubtitleCache() {
   const cacheDir = path.join(DATA_DIR, "subtitle-cache");
+  _subtitleLangBreakdown = { movies: {}, episodes: {} };
   if (!fs.existsSync(cacheDir)) return;
   try {
     const files = fs.readdirSync(cacheDir);
-    const allExtSrt = files.filter(f => f.endsWith("_ext.srt"));
-    // Reset counters
-    _subtitleCacheWithSwe = 0; _subtitleCacheWithEng = 0;
-    _subtitleCacheWithSweEps = 0; _subtitleCacheWithEngEps = 0;
-    try {
-      const allMedia = await dbFind(db.media, { type: { $in: ["movie","episode"] }, cached_subtitle_lang: { $exists: true } });
-      for (const m of allMedia) {
-        // Verify the cache file actually still exists on disk
-        const exists = files.some(f => f.startsWith(m._id + "_") && f.endsWith(".srt") && !f.endsWith("_ext.srt"));
-        if (!exists) continue;
-        if (m.type === "episode") {
-          if (m.cached_subtitle_lang === "swe") _subtitleCacheWithSweEps++; else if (m.cached_subtitle_lang === "eng") _subtitleCacheWithEngEps++;
-        } else {
-          if (m.cached_subtitle_lang === "swe") _subtitleCacheWithSwe++; else if (m.cached_subtitle_lang === "eng") _subtitleCacheWithEng++;
+    // All languages that have been cached for a given item, from either source
+    // (embedded/converted: "{id}_{index}_{lang}.srt", or external: "{md5(id)}_ext_{lang}.srt")
+    const langsForItem = (id) => {
+      const hash = require("crypto").createHash("md5").update(id).digest("hex");
+      const langs = new Set();
+      for (const f of files) {
+        if (!f.endsWith(".srt")) continue;
+        if (f.startsWith(id + "_")) {
+          const m = f.match(/_(\d+)_([a-z0-9]+)\.srt$/);
+          if (m) langs.add(m[2]);
+        } else if (f.startsWith(hash + "_ext_")) {
+          const m = f.match(/_ext_([a-z0-9]+)\.srt$/);
+          if (m) langs.add(m[1]);
         }
       }
-      const episodeIds = new Set((await dbFind(db.media, { type: "episode" })).map(m => m._id));
-      _subtitleCacheWithExtSrt = allExtSrt.filter(f => {
-        const hash = f.replace("_ext.srt", "");
-        return !Array.from(episodeIds).some(id => require("crypto").createHash("md5").update(id).digest("hex") === hash);
-      }).length;
-      _subtitleCacheWithExtSrtEps = allExtSrt.length - _subtitleCacheWithExtSrt;
-    } catch(e) {
-      console.log("[SUBTITLE] DB count error:", e.message);
-    }
-  } catch(e) { console.log("[SUBTITLE] Count error:", e.message); }
+      return langs;
+    };
+    const movies = await dbFind(db.media, { type: "movie" });
+    const episodes = await dbFind(db.media, { type: "episode" });
+    const movieCounts = {};
+    for (const m of movies) for (const lang of langsForItem(m._id)) movieCounts[lang] = (movieCounts[lang] || 0) + 1;
+    const epCounts = {};
+    for (const ep of episodes) for (const lang of langsForItem(ep._id)) epCounts[lang] = (epCounts[lang] || 0) + 1;
+    _subtitleLangBreakdown = { movies: movieCounts, episodes: epCounts };
+    // Keep the legacy swe/eng counters in sync too, in case anything else still reads them
+    _subtitleCacheWithSwe = movieCounts.swe || 0;
+    _subtitleCacheWithEng = movieCounts.eng || 0;
+    _subtitleCacheWithSweEps = epCounts.swe || 0;
+    _subtitleCacheWithEngEps = epCounts.eng || 0;
+    _subtitleCacheWithExtSrt = 0;    // no longer tracked as a separate bucket – folded into per-language counts
+    _subtitleCacheWithExtSrtEps = 0;
+  } catch(e) { logSubtitle("error", null, "Kunde inte räkna cachade undertexter", { error: e.message }); }
 }
 setTimeout(countExistingSubtitleCache, 1000);
-let _subtitleCacheDone = 0;           // items successfully extracted
-let _subtitleCacheErrors = 0;         // items that failed
 
 const DATA_DIR = process.env.STREAMVAULT_DATA
   ? path.join(process.env.STREAMVAULT_DATA, "data")
@@ -171,6 +292,54 @@ function requireAdmin(req, res, next) {
   });
 }
 
+// Guards any endpoint that serves the actual media/subtitle bytes for one specific item
+// (streaming, playback-method lookup, offline download, subtitle files). Accepts EITHER:
+//   - a normal session access token (header or ?token=), same as requireAuth, or
+//   - a media-scoped download token (?dtoken=), issued via /api/media/:id/download-token,
+//     used for offline downloads that outlive the normal 24h session token.
+// Unlike requireAuth, this ALSO enforces per-library access restrictions — streaming and
+// subtitle endpoints previously skipped that check entirely, which meant a user with
+// restricted library access could still stream/download anything if they knew its ID.
+async function requireMediaAccess(req, res, next) {
+  try {
+    const item = await dbFindOne(db.media, { _id: req.params.id });
+    if (!item) return res.status(404).json({ error: "Hittades inte" });
+    req.mediaItem = item;
+
+    let user = null;
+
+    let token = null;
+    const auth = req.headers.authorization;
+    if (auth?.startsWith("Bearer ")) token = auth.slice(7);
+    else if (req.query.token) token = req.query.token;
+    if (token) {
+      try {
+        const payload = jwt.verify(token, config.jwt_secret);
+        if (payload.type === "access") {
+          user = await dbFindOne(db.users, { _id: payload.userId, is_active: true });
+        }
+      } catch {}
+    }
+
+    if (!user && req.query.dtoken) {
+      try {
+        const payload = jwt.verify(req.query.dtoken, config.jwt_secret);
+        if (payload.type === "download" && payload.mediaId === req.params.id) {
+          user = await dbFindOne(db.users, { _id: payload.userId, is_active: true });
+        }
+      } catch {}
+    }
+
+    if (!user) return res.status(401).json({ error: "Ej autentiserad" });
+    if (!userHasLibraryAccess(user, item.library_id)) return res.status(403).json({ error: "Ingen åtkomst till detta bibliotek" });
+
+    req.user = user;
+    next();
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+}
+
 app.get("/api/setup-required", async (req, res) => {
   const admin = await dbFindOne(db.users, { role: "admin" });
   res.json({ required: !admin });
@@ -248,15 +417,30 @@ app.get("/api/users", requireAdmin, async (req, res) => {
   res.json(users.map(u => ({ id: u._id, username: u.username, role: u.role, created_at: u.created_at, last_login: u.last_login })));
 });
 
+// Shared by user creation and the language-patch endpoint: checks whether a language
+// needs a bitmap-subtitle OCR allowlist entry, and logs + persists a pending notice if so.
+function checkNeedsOcrLanguage(language, userId, changedByUserId, changedByLabel) {
+  if (config.subtitle_ocr_mode === "all") return null;
+  const subLang = USER_LANG_TO_SUB_LANG[language];
+  if (!subLang) return null;
+  const current = getEffectiveOcrLanguages(); // Set, since mode isn't "all" here
+  if (current.has(subLang)) return null;
+  const who = changedByUserId === userId ? "användaren själv" : `admin (${changedByLabel || changedByUserId})`;
+  logSubtitle("warn", null, `Nytt användarspråk (${subtitleLangLabel(subLang)}) är inte i OCR-listan än – satt av ${who}`, { subLang, userId });
+  addPendingOcrRequest(subLang, userId);
+  return subLang;
+}
+
 app.post("/api/users", requireAdmin, async (req, res) => {
   try {
-    const { username, password, role = "user" } = req.body;
+    const { username, password, role = "user", language } = req.body;
     if (!username || !password || password.length < 6) return res.status(400).json({ error: "Ogiltiga uppgifter" });
     const existing = await dbFindOne(db.users, { username: username.trim() });
     if (existing) return res.status(409).json({ error: "Användarnamnet är upptaget" });
     const hash = await bcrypt.hash(password, 12);
-    const user = await dbInsert(db.users, { _id: uuidv4(), username: username.trim(), password_hash: hash, role, created_at: new Date().toISOString(), is_active: true });
-    res.json({ id: user._id, username: user.username, role: user.role });
+    const user = await dbInsert(db.users, { _id: uuidv4(), username: username.trim(), password_hash: hash, role, language: language || null, created_at: new Date().toISOString(), is_active: true });
+    const needsOcrLanguage = language ? checkNeedsOcrLanguage(language, user._id, req.user._id, req.user.username) : null;
+    res.json({ id: user._id, username: user.username, role: user.role, needsOcrLanguage });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -274,7 +458,81 @@ app.patch("/api/users/:id/language", requireAuth, async (req, res) => {
       return res.status(403).json({ error: "Ej tillåtet" });
     }
     await dbUpdate(db.users, { _id: req.params.id }, { $set: { language } });
+    const needsOcrLanguage = checkNeedsOcrLanguage(language, req.params.id, req.user._id, req.user.username);
+    res.json({ ok: true, needsOcrLanguage });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Add a language to the OCR allowlist and (optionally) queue a targeted backfill so
+// existing bitmap subtitles in that language get converted without redoing everything else.
+app.post("/api/subtitles/ocr-languages", requireAdmin, async (req, res) => {
+  try {
+    const { lang, backfill = true } = req.body;
+    const code = normalizeLangCode(lang);
+    if (!code || code === "und") return res.status(400).json({ error: "Ogiltig språkkod" });
+    const list = new Set(config.subtitle_ocr_languages && config.subtitle_ocr_languages.length
+      ? config.subtitle_ocr_languages
+      : [getServerDefaultSubLang(), "eng"]);
+    list.add(code);
+    config.subtitle_ocr_languages = [...list];
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
+    clearPendingOcrRequests(code); // this resolves any open notifications for that language
+    let queued = 0;
+    if (backfill) queued = await queueLanguageBackfill(code);
+    res.json({ ok: true, languages: config.subtitle_ocr_languages, queued });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get("/api/subtitles/ocr-languages", requireAuth, (req, res) => {
+  res.json({
+    mode: config.subtitle_ocr_mode || "selected",
+    languages: (config.subtitle_ocr_languages && config.subtitle_ocr_languages.length)
+      ? config.subtitle_ocr_languages
+      : [getServerDefaultSubLang(), "eng"]
+  });
+});
+
+// Active admin notification: users waiting on a new OCR subtitle language.
+// Persisted (config.json) so it's still there next time an admin logs in, not just a log line.
+app.get("/api/subtitles/ocr-pending", requireAdmin, async (req, res) => {
+  try {
+    res.json({ pending: await getPendingOcrRequestsWithUsernames() });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Dismiss a pending request WITHOUT adding the language (admin decided not to, for now)
+app.post("/api/subtitles/ocr-pending/dismiss", requireAdmin, async (req, res) => {
+  try {
+    const { lang, userId } = req.body;
+    if (Array.isArray(config.pending_ocr_requests)) {
+      config.pending_ocr_requests = config.pending_ocr_requests.filter(r => !(r.lang === lang && r.userId === userId));
+      fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
+    }
     res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post("/api/subtitles/ocr-mode", requireAdmin, async (req, res) => {
+  try {
+    const { mode } = req.body; // "all" | "selected"
+    if (!["all", "selected"].includes(mode)) return res.status(400).json({ error: "Ogiltigt läge" });
+    config.subtitle_ocr_mode = mode;
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
+    res.json({ ok: true, mode });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Removing a language just stops future OCR for it — already-cached files are left
+// on disk (cheap to keep, and removing them would mean redoing the work if re-added).
+app.delete("/api/subtitles/ocr-languages/:lang", requireAdmin, async (req, res) => {
+  try {
+    const code = normalizeLangCode(req.params.lang);
+    const current = config.subtitle_ocr_languages && config.subtitle_ocr_languages.length
+      ? config.subtitle_ocr_languages
+      : [getServerDefaultSubLang(), "eng"];
+    config.subtitle_ocr_languages = current.filter(l => l !== code);
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
+    res.json({ ok: true, languages: config.subtitle_ocr_languages });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -562,7 +820,7 @@ async function scanLibraries() {
 
 // Subtitle pre-cache queue - processes one film at a time to avoid CPU contention
 function queueSubtitleCache(item) {
-  _subtitleCacheQueue.push(item);
+  _subtitleCacheQueue.push({ item });
   if (item.type === "episode") _subtitleCacheTotalEps++;
   else _subtitleCacheTotal++;
   if (!_subtitleCacheRunning) {
@@ -571,12 +829,30 @@ function queueSubtitleCache(item) {
   }
 }
 
+// Queues a targeted re-cache pass for ONE language across the whole library. Used when
+// an admin adds a new language to the OCR allowlist (e.g. after a new user picks Norwegian) —
+// much cheaper than a full re-cache since every other already-cached language is left alone.
+async function queueLanguageBackfill(lang) {
+  const items = await dbFind(db.media, { type: { $in: ["movie", "episode"] } });
+  for (const item of items) {
+    _subtitleCacheQueue.push({ item, onlyLang: lang });
+    if (item.type === "episode") _subtitleCacheTotalEps++;
+    else _subtitleCacheTotal++;
+  }
+  logSubtitle("info", null, `Riktad efterhandscachning köad för språk "${subtitleLangLabel(lang)}" – ${items.length} filer`, { lang });
+  if (!_subtitleCacheRunning) {
+    _subtitleCacheRunning = true;
+    setTimeout(processSubtitleCacheQueue, 100);
+  }
+  return items.length;
+}
+
 async function processSubtitleCacheQueue() {
   while (_subtitleCacheQueue.length > 0) {
-    const item = _subtitleCacheQueue.shift();
+    const entry = _subtitleCacheQueue.shift();
 
     try {
-      await preCacheSubtitles(item);
+      await preCacheSubtitles(entry.item, { onlyLang: entry.onlyLang || null });
     } catch(e) {
       console.log("[SUBTITLES] Queue error:", e.message);
     }
@@ -587,10 +863,11 @@ async function processSubtitleCacheQueue() {
   _subtitleCacheRunning = false;
 }
 
-// Convert bitmap subtitle (PGS/VOBSUB) to SRT using PgsToSrt + Tesseract
+// Convert bitmap subtitle (PGS/VOBSUB) to SRT using PgsToSrt + Tesseract, for one specific language track
 async function convertPgsTosrt(item, subIdx, cacheFile, targetLang) {
   const { execFile } = require("child_process");
   const supFile = cacheFile.replace(".srt", ".sup");
+  const tessLang = TESSERACT_LANG_MAP[targetLang] || "eng";
   try {
     // Step 1: Extract .sup file with FFmpeg
     await new Promise((resolve, reject) => {
@@ -605,8 +882,6 @@ async function convertPgsTosrt(item, subIdx, cacheFile, targetLang) {
     });
 
     // Step 2: Convert .sup to .srt using PgsToSrt
-    const langMap = { "sv-SE": "swe", "no-NO": "nor", "da-DK": "dan", "fi-FI": "fin", "de-DE": "deu", "fr-FR": "fra", "es-ES": "spa", "nl-NL": "nld", "ja-JP": "jpn", "en-US": "eng" };
-    const tessLang = targetLang === "swe" ? "swe" : (langMap[config.language] || "eng");
     await new Promise((resolve, reject) => {
       execFile(PGSTOSRT_EXE, [
         "--input", supFile,
@@ -621,151 +896,208 @@ async function convertPgsTosrt(item, subIdx, cacheFile, targetLang) {
     // Cleanup .sup file
     try { fs.unlinkSync(supFile); } catch {}
 
-    if (fs.existsSync(cacheFile)) {
-      console.log(`[SUBTITLES] PgsToSrt converted ${targetLang} for:`, item.title);
-      _subtitleCacheDone++;
-      if (item.type === "episode") {
-        if (targetLang === "swe") _subtitleCacheWithSweEps++; else _subtitleCacheWithEngEps++;
-      } else {
-        if (targetLang === "swe") _subtitleCacheWithSwe++; else _subtitleCacheWithEng++;
-      }
-      dbUpdate(db.media, { _id: item._id }, { $set: { cached_subtitle_lang: targetLang } }).catch(() => {});
-      return true;
-    }
+    if (fs.existsSync(cacheFile)) return true;
+    logSubtitle("error", item, `PgsToSrt gav ingen utfil för spår ${subIdx} (${targetLang})`, { subIdx, targetLang, tessLang });
     return false;
   } catch(e) {
-    console.log("[SUBTITLES] PgsToSrt failed for", item.title, ":", e.message?.split("\n")[0]);
+    logSubtitle("error", item, `PgsToSrt-konvertering misslyckades för spår ${subIdx} (${targetLang})`, { subIdx, targetLang, tessLang, error: e.message?.split("\n")[0] });
     try { fs.unlinkSync(supFile); } catch {}
     try { fs.unlinkSync(cacheFile); } catch {}
     return false;
   }
 }
 
-// Pre-cache Swedish subtitles for a media file (runs sequentially via queue)
-function preCacheSubtitles(item) {
+// Extract one text-based embedded subtitle stream directly (no OCR needed)
+function extractTextSubtitle(item, subIdx, cacheFile) {
   return new Promise((resolve) => {
-    try {
-      const ffprobePath = getFfmpegPath().replace("ffmpeg.exe", "ffprobe.exe");
-      const { execFile } = require("child_process");
+    const { execFile } = require("child_process");
+    const tempFile = cacheFile.replace(".srt", ".part.srt");
+    try { if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile); } catch {}
+    execFile(getFfmpegPath(), [
+      "-y", "-i", item.file_path,
+      "-map", "0:s:" + subIdx,
+      "-f", "srt", "-c:s", "srt",
+      tempFile
+    ], { timeout: 300000, windowsHide: true }, (err) => {
+      if (err) {
+        try { fs.unlinkSync(tempFile); } catch {}
+        resolve({ ok: false, error: err.message || String(err) });
+        return;
+      }
+      try {
+        fs.renameSync(tempFile, cacheFile);
+        resolve({ ok: true });
+      } catch(e) {
+        resolve({ ok: false, error: e.message });
+      }
+    });
+  });
+}
+
+// Pre-cache ALL subtitle languages for a media file (runs sequentially via queue,
+// one file at a time, so a big library never competes with playback/transcoding).
+// - Text-based embedded tracks: cached for every language found (cheap, no OCR)
+// - Bitmap (PGS/VOBSUB) tracks: OCR-converted for every language found (slow, but
+//   only ever needs to happen once per file since results are cached on disk)
+// - External .srt files next to the video: cached per detected language suffix
+async function preCacheSubtitles(item, opts) {
+  const onlyLang = opts?.onlyLang || null;
+  // If this is a targeted backfill for one language, that language is explicitly wanted,
+  // so OCR runs for it regardless of the general allowlist. Otherwise use the admin's list.
+  const ocrLangs = onlyLang ? new Set([onlyLang]) : getEffectiveOcrLanguages(); // null = allow all
+  const startedAt = Date.now();
+  const cacheDir = path.join(DATA_DIR, "subtitle-cache");
+  if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir, { recursive: true });
+  const cachedLangs = new Set();
+  let hadGatedSkip = false;   // a bitmap track exists but is intentionally not OCR'd (allowlist or missing tool)
+  let hadRealFailure = false; // something actually went wrong (extraction/conversion error)
+
+  // 1. Embedded subtitle streams via ffprobe
+  let streams = [];
+  try {
+    const ffprobePath = getFfmpegPath().replace("ffmpeg.exe", "ffprobe.exe");
+    const { execFile } = require("child_process");
+    streams = await new Promise((resolve) => {
       execFile(ffprobePath, [
         "-v", "quiet", "-print_format", "json", "-show_streams",
         "-select_streams", "s", item.file_path
       ], { timeout: 30000, windowsHide: true }, (err, stdout) => {
-        if (err) { console.log("[SUBTITLES] ffprobe error for", item.title, ":", err.message?.split("\n")[0]); return resolve(); }
-        try {
-          const data = JSON.parse(stdout);
-          const streams = data.streams || [];
-          if (!streams.length) return resolve();
-          const cacheDir = path.join(DATA_DIR, "subtitle-cache");
-          if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir, { recursive: true });
-
-          // Find Swedish subtitle stream
-          // TODO: when per-user language preference is implemented, use preferred language here
-          const sweStream = streams.find(s => {
-            const lang = (s.tags?.language || "").toLowerCase();
-            const title = (s.tags?.title || "").toLowerCase();
-            return lang === "swe" || lang === "sv" || title.includes("svenska") || title.includes("swedish");
-          });
-          // Find English subtitle stream (used as fallback if no Swedish)
-          const engStream = streams.find(s => {
-            const lang = (s.tags?.language || "").toLowerCase();
-            return lang === "eng" || lang === "en";
-          });
-          // Check for external SRT file next to the video file
-          const videoDir = path.dirname(item.file_path);
-          const videoBase = path.basename(item.file_path, path.extname(item.file_path));
-          const externalSrt = [
-            path.join(videoDir, videoBase + ".srt"),
-            path.join(videoDir, videoBase + ".sv.srt"),
-            path.join(videoDir, videoBase + ".swe.srt"),
-            path.join(videoDir, videoBase + ".Swedish.srt"),
-          ].find(f => fs.existsSync(f));
-
-          if (!sweStream && externalSrt) {
-            // Use external SRT directly
-            const cacheDir = path.join(DATA_DIR, "subtitle-cache");
-            if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir, { recursive: true });
-            // Use short hash to avoid Windows MAX_PATH issues
-            const shortId = require("crypto").createHash("md5").update(item._id).digest("hex");
-            const cacheFile = path.join(cacheDir, shortId + "_ext.srt");
-            if (!fs.existsSync(cacheFile)) {
-              try {
-                fs.copyFileSync(externalSrt, cacheFile);
-                if (item.type === "episode") _subtitleCacheWithExtSrtEps++;
-                else _subtitleCacheWithExtSrt++;
-                _subtitleCacheDone++;
-                console.log("[SUBTITLES] Found external SRT for:", item.title);
-              } catch(e) {}
-            }
-            return resolve();
-          }
-
-          // Pick best available stream: prefer Swedish, fall back to English
-          const targetStream = sweStream || engStream;
-          const targetLang = sweStream ? "swe" : "eng";
-          if (!targetStream) return resolve(); // No usable subtitle found, skip silently
-          // Use subtitle-relative index for -map 0:s:N
-          const subIdx = streams.indexOf(targetStream);
-
-          const cacheFile = path.join(cacheDir, item._id + "_" + subIdx + ".srt");
-          if (fs.existsSync(cacheFile)) return resolve(); // already cached
-          // Use .srt.part extension so FFmpeg recognizes the format
-          const tempFile = cacheFile.replace(".srt", ".part.srt");
-          if (fs.existsSync(tempFile)) {
-            // Remove stale tmp file from previous failed attempt
-            try { fs.unlinkSync(tempFile); } catch {}
-          }
-
-          const ffmpegPathNow = getFfmpegPath();
-          console.log(`[SUBTITLES] Pre-caching ${targetLang} for:`, item.title);
-          execFile(ffmpegPathNow, [
-            "-y", "-i", item.file_path,
-            "-map", "0:s:" + subIdx,
-            "-f", "srt", "-c:s", "srt",
-            tempFile
-          ], { timeout: 300000, windowsHide: true }, (err2) => {
-            if (err2) {
-              try { fs.unlinkSync(tempFile); } catch {}
-              const errMsg = err2.message || String(err2);
-              if (errMsg.includes("bitmap to bitmap") || errMsg.includes("only possible from text")) {
-                // Bitmap subtitle - try PgsToSrt if installed
-                if (isPgsToSrtInstalled()) {
-                  console.log("[SUBTITLES] Bitmap subtitle detected, trying PgsToSrt for:", item.title);
-                  convertPgsTosrt(item, subIdx, cacheFile, targetLang).then(ok => {
-                    if (!ok) _subtitleCacheErrors++;
-                    resolve();
-                  });
-                  return; // resolve() called inside convertPgsTosrt callback
-                } else {
-                  console.log("[SUBTITLES] Skipping bitmap subtitle for:", item.title, "(PgsToSrt not installed)");
-                  _subtitleCacheErrors++;
-                }
-              } else {
-                console.log("[SUBTITLES] Pre-cache error for", item.title, ":", errMsg.split("\n")[0]);
-                _subtitleCacheErrors++;
-              }
-            } else {
-              try {
-                fs.renameSync(tempFile, cacheFile);
-                console.log(`[SUBTITLES] Pre-cached ${targetLang} for:`, item.title);
-                _subtitleCacheDone++;
-                if (item.type === "episode") {
-                  if (targetLang === "swe") _subtitleCacheWithSweEps++; else _subtitleCacheWithEngEps++;
-                } else {
-                  if (targetLang === "swe") _subtitleCacheWithSwe++; else _subtitleCacheWithEng++;
-                }
-                // Save the cached subtitle's language to DB for accurate re-counting later
-                dbUpdate(db.media, { _id: item._id }, { $set: { cached_subtitle_lang: targetLang } })
-                  .then(n => console.log(`[SUBTITLES] DB updated for ${item.title}, lang: ${targetLang}, affected: ${n}`))
-                  .catch(e => console.log(`[SUBTITLES] DB update FAILED for ${item.title}:`, e.message));
-              } catch(e) {}
-            }
-            resolve();
-          });
-        } catch(e) { resolve(); }
+        if (err) { logSubtitle("warn", item, "ffprobe misslyckades – hoppar över inbäddade spår", { error: err.message?.split("\n")[0] }); return resolve([]); }
+        try { resolve(JSON.parse(stdout).streams || []); }
+        catch(e) { logSubtitle("warn", item, "Kunde inte tolka ffprobe-resultatet", { error: e.message }); resolve([]); }
       });
-    } catch(e) { resolve(); }
-  });
+    });
+  } catch(e) {
+    logSubtitle("error", item, "Oväntat fel vid inläsning av undertextspår", { error: e.message });
+  }
+
+  const bitmapCodecs = ["hdmv_pgs_subtitle", "dvd_subtitle", "dvdsub", "xsub", "dvb_subtitle"];
+
+  for (let subIdx = 0; subIdx < streams.length; subIdx++) {
+    const s = streams[subIdx];
+    const rawLang = s.tags?.language || s.tags?.LANGUAGE || "und";
+    const lang = normalizeLangCode(rawLang);
+    if (onlyLang && lang !== onlyLang) continue; // targeted backfill: skip everything else
+    const codec = s.codec_name || "";
+    const cacheFile = path.join(cacheDir, `${item._id}_${subIdx}_${lang}.srt`);
+    if (fs.existsSync(cacheFile)) { cachedLangs.add(lang); continue; }
+
+    if (bitmapCodecs.includes(codec)) {
+      if (ocrLangs !== null && !ocrLangs.has(lang)) {
+        logSubtitle("info", item, `Bildbaserat spår (${subtitleLangLabel(lang)}) hoppas över – inte i OCR-listan just nu`, { subIdx, lang, codec });
+        hadGatedSkip = true;
+        continue;
+      }
+      if (!isPgsToSrtInstalled()) {
+        logSubtitle("warn", item, `Bildbaserat spår (${subtitleLangLabel(lang)}) hoppas över – PgsToSrt är inte installerat`, { subIdx, lang, codec });
+        hadGatedSkip = true;
+        continue;
+      }
+      const t0 = Date.now();
+      const ok = await convertPgsTosrt(item, subIdx, cacheFile, lang);
+      const secs = ((Date.now() - t0) / 1000).toFixed(1);
+      if (ok) {
+        cachedLangs.add(lang);
+        logSubtitle("info", item, `Bildbaserad undertext konverterad – ${subtitleLangLabel(lang)} på ${secs}s`, { subIdx, lang });
+      } else {
+        logSubtitle("error", item, `Kunde inte konvertera bildbaserad undertext – ${subtitleLangLabel(lang)}`, { subIdx, lang, codec });
+        hadRealFailure = true;
+      }
+      continue;
+    }
+
+    // Text-based track: cheap direct extraction, done regardless of the OCR allowlist
+    const t0 = Date.now();
+    const result = await extractTextSubtitle(item, subIdx, cacheFile);
+    const secs = ((Date.now() - t0) / 1000).toFixed(1);
+    if (result.ok) {
+      cachedLangs.add(lang);
+      logSubtitle("info", item, `Textbaserad undertext cachad – ${subtitleLangLabel(lang)} på ${secs}s`, { subIdx, lang });
+    } else {
+      const errMsg = result.error || "";
+      if (errMsg.includes("bitmap to bitmap") || errMsg.includes("only possible from text")) {
+        // ffprobe said "text" but ffmpeg disagrees – treat as bitmap after all
+        if (ocrLangs !== null && !ocrLangs.has(lang)) {
+          logSubtitle("info", item, `Bildbaserat spår (${subtitleLangLabel(lang)}, upptäckt sent) hoppas över – inte i OCR-listan just nu`, { subIdx, lang });
+          hadGatedSkip = true;
+        } else if (isPgsToSrtInstalled()) {
+          const t1 = Date.now();
+          const ok = await convertPgsTosrt(item, subIdx, cacheFile, lang);
+          const secs2 = ((Date.now() - t1) / 1000).toFixed(1);
+          if (ok) {
+            cachedLangs.add(lang);
+            logSubtitle("info", item, `Bildbaserad undertext (upptäckt sent) konverterad – ${subtitleLangLabel(lang)} på ${secs2}s`, { subIdx, lang });
+          } else {
+            logSubtitle("error", item, `Kunde inte konvertera sent upptäckt bildbaserad undertext – ${subtitleLangLabel(lang)}`, { subIdx, lang });
+            hadRealFailure = true;
+          }
+        } else {
+          logSubtitle("warn", item, `Bildbaserat spår (${subtitleLangLabel(lang)}) hoppas över – PgsToSrt är inte installerat`, { subIdx, lang, codec });
+          hadGatedSkip = true;
+        }
+      } else {
+        logSubtitle("error", item, `Kunde inte extrahera textbaserad undertext – ${subtitleLangLabel(lang)}`, { subIdx, lang, codec, error: errMsg.split("\n")[0] });
+        hadRealFailure = true;
+      }
+    }
+  }
+
+  // 2. External .srt files next to the video file (movie.srt, movie.sv.srt, movie.no.srt, ...)
+  try {
+    const videoDir = path.dirname(item.file_path);
+    const videoBase = path.basename(item.file_path, path.extname(item.file_path)).toLowerCase();
+    const shortId = require("crypto").createHash("md5").update(item._id).digest("hex");
+    const localFiles = fs.readdirSync(videoDir).filter(f => f.toLowerCase().endsWith(".srt"));
+    for (const file of localFiles) {
+      const fileLower = file.toLowerCase();
+      if (!fileLower.startsWith(videoBase)) continue; // only files that clearly belong to this video
+      const suffix = fileLower.slice(videoBase.length).replace(/\.srt$/, "").replace(/^\./, "");
+      const lang = suffix ? normalizeLangCode(suffix) : "und";
+      if (onlyLang && lang !== onlyLang) continue; // targeted backfill: skip everything else
+      const extCacheFile = path.join(cacheDir, `${shortId}_ext_${lang}.srt`);
+      if (fs.existsSync(extCacheFile)) { cachedLangs.add(lang); continue; }
+      try {
+        fs.copyFileSync(path.join(videoDir, file), extCacheFile);
+        cachedLangs.add(lang);
+        logSubtitle("info", item, `Extern undertextfil hittad och cachad – ${subtitleLangLabel(lang)}`, { file });
+      } catch(e) {
+        logSubtitle("error", item, `Kunde inte kopiera extern undertextfil – ${subtitleLangLabel(lang)}`, { file, error: e.message });
+      }
+    }
+  } catch(e) {
+    logSubtitle("warn", item, "Kunde inte söka efter externa undertextfiler", { error: e.message });
+  }
+
+  const totalSecs = ((Date.now() - startedAt) / 1000).toFixed(1);
+  if (cachedLangs.size > 0) {
+    _subtitleCacheDone++;
+    const langList = [...cachedLangs];
+    if (langList.includes("swe")) { if (item.type === "episode") _subtitleCacheWithSweEps++; else _subtitleCacheWithSwe++; }
+    if (langList.includes("eng")) { if (item.type === "episode") _subtitleCacheWithEngEps++; else _subtitleCacheWithEng++; }
+    // Merge with whatever was already recorded, so a targeted backfill (or a second pass)
+    // doesn't wipe out languages found in an earlier pass.
+    dbFindOne(db.media, { _id: item._id }).then(fresh => {
+      const merged = Array.from(new Set([...(fresh?.cached_subtitle_langs || []), ...langList]));
+      return dbUpdate(db.media, { _id: item._id }, { $set: { cached_subtitle_langs: merged, cached_subtitle_lang: merged[0] } });
+    })
+      .then(() => logSubtitle("info", item, `Klar – ${langList.length} språk cachade nu (${langList.map(subtitleLangLabel).join(", ")}) på totalt ${totalSecs}s`))
+      .catch(e => logSubtitle("error", item, "Kunde inte spara cachade språk i databasen", { error: e.message }));
+  } else if (onlyLang) {
+    // A targeted backfill simply finding nothing for that one language isn't an error.
+  } else if (hadRealFailure) {
+    // Something genuinely went wrong (extraction/conversion error) — worth a look in the log.
+    _subtitleCacheErrors++;
+    if (item.type === "episode") _subtitleCacheFailedEps++; else _subtitleCacheFailed++;
+    logSubtitle("warn", item, "Inga undertexter kunde cachas för den här filen (se tidigare rader för orsak)");
+  } else if (hadGatedSkip) {
+    // Bitmap subtitle(s) exist but are intentionally not OCR'd yet (allowlist or missing tool) —
+    // expected behavior, not a failure. Tracked separately so the dashboard doesn't cry wolf.
+    if (item.type === "episode") _subtitleCacheGatedEps++; else _subtitleCacheGated++;
+  } else {
+    // This file simply has no subtitles at all (no embedded tracks, no external files) —
+    // completely normal for a lot of media, not worth flagging as an error either.
+    if (item.type === "episode") _subtitleCacheNoSubsEps++; else _subtitleCacheNoSubs++;
+  }
 }
 
 // Search OpenSubtitles for a subtitle and cache it
@@ -1157,7 +1489,7 @@ async function getDuration(item) {
 }
 
 // ── DIRECT STREAM (for native formats) ─────────────────────────────────────────
-app.get("/api/stream/:id", requireAuth, async (req, res) => {
+app.get("/api/stream/:id", requireMediaAccess, async (req, res) => {
   const item = await dbFindOne(db.media, { _id: req.params.id });
   if (!item?.file_path || !fs.existsSync(item.file_path))
     return res.status(404).json({ error: "Fil hittades inte" });
@@ -1190,7 +1522,40 @@ app.get("/api/stream/:id", requireAuth, async (req, res) => {
 
 // ── HLS TRANSCODING ─────────────────────────────────────────────────────────────
 // Returns info about what playback method to use
-app.get("/api/playback/:id", requireAuth, async (req, res) => {
+// Normalizes codec names so minor naming differences between clients (ExoPlayer/MediaFormat,
+// ffprobe, other platforms) don't cause false mismatches. Keys and values are both lowercase.
+// Shared by /api/playback/:id (deciding direct vs. transcode) and startDashTranscode (deciding
+// whether video can be copied as-is instead of re-encoded).
+const CODEC_ALIASES = {
+  // video
+  avc: "h264", "avc1": "h264", "h.264": "h264",
+  hevc1: "hevc", "h.265": "hevc", h265: "hevc",
+  vp09: "vp9", av01: "av1",
+  // audio
+  "ec-3": "eac3", ec3: "eac3", "dd+": "eac3",
+  "ac-3": "ac3", dd: "ac3",
+  "dts-hd": "dts", dtshd: "dts",
+  mp4a: "aac", "aac-lc": "aac"
+};
+function normalizeCodec(c) {
+  const v = (c || "").toLowerCase().trim();
+  return CODEC_ALIASES[v] || v;
+}
+// Query params can arrive as a single string or (if repeated) an array — always coerce to
+// a string first. Also cap length/entries defensively against malformed or abusive input.
+function parseCodecList(raw) {
+  const str = Array.isArray(raw) ? raw.join(",") : String(raw || "");
+  return new Set(
+    str.slice(0, 500) // hard cap on input length
+      .toLowerCase()
+      .split(",")
+      .map(s => normalizeCodec(s.trim()))
+      .filter(Boolean)
+      .slice(0, 20) // hard cap on number of entries
+  );
+}
+
+app.get("/api/playback/:id", requireMediaAccess, async (req, res) => {
   const item = await dbFindOne(db.media, { _id: req.params.id });
   if (!item?.file_path || !fs.existsSync(item.file_path))
     return res.status(404).json({ error: "Fil hittades inte" });
@@ -1200,38 +1565,101 @@ app.get("/api/playback/:id", requireAuth, async (req, res) => {
   const duration = await getDuration(item);
   const token = req.query.token || "";
 
-  // Check if transcoding is needed
-  let needsTranscode = !canDirectPlay(ext, ua);
-  if (!needsTranscode && (ext === ".mkv" || ext === ".mp4")) {
-    // Force transcode for H.265
-    if (item.codec && (item.codec.includes("hevc") || item.codec.includes("h265") || item.codec.includes("265"))) {
-      needsTranscode = true;
-      console.log(`[PLAYBACK] ${item.title}: H.265 detected, forcing DASH`);
+  // Get the audio codec once, since both the browser path and the capability path need it.
+  // Only probed on demand since it's the one check here that actually shells out to ffprobe.
+  async function getAudioCodec() {
+    try {
+      const { execFileSync } = require("child_process");
+      const ffprobe = getFfprobePath();
+      const out = execFileSync(ffprobe, [
+        "-v", "quiet", "-show_streams", "-select_streams", "a:0",
+        "-show_entries", "stream=codec_name",
+        "-of", "json", item.file_path
+      ], { timeout: 8000, windowsHide: true }).toString();
+      return normalizeCodec(JSON.parse(out).streams?.[0]?.codec_name || "");
+    } catch(e) {
+      console.log("[PLAYBACK] ffprobe audio check failed:", e.message);
+      return "";
     }
-    // Force transcode for AC3/DTS audio (Chrome can't play these)
-    if (!needsTranscode) {
-      try {
-        const { execFileSync } = require("child_process");
-        const ffprobe = getFfprobePath();
-        const out = execFileSync(ffprobe, [
-          "-v", "quiet", "-show_streams", "-select_streams", "a:0",
-          "-show_entries", "stream=codec_name",
-          "-of", "json", item.file_path
-        ], { timeout: 8000, windowsHide: true }).toString();
-        const probe = JSON.parse(out);
-        const audioCodec = (probe.streams?.[0]?.codec_name || "").toLowerCase();
+  }
+
+  // Defensive re-probe: getDuration() should already have cached item.codec, but if it's
+  // still missing for some reason, verify with a direct probe rather than assuming compatible —
+  // silently trusting an unknown codec is exactly the kind of gap that causes broken playback.
+  async function getVideoCodec() {
+    if (item.codec) return normalizeCodec(item.codec);
+    try {
+      const { execFileSync } = require("child_process");
+      const out = execFileSync(getFfprobePath(), [
+        "-v", "quiet", "-show_streams", "-select_streams", "v:0",
+        "-show_entries", "stream=codec_name",
+        "-of", "json", item.file_path
+      ], { timeout: 8000, windowsHide: true }).toString();
+      return normalizeCodec(JSON.parse(out).streams?.[0]?.codec_name || "");
+    } catch(e) {
+      console.log("[PLAYBACK] ffprobe video check failed:", e.message);
+      return "";
+    }
+  }
+
+  let needsTranscode;
+
+  // Capability-based negotiation: a native app (Android/iOS/etc.) can tell us exactly what
+  // it supports instead of us guessing from the User-Agent. Any client sending these query
+  // params opts into this path; browsers that don't send them keep the existing behavior below.
+  const hasCapParams = req.query.direct_containers || req.query.direct_video_codecs || req.query.direct_audio_codecs;
+
+  if (hasCapParams) {
+    const containers = parseCodecList(req.query.direct_containers);
+    const videoCodecs = parseCodecList(req.query.direct_video_codecs);
+    const audioCodecs = parseCodecList(req.query.direct_audio_codecs);
+    const reasons = [];
+
+    // Cheapest check first: container/extension, no probing needed.
+    const containerOk = containers.size === 0 || containers.has(ext.replace(".", ""));
+    if (!containerOk) reasons.push(`container "${ext.replace(".", "")}" not in [${[...containers].join(",")}]`);
+
+    // Video codec: already cached by getDuration() in the vast majority of cases, so this is
+    // normally free too. Falls back to a fresh probe only if genuinely unknown (see above).
+    let videoOk = true;
+    if (containerOk && videoCodecs.size > 0) {
+      const videoCodec = await getVideoCodec();
+      videoOk = !videoCodec || videoCodecs.has(videoCodec);
+      if (!videoOk) reasons.push(`video codec "${videoCodec}" not in [${[...videoCodecs].join(",")}]`);
+    }
+
+    // Audio codec: the one check that always needs an ffprobe call, so only run it if the
+    // cheaper checks above already passed — no point probing a file we're transcoding anyway.
+    let audioOk = true;
+    if (containerOk && videoOk && audioCodecs.size > 0) {
+      const audioCodec = await getAudioCodec();
+      audioOk = !audioCodec || audioCodecs.has(audioCodec);
+      if (!audioOk) reasons.push(`audio codec "${audioCodec}" not in [${[...audioCodecs].join(",")}]`);
+    }
+
+    needsTranscode = !(containerOk && videoOk && audioOk);
+    console.log(`[PLAYBACK] ${item.title} (${ext}): capability-based, method=${needsTranscode ? "dash" : "direct"}${reasons.length ? " – " + reasons.join("; ") : ""} ua=${ua.slice(0, 40)}`);
+  } else {
+    // Existing browser-oriented logic (Chrome/Edge), unchanged.
+    needsTranscode = !canDirectPlay(ext, ua);
+    if (!needsTranscode && (ext === ".mkv" || ext === ".mp4")) {
+      // Force transcode for H.265
+      if (item.codec && (item.codec.includes("hevc") || item.codec.includes("h265") || item.codec.includes("265"))) {
+        needsTranscode = true;
+        console.log(`[PLAYBACK] ${item.title}: H.265 detected, forcing DASH`);
+      }
+      // Force transcode for AC3/DTS audio (Chrome can't play these)
+      if (!needsTranscode) {
+        const audioCodec = await getAudioCodec();
         const incompatibleAudio = ["ac3", "dts", "truehd", "eac3", "mlp"];
         if (incompatibleAudio.some(c => audioCodec.includes(c))) {
           needsTranscode = true;
           console.log(`[PLAYBACK] ${item.title}: ${audioCodec} audio detected, forcing DASH`);
         }
-      } catch(e) {
-        console.log("[PLAYBACK] ffprobe audio check failed:", e.message);
       }
     }
+    console.log(`[PLAYBACK] ${item.title} (${ext}): method=${needsTranscode ? "dash" : "direct"} ua=${ua.includes("edg") ? "Edge" : "Chrome"}`);
   }
-
-  console.log(`[PLAYBACK] ${item.title} (${ext}): method=${needsTranscode ? "dash" : "direct"} ua=${ua.includes("edg") ? "Edge" : "Chrome"}`);
 
   res.json({
     method: needsTranscode ? "dash" : "direct",
@@ -1241,6 +1669,103 @@ app.get("/api/playback/:id", requireAuth, async (req, res) => {
     duration,
     title: item.title
   });
+});
+
+// ── OFFLINE DOWNLOADS (native apps) ────────────────────────────────────────────
+// Issues a media-scoped download token: valid ONLY for this one file, for this one user,
+// for 7 days instead of the normal 24h session token. Meant for background downloads on
+// mobile that can take a long time on a slow connection — the app shouldn't have to juggle
+// session refresh mid-download just to keep a multi-gigabyte transfer alive.
+app.post("/api/media/:id/download-token", requireAuth, async (req, res) => {
+  try {
+    const item = await dbFindOne(db.media, { _id: req.params.id });
+    if (!item) return res.status(404).json({ error: "Hittades inte" });
+    if (!userHasLibraryAccess(req.user, item.library_id)) return res.status(403).json({ error: "Ingen åtkomst till detta bibliotek" });
+    const dtoken = jwt.sign({ userId: req.user._id, mediaId: item._id, type: "download" }, config.jwt_secret, { expiresIn: "7d" });
+    res.json({ dtoken, expiresIn: "7d" });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// One-stop endpoint for a native app building an offline download: returns the raw video
+// download URL (always the original file — offline playback uses the device's own decoders,
+// so none of the streaming-time direct/DASH capability logic applies here) plus every
+// cached subtitle language available right now, so subtitles can be bundled offline too.
+app.get("/api/media/:id/offline-manifest", requireAuth, async (req, res) => {
+  try {
+    const item = await dbFindOne(db.media, { _id: req.params.id });
+    if (!item?.file_path || !fs.existsSync(item.file_path)) return res.status(404).json({ error: "Hittades inte" });
+    if (!userHasLibraryAccess(req.user, item.library_id)) return res.status(403).json({ error: "Ingen åtkomst till detta bibliotek" });
+
+    const dtoken = jwt.sign({ userId: req.user._id, mediaId: item._id, type: "download" }, config.jwt_secret, { expiresIn: "7d" });
+    const stat = fs.statSync(item.file_path);
+    const duration = await getDuration(item);
+
+    // Gather every subtitle language already cached for this item (embedded/converted + external).
+    const subtitles = [];
+    try {
+      const cacheDir = path.join(DATA_DIR, "subtitle-cache");
+      const shortId = require("crypto").createHash("md5").update(item._id).digest("hex");
+      const cacheFiles = fs.existsSync(cacheDir) ? fs.readdirSync(cacheDir) : [];
+      const ownCached = cacheFiles.filter(f => f.startsWith(item._id + "_") && f.endsWith(".srt"));
+      for (const file of ownCached) {
+        const m = file.match(/_(\d+)_([a-z0-9]+)\.srt$/);
+        const lang = m ? m[2] : "und";
+        subtitles.push({ lang, label: subtitleLangLabel(lang), url: `/api/media/${item._id}/subtitle-cache?file=${encodeURIComponent(file)}&dtoken=${dtoken}` });
+      }
+      const extCached = cacheFiles.filter(f => f.startsWith(shortId + "_ext_") && f.endsWith(".srt"));
+      for (const file of extCached) {
+        const m = file.match(/_ext_([a-z0-9]+)\.srt$/);
+        const lang = m ? m[1] : "und";
+        if (!subtitles.some(s => s.lang === lang)) {
+          subtitles.push({ lang, label: subtitleLangLabel(lang), url: `/api/media/${item._id}/subtitle-cache?file=${encodeURIComponent(file)}&dtoken=${dtoken}` });
+        }
+      }
+    } catch(e) {
+      logSubtitle("warn", item, "Kunde inte lista undertexter för offline-manifest", { error: e.message });
+    }
+
+    res.json({
+      title: item.title,
+      duration,
+      sizeBytes: stat.size,
+      videoUrl: `/api/media/${item._id}/download?dtoken=${dtoken}`,
+      subtitles,
+      dtoken,
+      expiresIn: "7d"
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Serves the raw original file for offline download — same byte-range support as /api/stream/:id
+// (so downloads can pause/resume), but with an attachment header and always the untouched
+// original, regardless of what device is asking. Accepts the same media-scoped download token.
+app.get("/api/media/:id/download", requireMediaAccess, async (req, res) => {
+  const item = req.mediaItem;
+  if (!item?.file_path || !fs.existsSync(item.file_path))
+    return res.status(404).json({ error: "Fil hittades inte" });
+
+  const ext = path.extname(item.file_path).toLowerCase();
+  const stat = fs.statSync(item.file_path);
+  const contentType = MIME[ext] || "video/mp4";
+  const range = req.headers.range;
+  const filename = encodeURIComponent((item.title || "video") + ext);
+
+  const baseHeaders = {
+    "Content-Type": contentType,
+    "Accept-Ranges": "bytes",
+    "Content-Disposition": `attachment; filename*=UTF-8''${filename}`
+  };
+
+  if (range) {
+    const [s, e] = range.replace(/bytes=/, "").split("-");
+    const start = parseInt(s, 10);
+    const end = e ? parseInt(e, 10) : stat.size - 1;
+    res.writeHead(206, { ...baseHeaders, "Content-Range": `bytes ${start}-${end}/${stat.size}`, "Content-Length": end - start + 1 });
+    fs.createReadStream(item.file_path, { start, end }).pipe(res);
+  } else {
+    res.writeHead(200, { ...baseHeaders, "Content-Length": stat.size });
+    fs.createReadStream(item.file_path).pipe(res);
+  }
 });
 
 async function startHlsTranscode(item, startSec = 0) {
@@ -1349,7 +1874,7 @@ async function startHlsTranscode(item, startSec = 0) {
 const activeDashTranscodes = new Map();
 const seekLocks = new Map(); // Prevent concurrent seeks for same item
 
-async function startDashTranscode(item, seekSec = 0, audioTrackIndex = null) {
+async function startDashTranscode(item, seekSec = 0, audioTrackIndex = null, allowedVideoCodecs = null) {
   const itemId = item._id;
   const dashDir = path.join(DASH_CACHE, itemId);
   fs.mkdirSync(dashDir, { recursive: true });
@@ -1396,12 +1921,20 @@ async function startDashTranscode(item, seekSec = 0, audioTrackIndex = null) {
     videoFilterArgs = ["-vf", "format=yuv420p"];
   }
 
-  // Check if video can be copied directly (already H264, no HDR/4K conversion needed)
-  const itemCodec = (item.codec || "").toLowerCase();
-  const canCopyVideo = !is4kHdr && (itemCodec === "h264" || itemCodec === "avc") && seekSec === 0;
-  
+  // Check if video can be copied directly instead of re-encoded:
+  //  - H264 always qualifies (universally supported, matches old browser-only behavior)
+  //  - HEVC qualifies too, but ONLY if the client explicitly told us it can decode HEVC
+  //    (via direct_video_codecs on /api/dash/:id/start or /seek) — otherwise transcoding
+  //    to H264 is still required for compatibility, same as before.
+  // This is what prevents a needless full video re-encode when the ONLY reason DASH was
+  // chosen is an unsupported audio codec (e.g. AC3 without passthrough) on an HEVC file.
+  const itemCodec = normalizeCodec(item.codec || "");
+  const canCopyH264 = itemCodec === "h264";
+  const canCopyHevc = itemCodec === "hevc" && allowedVideoCodecs && allowedVideoCodecs.has("hevc");
+  const canCopyVideo = !is4kHdr && (canCopyH264 || canCopyHevc) && seekSec === 0;
+
   if (canCopyVideo) {
-    console.log(`[DASH] Using encoder: copy (H264 passthrough)`);
+    console.log(`[DASH] Using encoder: copy (${canCopyHevc ? "HEVC" : "H264"} passthrough)`);
   } else {
     console.log(`[DASH] Using encoder: ${encoder}`);
   }
@@ -1413,7 +1946,7 @@ async function startDashTranscode(item, seekSec = 0, audioTrackIndex = null) {
   const dashEncoderArgs = encoder === "h264_amf" ? [] : [...extraArgs];
 
   const videoArgs = canCopyVideo
-    ? ["-c:v", "copy", "-bsf:v", "h264_mp4toannexb"]
+    ? ["-c:v", "copy", "-bsf:v", canCopyHevc ? "hevc_mp4toannexb" : "h264_mp4toannexb"]
     : [...videoFilterArgs, "-c:v", encoder, ...dashEncoderArgs, "-b:v", "4000k"];
 
   // Audio stream selection - use specific track if requested, otherwise pick best audio stream
@@ -1513,6 +2046,10 @@ app.post("/api/dash/:id/start", requireAuth, async (req, res) => {
 
   const startSec = parseInt(req.body?.startSec || "0");
   const audioTrack = req.body?.audioTrack !== undefined ? parseInt(req.body.audioTrack) : null;
+  // Same capability hint as /api/playback/:id: if the client says it can decode HEVC directly,
+  // we can copy the video stream as-is here too instead of re-encoding it just because audio
+  // needed fixing. Absent for browsers, which keeps their existing H264-only behavior.
+  const allowedVideoCodecs = req.query.direct_video_codecs ? parseCodecList(req.query.direct_video_codecs) : null;
 
   // Kill existing transcode if starting from different position
   const existing = activeDashTranscodes.get(item._id);
@@ -1523,11 +2060,11 @@ app.post("/api/dash/:id/start", requireAuth, async (req, res) => {
       try { oldProc.kill("SIGKILL"); } catch {}
       // Wait for old process to fully release file locks on Windows
       await new Promise(r => setTimeout(r, 3000));
-      startDashTranscode(item, startSec, audioTrack);
+      startDashTranscode(item, startSec, audioTrack, allowedVideoCodecs);
     }
     // else reuse existing
   } else {
-    startDashTranscode(item, startSec, audioTrack);
+    startDashTranscode(item, startSec, audioTrack, allowedVideoCodecs);
   }
 
   // Wait for first media segment (means FFmpeg is running and writing data)
@@ -1573,7 +2110,8 @@ app.post("/api/dash/:id/seek", requireAuth, async (req, res) => {
 
   // startDashTranscode handles kill + 2s wait + clear internally
   const seekAudioTrack = req.body?.audioTrack !== undefined ? parseInt(req.body.audioTrack) : null;
-  await startDashTranscode(item, seekSec, seekAudioTrack);
+  const seekAllowedVideoCodecs = req.query.direct_video_codecs ? parseCodecList(req.query.direct_video_codecs) : null;
+  await startDashTranscode(item, seekSec, seekAudioTrack, seekAllowedVideoCodecs);
 
   // Wait for MPD + first segment (or init segment as fallback)
   const initSeg = path.join(dashDir, "init-stream0.mp4");
@@ -1852,7 +2390,7 @@ app.get("/api/media/:id/subtitles", requireAuth, async (req, res) => {
 
     const subtitles = [];
 
-    // 1. Check for .srt files in the same directory
+    // 1. Check for .srt files in the same directory (served live, any language)
     const dir = path.dirname(item.file_path);
     const baseName = path.basename(item.file_path, path.extname(item.file_path));
     try {
@@ -1860,24 +2398,25 @@ app.get("/api/media/:id/subtitles", requireAuth, async (req, res) => {
       for (const file of files) {
         if (!file.endsWith(".srt")) continue;
         const fileLower = file.toLowerCase();
-        // Match files like "movie.srt", "movie.sv.srt", "movie.en.srt", "movie.Swedish.srt"
-        if (fileLower.startsWith(baseName.toLowerCase()) || fileLower.includes("swedish") || fileLower.includes("english")) {
-          let lang = "unknown";
-          if (fileLower.includes(".sv.") || fileLower.includes("swedish") || fileLower.includes(".swe.")) lang = "sv";
-          else if (fileLower.includes(".en.") || fileLower.includes("english") || fileLower.includes(".eng.")) lang = "en";
-          subtitles.push({
-            id: "srt_" + file,
-            type: "srt",
-            lang,
-            label: lang === "sv" ? "Svenska (SRT)" : lang === "en" ? "English (SRT)" : file,
-            path: path.join(dir, file),
-            url: "/api/media/" + item._id + "/subtitle-file?file=" + encodeURIComponent(file)
-          });
-        }
+        const baseLower = baseName.toLowerCase();
+        if (!fileLower.startsWith(baseLower)) continue;
+        // Match files like "movie.srt", "movie.sv.srt", "movie.no.srt", "movie.Swedish.srt"
+        const suffix = fileLower.slice(baseLower.length).replace(/\.srt$/, "").replace(/^\./, "");
+        const lang = suffix ? normalizeLangCode(suffix) : "und";
+        subtitles.push({
+          id: "srt_" + file,
+          type: "srt",
+          lang,
+          label: `${subtitleLangLabel(lang)} (SRT)`,
+          path: path.join(dir, file),
+          url: "/api/media/" + item._id + "/subtitle-file?file=" + encodeURIComponent(file)
+        });
       }
-    } catch {}
+    } catch(e) {
+      logSubtitle("warn", item, "Kunde inte lista externa undertextfiler", { error: e.message });
+    }
 
-    // 2. Check for embedded subtitle tracks via ffprobe
+    // 2. Check for embedded subtitle tracks via ffprobe (every language, on-demand extraction)
     const ffprobePath = getFfmpegPath().replace("ffmpeg.exe", "ffprobe.exe");
     try {
       const { execFileSync } = require("child_process");
@@ -1887,63 +2426,90 @@ app.get("/api/media/:id/subtitles", requireAuth, async (req, res) => {
       ], { timeout: 10000, windowsHide: true }).toString();
       const probe = JSON.parse(probeOut);
       (probe.streams || []).forEach((s, i) => {
-        const lang = s.tags?.language || s.tags?.LANGUAGE || "und";
+        const lang = normalizeLangCode(s.tags?.language || s.tags?.LANGUAGE || "und");
         const title = s.tags?.title || s.tags?.TITLE || "";
         subtitles.push({
           id: "embedded_" + i,
           type: "embedded",
           lang,
           index: i,
-          label: title || (lang === "swe" || lang === "sv" ? "Svenska" : lang === "eng" || lang === "en" ? "English" : lang),
+          label: title || subtitleLangLabel(lang),
           codec: s.codec_name,
           url: "/api/media/" + item._id + "/subtitle-extract?index=" + i
         });
       });
-    } catch {}
+    } catch(e) {
+      logSubtitle("warn", item, "Kunde inte lista inbäddade undertextspår", { error: e.message });
+    }
 
-    // 3. Check for cached subtitle (PgsToSrt-converted or pre-extracted)
+    // 3. Check pre-cached subtitles (embedded pre-cache, PgsToSrt-converted, or external copy)
+    // — every language that's already cached on disk shows up here.
     try {
       const cacheDir = path.join(DATA_DIR, "subtitle-cache");
       const shortId = require("crypto").createHash("md5").update(item._id).digest("hex");
       const cacheFiles = fs.existsSync(cacheDir) ? fs.readdirSync(cacheDir) : [];
-      // Find any cached SRT for this item (format: md5hash_subIdx.srt)
-      const cachedSrts = cacheFiles.filter(f => f.startsWith(shortId + "_") && f.endsWith(".srt") && !f.endsWith("_ext.srt"));
-      for (const cachedFile of cachedSrts) {
-        const lang = item.cached_subtitle_lang || "swe";
-        const label = lang === "swe" ? "Svenska (Cachad)" : "English (Cached)";
-        // Only add if not already covered by an external SRT
-        const alreadyHave = subtitles.some(s => s.type === "srt" && (s.lang === lang || s.lang === (lang === "swe" ? "sv" : "en")));
+
+      // Embedded/converted cache: {id}_{subIdx}_{lang}.srt
+      const ownCached = cacheFiles.filter(f => f.startsWith(item._id + "_") && f.endsWith(".srt"));
+      for (const cachedFile of ownCached) {
+        const m = cachedFile.match(/_(\d+)_([a-z0-9]+)\.srt$/);
+        const lang = m ? m[2] : "und";
+        const alreadyHave = subtitles.some(s => s.type !== "embedded" && s.lang === lang);
         if (!alreadyHave) {
           subtitles.push({
             id: "cached_" + cachedFile,
             type: "srt",
-            lang: lang === "swe" ? "sv" : "en",
-            label,
+            lang,
+            label: `${subtitleLangLabel(lang)} (Cachad)`,
             url: "/api/media/" + item._id + "/subtitle-cache?file=" + encodeURIComponent(cachedFile)
           });
         }
       }
-      // Also check for external cached SRT (_ext.srt)
-      const extCached = cacheFiles.find(f => f.startsWith(shortId + "_") && f.endsWith("_ext.srt"));
-      if (extCached) {
-        const alreadyHave = subtitles.some(s => s.type === "srt");
+      // External cache: {hash}_ext_{lang}.srt
+      const extCached = cacheFiles.filter(f => f.startsWith(shortId + "_ext_") && f.endsWith(".srt"));
+      for (const cachedFile of extCached) {
+        const m = cachedFile.match(/_ext_([a-z0-9]+)\.srt$/);
+        const lang = m ? m[1] : "und";
+        const alreadyHave = subtitles.some(s => s.type !== "embedded" && s.lang === lang);
         if (!alreadyHave) {
           subtitles.push({
-            id: "cached_ext_" + extCached,
+            id: "cached_ext_" + cachedFile,
             type: "srt",
-            lang: "sv",
-            label: "Svenska (Extern)",
-            url: "/api/media/" + item._id + "/subtitle-cache?file=" + encodeURIComponent(extCached)
+            lang,
+            label: `${subtitleLangLabel(lang)} (Extern)`,
+            url: "/api/media/" + item._id + "/subtitle-cache?file=" + encodeURIComponent(cachedFile)
           });
         }
       }
-    } catch {}
+    } catch(e) {
+      logSubtitle("warn", item, "Kunde inte lista cachade undertexter", { error: e.message });
+    }
 
-    // Sort: Swedish first, then English, then others
+    // Sort: the requesting user's own language first, then Swedish, then English, then others
+    const userSubLang = USER_LANG_TO_SUB_LANG[req.user?.language] || null;
     subtitles.sort((a, b) => {
-      const priority = (l) => (l === "sv" || l === "swe") ? 0 : (l === "en" || l === "eng") ? 1 : 2;
+      const priority = (l) => {
+        if (userSubLang && l === userSubLang) return -1;
+        if (l === "swe") return 0;
+        if (l === "eng") return 1;
+        return 2;
+      };
       return priority(a.lang) - priority(b.lang);
     });
+
+    // The player fetches these URLs directly (no Authorization header attached), so embed
+    // the caller's own token here — otherwise the library-access check added to
+    // subtitle-cache/subtitle-file/subtitle-extract would 401 on every request.
+    let callerToken = req.query.token || "";
+    if (!callerToken) {
+      const auth = req.headers.authorization;
+      if (auth?.startsWith("Bearer ")) callerToken = auth.slice(7);
+    }
+    if (callerToken) {
+      for (const s of subtitles) {
+        if (s.url) s.url += (s.url.includes("?") ? "&" : "?") + "token=" + callerToken;
+      }
+    }
 
     res.json({ subtitles });
   } catch(e) {
@@ -1952,7 +2518,7 @@ app.get("/api/media/:id/subtitles", requireAuth, async (req, res) => {
 });
 
 // Serve a cached subtitle file (PgsToSrt-converted or pre-extracted)
-app.get("/api/media/:id/subtitle-cache", async (req, res) => {
+app.get("/api/media/:id/subtitle-cache", requireMediaAccess, async (req, res) => {
   try {
     const item = await dbFindOne(db.media, { _id: req.params.id });
     if (!item) return res.status(404).json({ error: "Not found" });
@@ -1989,7 +2555,7 @@ app.get("/api/media/:id/subtitle-cache", async (req, res) => {
 });
 
 // Serve a .srt file as WebVTT for browser playback
-app.get("/api/media/:id/subtitle-file", async (req, res) => {
+app.get("/api/media/:id/subtitle-file", requireMediaAccess, async (req, res) => {
   try {
     const item = await dbFindOne(db.media, { _id: req.params.id });
     if (!item) return res.status(404).json({ error: "Not found" });
@@ -2043,67 +2609,62 @@ app.get("/api/media/:id/subtitle-file", async (req, res) => {
 });
 
 // Extract embedded subtitle track to VTT
-app.get("/api/media/:id/subtitle-extract", async (req, res) => {
+app.get("/api/media/:id/subtitle-extract", requireMediaAccess, async (req, res) => {
   try {
     const item = await dbFindOne(db.media, { _id: req.params.id });
     if (!item) return res.status(404).json({ error: "Not found" });
     const trackIndex = parseInt(req.query.index || "0");
     const offsetSec = parseFloat(req.query.offset || "0");
 
-    const ffmpegPath = getFfmpegPath();
-    // Use cache dir so we don't re-extract every time
     const cacheDir = path.join(DATA_DIR, "subtitle-cache");
     if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir, { recursive: true });
-    const cacheFile = path.join(cacheDir, item._id + "_" + trackIndex + ".srt");
 
+    // Probe this specific stream so the cache filename matches what preCacheSubtitles uses
+    let lang = "und", codec = "";
+    try {
+      const { execFileSync } = require("child_process");
+      const ffprobePath = getFfmpegPath().replace("ffmpeg.exe", "ffprobe.exe");
+      const probeOut = execFileSync(ffprobePath, [
+        "-v", "quiet", "-print_format", "json", "-show_streams",
+        "-select_streams", "s:" + trackIndex, item.file_path
+      ], { timeout: 8000, windowsHide: true }).toString();
+      const streams = JSON.parse(probeOut).streams || [];
+      lang = normalizeLangCode(streams[0]?.tags?.language || streams[0]?.tags?.LANGUAGE || "und");
+      codec = streams[0]?.codec_name || "";
+    } catch(e) {
+      logSubtitle("warn", item, `Kunde inte läsa spårinfo för spår ${trackIndex} vid extraktion`, { trackIndex, error: e.message });
+    }
+
+    const cacheFile = path.join(cacheDir, `${item._id}_${trackIndex}_${lang}.srt`);
     const tempFile = cacheFile + ".tmp";
+    const bitmapCodecs = ["hdmv_pgs_subtitle", "dvd_subtitle", "dvdsub", "xsub", "dvb_subtitle"];
+
     if (!fs.existsSync(cacheFile)) {
-      // Check if this is a bitmap subtitle (PGS/VOBSUB) - don't try to extract, check PgsToSrt cache instead
-      try {
-        const { execFileSync } = require("child_process");
-        const ffprobePath = getFfmpegPath().replace("ffmpeg.exe", "ffprobe.exe");
-        const probeOut = execFileSync(ffprobePath, [
-          "-v", "quiet", "-print_format", "json", "-show_streams",
-          "-select_streams", "s:" + trackIndex, item.file_path
-        ], { timeout: 8000, windowsHide: true }).toString();
-        const streams = JSON.parse(probeOut).streams || [];
-        const codec = streams[0]?.codec_name || "";
-        const bitmapCodecs = ["hdmv_pgs_subtitle", "dvd_subtitle", "dvdsub", "xsub", "dvb_subtitle"];
-        if (bitmapCodecs.includes(codec)) {
-          // Check if PgsToSrt has already converted this
-          const shortId = require("crypto").createHash("md5").update(item._id).digest("hex");
-          const cacheDir2 = path.join(DATA_DIR, "subtitle-cache");
-          const cachedFiles = fs.existsSync(cacheDir2) ? fs.readdirSync(cacheDir2) : [];
-          const pgsCached = cachedFiles.find(f => f.startsWith(shortId + "_") && f.endsWith(".srt") && !f.endsWith("_ext.srt"));
-          if (pgsCached) {
-            // Redirect to cached file
-            return res.redirect("/api/media/" + item._id + "/subtitle-cache?file=" + encodeURIComponent(pgsCached) + (offsetSec ? "&offset=" + offsetSec : ""));
-          }
-          return res.status(404).json({ error: "Bitmap subtitle not supported without PgsToSrt cache" });
+      if (bitmapCodecs.includes(codec)) {
+        if (!isPgsToSrtInstalled()) {
+          logSubtitle("warn", item, `Bildbaserat spår (${subtitleLangLabel(lang)}) kan inte visas – PgsToSrt är inte installerat`, { trackIndex, lang });
+          return res.status(404).json({ error: "Bitmap subtitle not supported without PgsToSrt" });
         }
-      } catch {}
+        if (fs.existsSync(tempFile)) return res.status(202).json({ status: "extracting", retryAfter: 5 });
+        fs.writeFileSync(tempFile, "");
+        convertPgsTosrt(item, trackIndex, cacheFile, lang).then(ok => {
+          try { fs.unlinkSync(tempFile); } catch {}
+          if (ok) logSubtitle("info", item, `Undertext konverterad on-demand – ${subtitleLangLabel(lang)}`, { trackIndex });
+        }).catch(e => { try { fs.unlinkSync(tempFile); } catch {}; logSubtitle("error", item, "Oväntat fel vid on-demand PgsToSrt", { trackIndex, error: e.message }); });
+        return res.status(202).json({ status: "extracting", retryAfter: 5 });
+      }
 
       // Already extracting?
       if (fs.existsSync(tempFile)) {
         return res.status(202).json({ status: "extracting", retryAfter: 3 });
       }
-      // Start async extraction - write to temp file first, then rename
-      const { execFile } = require("child_process");
-      // Create temp file marker immediately
       fs.writeFileSync(tempFile, "");
-      execFile(ffmpegPath, [
-        "-y", "-i", item.file_path,
-        "-map", "0:s:" + trackIndex,
-        "-f", "srt", "-c:s", "srt",
-        tempFile
-      ], { timeout: 180000, windowsHide: true }, (err) => {
-        if (err) {
-          console.log("[SUBTITLES] Extraction error:", err.message);
-          try { fs.unlinkSync(tempFile); } catch {}
+      extractTextSubtitle(item, trackIndex, cacheFile).then(result => {
+        try { fs.unlinkSync(tempFile); } catch {}
+        if (result.ok) {
+          logSubtitle("info", item, `Undertext extraherad on-demand – ${subtitleLangLabel(lang)}`, { trackIndex });
         } else {
-          // Rename temp to cache file only when complete
-          fs.renameSync(tempFile, cacheFile);
-          console.log("[SUBTITLES] Cached:", cacheFile);
+          logSubtitle("error", item, `On-demand-extraktion misslyckades – ${subtitleLangLabel(lang)}`, { trackIndex, error: result.error?.split("\n")[0] });
         }
       });
       return res.status(202).json({ status: "extracting", retryAfter: 3 });
@@ -2404,6 +2965,20 @@ app.post("/api/scan", requireAdmin, (req, res) => {
   scanLibraries().catch(console.error);
 });
 
+// Re-queue subtitle caching for every existing movie/episode already in the library.
+// Needed because a normal scan only queues NEW items — this catches everything that
+// was added before the multi-language subtitle cache existed.
+app.post("/api/subtitles/recache-all", requireAdmin, async (req, res) => {
+  try {
+    const items = await dbFind(db.media, { type: { $in: ["movie", "episode"] } });
+    for (const item of items) queueSubtitleCache(item);
+    logSubtitle("info", null, `Manuell omcachning startad för ${items.length} filer (admin-begäran)`);
+    res.json({ message: `${items.length} filer köade för undertextcachning`, queued: items.length });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get("/api/subtitles/cache-status", requireAuth, async (req, res) => {
   const cacheDir = path.join(DATA_DIR, "subtitle-cache");
   let cached = 0;
@@ -2430,12 +3005,34 @@ app.get("/api/subtitles/cache-status", requireAuth, async (req, res) => {
     withSweEps: _subtitleCacheWithSweEps,
     withEngEps: _subtitleCacheWithEngEps,
     withExtSrtEps: _subtitleCacheWithExtSrtEps,
+    languageBreakdown: _subtitleLangBreakdown,
+    // The "featured" languages to show individually on the dashboard: server default + English
+    // + anything the admin has explicitly added — everything else gets lumped into "Övriga språk".
+    featuredLanguages: (config.subtitle_ocr_languages && config.subtitle_ocr_languages.length)
+      ? config.subtitle_ocr_languages
+      : [getServerDefaultSubLang(), "eng"],
     done: _subtitleCacheDone,
     errors: _subtitleCacheErrors,
+    failed: _subtitleCacheFailed,
+    failedEps: _subtitleCacheFailedEps,
+    gated: _subtitleCacheGated,
+    gatedEps: _subtitleCacheGatedEps,
+    noSubs: _subtitleCacheNoSubs,
+    noSubsEps: _subtitleCacheNoSubsEps,
     cached: cached,
     running: _subtitleCacheRunning,
     queued: _subtitleCacheQueue.length
   });
+});
+
+// Recent subtitle-cache log entries (successes, warnings, failures) for troubleshooting.
+// Kept in memory (most recent 500) and appended to data/logs/subtitles.log on disk.
+app.get("/api/subtitles/log", requireAdmin, (req, res) => {
+  const level = req.query.level; // optional: "error" | "warn" | "info"
+  const limit = Math.min(parseInt(req.query.limit || "200"), 500);
+  let entries = _subtitleLogBuffer;
+  if (level) entries = entries.filter(e => e.level === level);
+  res.json({ entries: entries.slice(0, limit), total: entries.length });
 });
 
 app.get("/api/scan/status", requireAuth, async (req, res) => {
@@ -2527,10 +3124,9 @@ app.get("/api/media/:id/fileinfo", requireAdmin, async (req, res) => {
 });
 
 // ── AUDIO TRACKS (for player audio track selection) ──────────────────────────
-app.get("/api/media/:id/audio-tracks", requireAuth, async (req, res) => {
+app.get("/api/media/:id/audio-tracks", requireMediaAccess, async (req, res) => {
   try {
-    const item = await dbFindOne(db.media, { _id: req.params.id });
-    if (!item) return res.status(404).json({ error: "Hittades inte" });
+    const item = req.mediaItem;
     const { execSync } = require("child_process");
     const ffprobePath = getFfprobePath();
     const cmd = `"${ffprobePath}" -v quiet -print_format json -show_streams -select_streams a "${item.file_path.replace(/"/g, '')}"`;
@@ -3104,12 +3700,13 @@ app.get("/api/collections", requireAuth, async (req, res) => {
 app.get("/api/media/:id/details", requireAuth, async (req, res) => {
   try {
     const item = await dbFindOne(db.media, { _id: req.params.id });
-    if (!item || !item.tmdb_id || !config.tmdb_api_key) return res.json({ cast: [], crew: [], genres: [], runtime: null });
+    if (!item || !item.tmdb_id || !config.tmdb_api_key) return res.json({ cast: [], crew: [], genres: [], runtime: null, overview: null });
+    const userLang = req.user?.language || null;
     const endpoint = item.type === "tvshow"
       ? `/tv/${item.tmdb_id}?append_to_response=aggregate_credits`
       : `/movie/${item.tmdb_id}?append_to_response=credits`;
-    const data = await tmdbFetch(endpoint);
-    if (!data) return res.json({ cast: [], crew: [], genres: [], runtime: null });
+    const data = await tmdbFetch(endpoint, userLang);
+    if (!data) return res.json({ cast: [], crew: [], genres: [], runtime: null, overview: null });
     // TV shows use aggregate_credits for full series cast
     const castSource = item.type === "tvshow"
       ? (data.aggregate_credits?.cast || data.credits?.cast || [])
@@ -3124,7 +3721,7 @@ app.get("/api/media/:id/details", requireAuth, async (req, res) => {
       .slice(0, 5).map(p => ({ id: p.id, name: p.name, job: p.job }));
     const genres = (data.genres || []).map(g => g.name);
     const runtime = data.runtime || (data.episode_run_time?.[0]) || null;
-    res.json({ cast, crew, genres, runtime });
+    res.json({ cast, crew, genres, runtime, overview: data.overview || null });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -3492,6 +4089,9 @@ app.post("/api/scan/full-rescan", requireAdmin, async (req, res) => {
     _subtitleCacheWithSwe = 0; _subtitleCacheWithEng = 0; _subtitleCacheWithExtSrt = 0;
     _subtitleCacheWithSweEps = 0; _subtitleCacheWithEngEps = 0; _subtitleCacheWithExtSrtEps = 0;
     _subtitleCacheDone = 0; _subtitleCacheErrors = 0;
+    _subtitleCacheFailed = 0; _subtitleCacheFailedEps = 0;
+    _subtitleCacheGated = 0; _subtitleCacheGatedEps = 0;
+    _subtitleCacheNoSubs = 0; _subtitleCacheNoSubsEps = 0;
 
     console.log("Database cleared, starting full rescan...");
     await scanLibraries();
