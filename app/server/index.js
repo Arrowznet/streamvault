@@ -150,29 +150,51 @@ async function countExistingSubtitleCache() {
   if (!fs.existsSync(cacheDir)) return;
   try {
     const files = fs.readdirSync(cacheDir);
-    // All languages that have been cached for a given item, from either source
-    // (embedded/converted: "{id}_{index}_{lang}.srt", or external: "{md5(id)}_ext_{lang}.srt")
-    const langsForItem = (id) => {
-      const hash = require("crypto").createHash("md5").update(id).digest("hex");
-      const langs = new Set();
-      for (const f of files) {
-        if (!f.endsWith(".srt")) continue;
-        if (f.startsWith(id + "_")) {
-          const m = f.match(/_(\d+)_([a-z0-9]+)\.srt$/);
-          if (m) langs.add(m[2]);
-        } else if (f.startsWith(hash + "_ext_")) {
-          const m = f.match(/_ext_([a-z0-9]+)\.srt$/);
-          if (m) langs.add(m[1]);
-        }
-      }
-      return langs;
-    };
     const movies = await dbFind(db.media, { type: "movie" });
     const episodes = await dbFind(db.media, { type: "episode" });
+
+    // Media IDs are base64url-encoded file paths (see scanLibraries), so they CAN contain
+    // underscores — can't naively split filenames on "_". Instead this does a single pass
+    // over the cache directory (not one pass PER MOVIE, which is what made this O(movies ×
+    // cache files) and turned Settings sluggish once every language started getting cached).
+    const movieIds = new Set(movies.map(m => m._id));
+    const epIds = new Set(episodes.map(e => e._id));
+    const crypto = require("crypto");
+    const hashToItem = new Map(); // md5(id) -> { id, kind } for external-cache lookups
+    for (const m of movies) hashToItem.set(crypto.createHash("md5").update(m._id).digest("hex"), { id: m._id, kind: "movie" });
+    for (const e of episodes) hashToItem.set(crypto.createHash("md5").update(e._id).digest("hex"), { id: e._id, kind: "episode" });
+
+    const movieLangs = new Map(); // id -> Set(lang)
+    const epLangs = new Map();
+    function addLang(map, id, lang) {
+      if (!map.has(id)) map.set(id, new Set());
+      map.get(id).add(lang);
+    }
+
+    for (const f of files) {
+      if (!f.endsWith(".srt")) continue;
+      // External cache: "{md5(id)}_ext_{lang}.srt" — hash is fixed-length hex, unambiguous.
+      const extMatch = f.match(/^([a-f0-9]{32})_ext_([a-z0-9]+)\.srt$/);
+      if (extMatch) {
+        const hit = hashToItem.get(extMatch[1]);
+        if (hit) addLang(hit.kind === "movie" ? movieLangs : epLangs, hit.id, extMatch[2]);
+        continue;
+      }
+      // Embedded/converted cache: "{id}_{subIdx}_{lang}.srt" — subIdx is always digits and
+      // lang is always lowercase alnum, so stripping those two trailing segments recovers
+      // the id even when the id itself contains underscores.
+      const m = f.match(/^(.+)_(\d+)_([a-z0-9]+)\.srt$/);
+      if (!m) continue;
+      const candidateId = m[1], lang = m[3];
+      if (movieIds.has(candidateId)) addLang(movieLangs, candidateId, lang);
+      else if (epIds.has(candidateId)) addLang(epLangs, candidateId, lang);
+    }
+
     const movieCounts = {};
-    for (const m of movies) for (const lang of langsForItem(m._id)) movieCounts[lang] = (movieCounts[lang] || 0) + 1;
+    for (const langs of movieLangs.values()) for (const l of langs) movieCounts[l] = (movieCounts[l] || 0) + 1;
     const epCounts = {};
-    for (const ep of episodes) for (const lang of langsForItem(ep._id)) epCounts[lang] = (epCounts[lang] || 0) + 1;
+    for (const langs of epLangs.values()) for (const l of langs) epCounts[l] = (epCounts[l] || 0) + 1;
+
     _subtitleLangBreakdown = { movies: movieCounts, episodes: epCounts };
     // Keep the legacy swe/eng counters in sync too, in case anything else still reads them
     _subtitleCacheWithSwe = movieCounts.swe || 0;
@@ -201,6 +223,62 @@ fs.mkdirSync(TOOLS_DIR, { recursive: true });
 
 function isPgsToSrtInstalled() {
   return fs.existsSync(PGSTOSRT_EXE) && fs.existsSync(TESSDATA_DIR);
+}
+
+// Downloads a missing Tesseract language pack (e.g. "fin.traineddata") straight from the
+// official tesseract-ocr/tessdata GitHub repo, so admins never have to manually download and
+// place language files themselves. Follows redirects, writes to a temp file first so a failed/
+// interrupted download never leaves a broken half-written .traineddata file behind.
+function downloadTessdataFile(tessLang, destPath, redirectCount = 0, overrideUrl = null) {
+  return new Promise((resolve, reject) => {
+    if (redirectCount > 5) return reject(new Error("För många omdirigeringar"));
+    const https = require("https");
+    const url = overrideUrl || `https://raw.githubusercontent.com/tesseract-ocr/tessdata/main/${tessLang}.traineddata`;
+    const tempPath = destPath + ".downloading";
+    const fileStream = fs.createWriteStream(tempPath);
+    const req = https.get(url, { timeout: 30000 }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        fileStream.close(); try { fs.unlinkSync(tempPath); } catch {}
+        return resolve(downloadTessdataFile(tessLang, destPath, redirectCount + 1, res.headers.location));
+      }
+      if (res.statusCode !== 200) {
+        fileStream.close(); try { fs.unlinkSync(tempPath); } catch {}
+        return reject(new Error(`HTTP ${res.statusCode} – språket finns troligen inte i Tesseracts standardarkiv`));
+      }
+      res.pipe(fileStream);
+      fileStream.on("finish", () => {
+        fileStream.close(() => {
+          try {
+            const size = fs.statSync(tempPath).size;
+            // A real traineddata file is at least a few hundred KB — anything tiny is almost
+            // certainly an error page, not language data.
+            if (size < 50000) { try { fs.unlinkSync(tempPath); } catch {}; return reject(new Error(`Nedladdad fil för liten (${size} bytes) – troligen inte en giltig traineddata-fil`)); }
+            fs.renameSync(tempPath, destPath);
+            resolve();
+          } catch(e) { reject(e); }
+        });
+      });
+    });
+    req.on("error", (e) => { fileStream.close(); try { fs.unlinkSync(tempPath); } catch {}; reject(e); });
+    req.on("timeout", () => { req.destroy(); fileStream.close(); try { fs.unlinkSync(tempPath); } catch {}; reject(new Error("Timeout vid nedladdning")); });
+  });
+}
+
+// Ensures a Tesseract language pack is present, downloading it automatically if missing.
+// Returns { ok, downloaded, error } — "ok" is true if the language is (now) available.
+async function ensureTesseractLanguage(tessLang) {
+  const destPath = path.join(TESSDATA_DIR, `${tessLang}.traineddata`);
+  if (fs.existsSync(destPath)) return { ok: true, downloaded: false };
+  try {
+    if (!fs.existsSync(TESSDATA_DIR)) fs.mkdirSync(TESSDATA_DIR, { recursive: true });
+    logSubtitle("info", null, `Hämtar Tesseract-språkdata för "${tessLang}" automatiskt...`, { tessLang });
+    await downloadTessdataFile(tessLang, destPath);
+    logSubtitle("info", null, `Tesseract-språkdata för "${tessLang}" hämtad och installerad`, { tessLang });
+    return { ok: true, downloaded: true };
+  } catch(e) {
+    logSubtitle("error", null, `Kunde inte hämta Tesseract-språkdata för "${tessLang}" automatiskt`, { tessLang, error: e.message });
+    return { ok: false, downloaded: false, error: e.message };
+  }
 }
 
 function loadConfig() {
@@ -446,8 +524,34 @@ app.post("/api/users", requireAdmin, async (req, res) => {
 
 app.delete("/api/users/:id", requireAdmin, async (req, res) => {
   if (req.params.id === req.user._id) return res.status(400).json({ error: "Kan inte ta bort dig själv" });
-  await dbUpdate(db.users, { _id: req.params.id }, { $set: { is_active: false } });
+  // Fully remove the user (not just deactivate) — otherwise the username stays taken forever
+  // and can never be reused. Also cleans up their watch history so it doesn't linger in the
+  // live-activity feed as an orphaned "(borttagen användare)" entry.
+  await dbRemove(db.users, { _id: req.params.id });
+  await dbRemove(db.history, { user_id: req.params.id }, { multi: true });
+  await dbRemove(db.favorites, { user_id: req.params.id }, { multi: true }).catch(() => {});
+  // Clean up any pending OCR-language notification tied to this user, if one exists.
+  if (Array.isArray(config.pending_ocr_requests)) {
+    config.pending_ocr_requests = config.pending_ocr_requests.filter(r => r.userId !== req.params.id);
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
+  }
   res.json({ ok: true });
+});
+
+// One-time cleanup: permanently purges any user accounts soft-deactivated by the OLD delete
+// behavior (before it was changed to a real delete, above). Those "ghost" accounts are
+// invisible in /api/users (which only lists is_active users) but still occupy their username,
+// so this is the only way to free them up again. Safe to run repeatedly — a no-op once clean.
+app.post("/api/users/purge-inactive", requireAdmin, async (req, res) => {
+  try {
+    const ghosts = await dbFind(db.users, { is_active: false });
+    for (const u of ghosts) {
+      await dbRemove(db.users, { _id: u._id });
+      await dbRemove(db.history, { user_id: u._id }, { multi: true });
+      await dbRemove(db.favorites, { user_id: u._id }, { multi: true }).catch(() => {});
+    }
+    res.json({ ok: true, purged: ghosts.length, usernames: ghosts.map(u => u.username) });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 app.patch("/api/users/:id/language", requireAuth, async (req, res) => {
@@ -477,9 +581,22 @@ app.post("/api/subtitles/ocr-languages", requireAdmin, async (req, res) => {
     config.subtitle_ocr_languages = [...list];
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
     clearPendingOcrRequests(code); // this resolves any open notifications for that language
+
+    // Tesseract needs a separate {lang}.traineddata file per language. Try to fetch it
+    // automatically from the official tesseract-ocr/tessdata repo instead of just warning —
+    // most languages are available there and this makes the whole flow fully self-service.
+    const tessLang = TESSERACT_LANG_MAP[code] || code;
+    const tessResult = await ensureTesseractLanguage(tessLang);
+
     let queued = 0;
     if (backfill) queued = await queueLanguageBackfill(code);
-    res.json({ ok: true, languages: config.subtitle_ocr_languages, queued });
+    res.json({
+      ok: true, languages: config.subtitle_ocr_languages, queued,
+      tessdataDownloaded: tessResult.downloaded,
+      tessdataWarning: !tessResult.ok
+        ? `Kunde inte hämta Tesseract-språkdata för ${subtitleLangLabel(code)} automatiskt (${tessResult.error}). Bildbaserade (PGS) undertexter på det språket kommer misslyckas tills du manuellt laddar ner "${tessLang}.traineddata" från github.com/tesseract-ocr/tessdata och lägger den i tools/PgsToSrt/tessdata/ på servern. Textbaserade spår påverkas inte.`
+        : null
+    });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -568,9 +685,10 @@ app.get("/api/updates/check", requireAuth, async (req, res) => {
   try {
     const channel = config.update_channel || "stable"; // "stable" or "beta"
     const releases = await new Promise((resolve, reject) => {
-      https.get({
+      const req = https.get({
         hostname: "api.github.com",
         path: "/repos/" + GITHUB_REPO + "/releases",
+        timeout: 5000, // fail fast — this must never be what makes Settings feel slow
         headers: {
           "User-Agent": "StreamVault/" + STREAMVAULT_VERSION,
           ...(process.env.GITHUB_TOKEN ? { "Authorization": "token " + process.env.GITHUB_TOKEN } : {})
@@ -578,7 +696,9 @@ app.get("/api/updates/check", requireAuth, async (req, res) => {
       }, r => {
         let d = ""; r.on("data", c => d += c);
         r.on("end", () => { try { resolve(JSON.parse(d)); } catch { reject(new Error("parse")); } });
-      }).on("error", reject);
+      });
+      req.on("error", reject);
+      req.on("timeout", () => { req.destroy(); reject(new Error("GitHub-anropet tog för lång tid (timeout)")); });
     });
     // Filter based on channel
     const eligible = (Array.isArray(releases) ? releases : [releases]).filter(r => {
@@ -712,16 +832,65 @@ function cleanTitle(name) {
 }
 
 const metaCache = new Map();
+// Tracks the last TMDB failure so there's something concrete to look at instead of just
+// guessing "rate limited?" — tmdbFetch update this on every non-2xx response, timeout, or
+// network error. Successful calls clear it.
+let _tmdbLastError = null;
+
 function tmdbFetch(endpoint, userLanguage) {
   return new Promise(resolve => {
-    if (!config.tmdb_api_key) return resolve(null);
+    if (!config.tmdb_api_key) { _tmdbLastError = { at: new Date().toISOString(), reason: "no_api_key", message: "Ingen TMDB API-nyckel är inställd" }; return resolve(null); }
     const sep = endpoint.includes("?") ? "&" : "?";
     const lang = userLanguage || (config.language && config.language !== "auto" ? config.language : "en-US");
-    https.get(`https://api.themoviedb.org/3${endpoint}${sep}api_key=${config.tmdb_api_key}&language=${lang}`, res => {
-      let d=""; res.on("data",c=>d+=c); res.on("end",()=>{ try{resolve(JSON.parse(d))}catch{resolve(null)} });
-    }).on("error",()=>resolve(null));
+    const req = https.get(`https://api.themoviedb.org/3${endpoint}${sep}api_key=${config.tmdb_api_key}&language=${lang}`, { timeout: 8000 }, res => {
+      let d=""; res.on("data",c=>d+=c);
+      res.on("end",()=>{
+        let parsed = null;
+        try { parsed = JSON.parse(d); } catch {}
+        if (res.statusCode !== 200) {
+          const reason = res.statusCode === 401 ? "invalid_api_key" : res.statusCode === 429 ? "rate_limited" : "http_error";
+          _tmdbLastError = { at: new Date().toISOString(), reason, status: res.statusCode, message: parsed?.status_message || `HTTP ${res.statusCode}`, endpoint };
+          console.log(`[TMDB] Fel (${res.statusCode}) på ${endpoint}: ${parsed?.status_message || "okänt fel"}`);
+          return resolve(null);
+        }
+        _tmdbLastError = null; // success clears any previous error
+        resolve(parsed);
+      });
+    });
+    req.on("error", (e) => {
+      _tmdbLastError = { at: new Date().toISOString(), reason: "network_error", message: e.message, endpoint };
+      console.log(`[TMDB] Nätverksfel på ${endpoint}:`, e.message);
+      resolve(null);
+    });
+    req.on("timeout", () => {
+      req.destroy();
+      _tmdbLastError = { at: new Date().toISOString(), reason: "timeout", message: "Anropet tog för lång tid (>8s)", endpoint };
+      console.log(`[TMDB] Timeout på ${endpoint}`);
+      resolve(null);
+    });
   });
 }
+
+// Live connectivity test — makes one cheap, harmless call and reports back exactly what
+// happened, instead of leaving the admin to guess whether it's rate limiting, a bad key,
+// or a network problem.
+app.get("/api/tmdb/test", requireAdmin, async (req, res) => {
+  if (!config.tmdb_api_key) return res.json({ ok: false, reason: "no_api_key", message: "Ingen TMDB API-nyckel är inställd i Inställningar." });
+  const before = _tmdbLastError;
+  const data = await tmdbFetch("/configuration");
+  if (data && data.images) {
+    return res.json({ ok: true, message: "TMDB svarar normalt." });
+  }
+  const err = _tmdbLastError;
+  const messages = {
+    invalid_api_key: "TMDB-nyckeln verkar ogiltig eller återkallad. Kontrollera nyckeln i Inställningar.",
+    rate_limited: "TMDB har tillfälligt blockerat/strypt anrop från din server (rate limiting). Vänta en stund och försök igen.",
+    network_error: "Kunde inte nå TMDB alls – kontrollera serverns internetanslutning: " + (err?.message || ""),
+    timeout: "TMDB svarade inte inom 8 sekunder – kan vara ett tillfälligt nätverks- eller TMDB-problem.",
+    http_error: `TMDB svarade med ett fel: ${err?.message || "okänt"}`
+  };
+  res.json({ ok: false, reason: err?.reason || "unknown", message: messages[err?.reason] || "Okänt fel – se serverloggen (\"[TMDB]\").", detail: err });
+});
 
 async function getMovieMeta(title, year) {
   const key=`movie:${title}:${year}`;
@@ -765,16 +934,27 @@ async function getTVMeta(title) {
 }
 
 let isScanning = false;
+// Files are discovered on disk almost instantly, but each NEW one then waits on a TMDB
+// lookup before the loop moves to the next — so without this, the admin sees nothing at all
+// until the first one or two finish, even though the scan already knows about all of them.
+let _scanProgress = { library: null, found: 0, processed: 0 };
 
 async function scanLibraries() {
   if (isScanning) return;
   isScanning = true;
+  _scanProgress = { library: null, found: 0, processed: 0 };
   let added = 0;
   try {
     for (const lib of (config.libraries||[])) {
       if (!fs.existsSync(lib.path)) continue;
       if (lib.type === "movies") {
-        for (const entry of fs.readdirSync(lib.path,{withFileTypes:true})) {
+        const entries = fs.readdirSync(lib.path,{withFileTypes:true});
+        // Report the raw count immediately — this is instant (local disk listing), unlike
+        // the TMDB lookups below, so there's no reason to make the admin wait for those
+        // just to find out how many files are even in the folder.
+        _scanProgress = { library: lib.name, found: entries.length, processed: 0 };
+        console.log(`[SCAN] Movie library "${lib.name}": found ${entries.length} entries`);
+        for (const entry of entries) {
           const fullPath = path.join(lib.path,entry.name);
           let filePath = null;
           if (entry.isFile() && VIDEO_EXT.has(path.extname(entry.name).toLowerCase())) filePath=fullPath;
@@ -782,9 +962,9 @@ async function scanLibraries() {
             const vf = fs.readdirSync(fullPath,{withFileTypes:true}).find(f=>f.isFile()&&VIDEO_EXT.has(path.extname(f.name).toLowerCase()));
             if (vf) filePath=path.join(fullPath,vf.name);
           }
-          if (!filePath) continue;
+          if (!filePath) { _scanProgress.processed++; continue; }
           const id = Buffer.from(filePath).toString("base64url");
-          if (await dbFindOne(db.media,{_id:id})) continue;
+          if (await dbFindOne(db.media,{_id:id})) { _scanProgress.processed++; continue; }
           const {cleanName,year} = cleanTitle(entry.isDirectory()?entry.name:path.basename(filePath));
           const meta = await getMovieMeta(cleanName,year);
           const stat = fs.statSync(filePath);
@@ -792,10 +972,12 @@ async function scanLibraries() {
           await dbInsert(db.media, newItem);
           queueSubtitleCache(newItem); // queue Swedish subtitle pre-cache (sequential)
           added++;
+          _scanProgress.processed++;
         }
       }
       if (lib.type === "tvshows") {
         const shows = fs.readdirSync(lib.path,{withFileTypes:true}).filter(f=>f.isDirectory());
+        _scanProgress = { library: lib.name, found: shows.length, processed: 0 };
         console.log(`[SCAN] TV library "${lib.name}": found ${shows.length} show folders`);
         for (const show of shows) {
           const showPath=path.join(lib.path,show.name);
@@ -809,6 +991,7 @@ async function scanLibraries() {
             added++;
           }
           await scanEpisodes(showPath,showId,lib.id);
+          _scanProgress.processed++;
         }
         console.log(`[SCAN] TV library "${lib.name}": done`);
       }
@@ -816,6 +999,13 @@ async function scanLibraries() {
     }
   } finally { isScanning=false; }
   console.log(`Scan complete: ${added} new items`);
+  // Scan's done — now it's safe to let the subtitle-cache queue (FFmpeg/OCR, CPU + disk
+  // heavy) start working through whatever got queued during the scan, without competing
+  // with it for resources.
+  if (!_subtitleCacheRunning && _subtitleCacheQueue.length > 0) {
+    _subtitleCacheRunning = true;
+    setTimeout(processSubtitleCacheQueue, 100);
+  }
 }
 
 // Subtitle pre-cache queue - processes one film at a time to avoid CPU contention
@@ -823,7 +1013,10 @@ function queueSubtitleCache(item) {
   _subtitleCacheQueue.push({ item });
   if (item.type === "episode") _subtitleCacheTotalEps++;
   else _subtitleCacheTotal++;
-  if (!_subtitleCacheRunning) {
+  // Don't start chewing through the queue (FFmpeg/OCR, CPU + disk heavy) while a scan is
+  // still running — that just makes the scan itself sluggish from resource contention.
+  // scanLibraries() explicitly kicks the queue off once it's actually done, further down.
+  if (!_subtitleCacheRunning && !isScanning) {
     _subtitleCacheRunning = true;
     setTimeout(processSubtitleCacheQueue, 100);
   }
@@ -840,7 +1033,7 @@ async function queueLanguageBackfill(lang) {
     else _subtitleCacheTotal++;
   }
   logSubtitle("info", null, `Riktad efterhandscachning köad för språk "${subtitleLangLabel(lang)}" – ${items.length} filer`, { lang });
-  if (!_subtitleCacheRunning) {
+  if (!_subtitleCacheRunning && !isScanning) {
     _subtitleCacheRunning = true;
     setTimeout(processSubtitleCacheQueue, 100);
   }
@@ -868,10 +1061,21 @@ async function convertPgsTosrt(item, subIdx, cacheFile, targetLang) {
   const { execFile } = require("child_process");
   const supFile = cacheFile.replace(".srt", ".sup");
   const tessLang = TESSERACT_LANG_MAP[targetLang] || "eng";
+
+  // Safety net: make sure the language pack is actually there before we bother extracting
+  // the .sup file at all — covers languages added before auto-download existed, or via any
+  // path other than the OCR-languages endpoint (e.g. "cache all languages" mode).
+  const tessCheck = await ensureTesseractLanguage(tessLang);
+  if (!tessCheck.ok) {
+    logSubtitle("error", item, `Kan inte OCR-konvertera spår ${subIdx} (${targetLang}) – Tesseract-språkdata saknas och kunde inte hämtas automatiskt`, { subIdx, targetLang, tessLang, error: tessCheck.error });
+    return false;
+  }
+
   try {
     // Step 1: Extract .sup file with FFmpeg
+    let ffmpegStderr = "";
     await new Promise((resolve, reject) => {
-      execFile(getFfmpegPath(), [
+      const proc = execFile(getFfmpegPath(), [
         "-y", "-i", item.file_path,
         "-map", "0:s:" + subIdx,
         "-c:s", "copy",
@@ -879,11 +1083,23 @@ async function convertPgsTosrt(item, subIdx, cacheFile, targetLang) {
       ], { timeout: 300000, windowsHide: true }, (err) => {
         if (err) reject(err); else resolve();
       });
+      proc.stderr?.on("data", d => { ffmpegStderr += d.toString(); if (ffmpegStderr.length > 4000) ffmpegStderr = ffmpegStderr.slice(-4000); });
     });
 
+    // Sanity check: an empty/near-empty .sup means there's nothing for PgsToSrt to read —
+    // catch this here with a clear message instead of a confusing "no output" a step later.
+    let supSize = 0;
+    try { supSize = fs.statSync(supFile).size; } catch {}
+    if (supSize < 100) {
+      logSubtitle("error", item, `Bildbaserat spår ${subIdx} (${targetLang}) gav en tom/nästan tom .sup-fil (${supSize} bytes) – troligen ett problem med själva spåret i filen, inte med OCR:en`, { subIdx, targetLang, supSize, ffmpegStderr: ffmpegStderr.slice(-1000) });
+      try { fs.unlinkSync(supFile); } catch {}
+      return false;
+    }
+
     // Step 2: Convert .sup to .srt using PgsToSrt
+    let pgsStdout = "", pgsStderr = "";
     await new Promise((resolve, reject) => {
-      execFile(PGSTOSRT_EXE, [
+      const proc = execFile(PGSTOSRT_EXE, [
         "--input", supFile,
         "--output", cacheFile,
         "--tesseractdata", TESSDATA_DIR,
@@ -891,13 +1107,19 @@ async function convertPgsTosrt(item, subIdx, cacheFile, targetLang) {
       ], { timeout: 600000, windowsHide: true }, (err) => {
         if (err) reject(err); else resolve();
       });
+      proc.stdout?.on("data", d => { pgsStdout += d.toString(); if (pgsStdout.length > 4000) pgsStdout = pgsStdout.slice(-4000); });
+      proc.stderr?.on("data", d => { pgsStderr += d.toString(); if (pgsStderr.length > 4000) pgsStderr = pgsStderr.slice(-4000); });
     });
 
     // Cleanup .sup file
     try { fs.unlinkSync(supFile); } catch {}
 
     if (fs.existsSync(cacheFile)) return true;
-    logSubtitle("error", item, `PgsToSrt gav ingen utfil för spår ${subIdx} (${targetLang})`, { subIdx, targetLang, tessLang });
+    logSubtitle("error", item, `PgsToSrt gav ingen utfil för spår ${subIdx} (${targetLang})`, {
+      subIdx, targetLang, tessLang, supSize,
+      pgsStdout: pgsStdout.trim().slice(-1000) || null,
+      pgsStderr: pgsStderr.trim().slice(-1000) || null
+    });
     return false;
   } catch(e) {
     logSubtitle("error", item, `PgsToSrt-konvertering misslyckades för spår ${subIdx} (${targetLang})`, { subIdx, targetLang, tessLang, error: e.message?.split("\n")[0] });
@@ -1339,6 +1561,30 @@ app.post("/api/media/:id/progress", requireAuth, async (req, res) => {
   const existing = await dbFindOne(db.history,{user_id:req.user._id,media_id:req.params.id});
   if (existing) await dbUpdate(db.history,{_id:existing._id},{$set:{position,duration,completed:completed?1:0,watched_at:new Date().toISOString()}});
   else await dbInsert(db.history,{_id:uuidv4(),user_id:req.user._id,media_id:req.params.id,position:position||0,duration:duration||0,completed:completed?1:0,watched_at:new Date().toISOString()});
+
+  // Live activity: refresh (or create) this session's heartbeat entry, unless playback
+  // just completed — a finished item shouldn't linger in the "currently watching" list.
+  const sessionKey = `${req.user._id}:${req.params.id}`;
+  if (completed) {
+    _activeSessions.delete(sessionKey);
+  } else {
+    const item = await dbFindOne(db.media, { _id: req.params.id });
+    _activeSessions.set(sessionKey, {
+      userId: req.user._id,
+      username: req.user.username,
+      mediaId: req.params.id,
+      title: item?.title || "Okänd",
+      type: item?.type || "unknown",
+      position: position || 0,
+      duration: duration || 0,
+      // Inferred, not client-reported: if this file currently has an active FFmpeg
+      // transcode running, this session is (almost certainly) watching via DASH.
+      method: activeDashTranscodes.has(req.params.id) ? "dash" : "direct",
+      startedAt: _activeSessions.get(sessionKey)?.startedAt || Date.now(),
+      lastHeartbeat: Date.now()
+    });
+  }
+
   res.json({ok:true});
 });
 
@@ -1756,13 +2002,33 @@ app.get("/api/media/:id/download", requireMediaAccess, async (req, res) => {
     "Content-Disposition": `attachment; filename*=UTF-8''${filename}`
   };
 
+  // Live activity: track this download's progress by the highest byte offset requested so
+  // far. Native download managers typically fetch sequential ranges, so the end of the most
+  // recent range is a good proxy for "how far along" the download is.
+  const downloadKey = `${req.user._id}:${item._id}`;
+  function touchDownloadTracker(bytesServedSoFar) {
+    const existing = _activeDownloads.get(downloadKey);
+    _activeDownloads.set(downloadKey, {
+      userId: req.user._id,
+      username: req.user.username,
+      mediaId: item._id,
+      title: item.title || "Okänd",
+      totalBytes: stat.size,
+      bytesServed: Math.max(existing?.bytesServed || 0, bytesServedSoFar),
+      startedAt: existing?.startedAt || Date.now(),
+      lastActivity: Date.now()
+    });
+  }
+
   if (range) {
     const [s, e] = range.replace(/bytes=/, "").split("-");
     const start = parseInt(s, 10);
     const end = e ? parseInt(e, 10) : stat.size - 1;
+    touchDownloadTracker(end + 1);
     res.writeHead(206, { ...baseHeaders, "Content-Range": `bytes ${start}-${end}/${stat.size}`, "Content-Length": end - start + 1 });
     fs.createReadStream(item.file_path, { start, end }).pipe(res);
   } else {
+    touchDownloadTracker(stat.size);
     res.writeHead(200, { ...baseHeaders, "Content-Length": stat.size });
     fs.createReadStream(item.file_path).pipe(res);
   }
@@ -1869,6 +2135,44 @@ async function startHlsTranscode(item, startSec = 0) {
   return proc;
 }
 
+
+// ── LIVE ACTIVITY TRACKING ──────────────────────────────────────────────────────
+// Lightweight in-memory trackers (no DB writes) feeding the admin "live activity" view.
+// Populated as a side-effect of endpoints that already run on every heartbeat/request —
+// no new client-side polling needed.
+
+// Keyed by `${userId}:${mediaId}`. Refreshed on every /progress POST (already sent every
+// 5s by the player), so "currently watching" is just "heartbeat seen recently".
+const _activeSessions = new Map();
+const SESSION_STALE_MS = 20000; // no heartbeat for 20s = session considered ended
+
+// Keyed by `${userId}:${mediaId}`. Refreshed on every byte-range request to the download
+// endpoint, so we can show live progress (bytes served vs. total) without the app polling.
+const _activeDownloads = new Map();
+const DOWNLOAD_STALE_MS = 60000; // no activity for 60s = considered stalled/abandoned
+// Grace period before a transcode with no matching active session is considered orphaned.
+// Must be generous enough that a transcode which JUST started (before its first progress
+// heartbeat has had time to arrive) isn't killed prematurely.
+const TRANSCODE_ORPHAN_GRACE_MS = 30000;
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, s] of _activeSessions) if (now - s.lastHeartbeat > SESSION_STALE_MS) _activeSessions.delete(key);
+  for (const [key, d] of _activeDownloads) if (now - d.lastActivity > DOWNLOAD_STALE_MS) _activeDownloads.delete(key);
+
+  // Safety net: kill any DASH transcode nobody is actively watching anymore. This is the
+  // primary defense against orphaned FFmpeg processes — relying on every client (web, native
+  // apps, future clients) to remember to call /api/dash/:id/stop is fragile (closed tabs,
+  // crashes, force-quits all skip that call). The server checks for itself instead.
+  for (const [itemId, t] of activeDashTranscodes) {
+    const hasActiveViewer = [..._activeSessions.values()].some(s => s.mediaId === itemId);
+    if (!hasActiveViewer && (now - t.startTime) > TRANSCODE_ORPHAN_GRACE_MS) {
+      console.log(`[DASH] No active viewer for "${t.title}" — killing orphaned transcode (ran for ${Math.round((now - t.startTime)/1000)}s)`);
+      try { t.proc.kill("SIGKILL"); } catch {}
+      activeDashTranscodes.delete(itemId);
+    }
+  }
+}, 10000);
 
 // ── DASH TRANSCODE ───────────────────────────────────────────────────────────
 const activeDashTranscodes = new Map();
@@ -2004,7 +2308,10 @@ async function startDashTranscode(item, seekSec = 0, audioTrackIndex = null, all
   console.log(`[DASH] ${new Date().toISOString().substring(11,23)} Starting transcode: ${item.title}`);
   console.log(`[DASH] Full args: ${args.join(' ')}`);
   const proc = spawn(ffmpeg, args, { windowsHide: false, cwd: dashDir });
-  activeDashTranscodes.set(itemId, { proc, startTime: Date.now(), startSec: seekSec, duration: await getDuration(item) });
+  activeDashTranscodes.set(itemId, {
+    proc, startTime: Date.now(), startSec: seekSec, duration: await getDuration(item),
+    title: item.title, videoMode: canCopyVideo ? (canCopyHevc ? "copy-hevc" : "copy-h264") : `encode-${encoder}`
+  });
 
   let stderrBuf = "";
   proc.stderr.on("data", d => {
@@ -2979,6 +3286,100 @@ app.post("/api/subtitles/recache-all", requireAdmin, async (req, res) => {
   }
 });
 
+// Wipes every cached subtitle file and resets the related DB fields/counters, so the whole
+// pipeline can be verified from a genuinely clean slate (e.g. after changing OCR settings or
+// testing the auto-download of Tesseract language data). Does NOT touch the OCR allowlist
+// itself — that's a setting, not cached data — and doesn't touch the source video files.
+app.post("/api/subtitles/clear-cache", requireAdmin, async (req, res) => {
+  try {
+    const cacheDir = path.join(DATA_DIR, "subtitle-cache");
+    let removed = 0;
+    if (fs.existsSync(cacheDir)) {
+      for (const f of fs.readdirSync(cacheDir)) {
+        try { fs.unlinkSync(path.join(cacheDir, f)); removed++; } catch(e) { logSubtitle("warn", null, `Kunde inte ta bort cachefil ${f}`, { error: e.message }); }
+      }
+    }
+    await dbUpdate(db.media, {}, { $unset: { cached_subtitle_langs: true, cached_subtitle_lang: true } }, { multi: true });
+
+    _subtitleCacheDone = 0; _subtitleCacheErrors = 0;
+    _subtitleCacheFailed = 0; _subtitleCacheFailedEps = 0;
+    _subtitleCacheGated = 0; _subtitleCacheGatedEps = 0;
+    _subtitleCacheNoSubs = 0; _subtitleCacheNoSubsEps = 0;
+    _subtitleCacheWithSwe = 0; _subtitleCacheWithEng = 0;
+    _subtitleCacheWithSweEps = 0; _subtitleCacheWithEngEps = 0;
+    _subtitleLangBreakdown = { movies: {}, episodes: {} };
+
+    logSubtitle("info", null, `Undertextcache helt rensad av admin – ${removed} filer borttagna`);
+    res.json({ ok: true, removed });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── LIVE ACTIVITY (admin dashboard) ────────────────────────────────────────────
+// Aggregates everything the "what's happening on my server right now" view needs from the
+// in-memory trackers above, plus a recent cross-user history feed (also the foundation for
+// future "you watched X, you might like Y" recommendations — same underlying data).
+app.get("/api/admin/live-activity", requireAdmin, async (req, res) => {
+  try {
+    const now = Date.now();
+
+    const sessions = [...(_activeSessions.values())].map(s => ({
+      ...s,
+      idleSeconds: Math.round((now - s.lastHeartbeat) / 1000),
+      progressPct: s.duration > 0 ? Math.min(100, Math.round((s.position / s.duration) * 100)) : 0
+    }));
+
+    const transcodes = [...activeDashTranscodes.entries()].map(([mediaId, t]) => ({
+      mediaId,
+      title: t.title,
+      videoMode: t.videoMode || "unknown",
+      elapsedSeconds: Math.round((now - t.startTime) / 1000),
+      startSec: t.startSec
+    }));
+
+    const downloads = [...(_activeDownloads.values())].map(d => ({
+      ...d,
+      progressPct: d.totalBytes > 0 ? Math.min(100, Math.round((d.bytesServed / d.totalBytes) * 100)) : 0,
+      idleSeconds: Math.round((now - d.lastActivity) / 1000),
+      stalled: (now - d.lastActivity) > 15000
+    }));
+
+    // Recent activity feed across all users (not just the requesting admin) — most recent first.
+    // Uses NeDB's own sort+limit cursor instead of dbFind({}) — fetching and JS-sorting the
+    // WHOLE history collection every 5 seconds (this endpoint is polled that often while the
+    // dashboard is open) got noticeably heavy once history had built up from real usage.
+    const topHistory = await new Promise((resolve, reject) => {
+      db.history.find({}).sort({ watched_at: -1 }).limit(50).exec((err, docs) => err ? reject(err) : resolve(docs));
+    });
+    const userIds = [...new Set(topHistory.map(h => h.user_id))];
+    const mediaIds = [...new Set(topHistory.map(h => h.media_id))];
+    const [historyUsers, historyMedia] = await Promise.all([
+      dbFind(db.users, { _id: { $in: userIds } }),
+      dbFind(db.media, { _id: { $in: mediaIds } })
+    ]);
+    const userMap = Object.fromEntries(historyUsers.map(u => [u._id, u]));
+    const mediaMap = Object.fromEntries(historyMedia.map(m => [m._id, m]));
+    const recentHistory = topHistory.map(h => ({
+      username: userMap[h.user_id]?.username || "(borttagen användare)",
+      title: mediaMap[h.media_id]?.title || "(borttagen film/serie)",
+      mediaId: h.media_id,
+      position: h.position,
+      duration: h.duration,
+      completed: !!h.completed,
+      watchedAt: h.watched_at
+    }));
+
+    res.json({
+      sessions,
+      transcodes,
+      downloads,
+      recentHistory,
+      subtitleQueue: { running: _subtitleCacheRunning, queued: _subtitleCacheQueue.length }
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get("/api/subtitles/cache-status", requireAuth, async (req, res) => {
   const cacheDir = path.join(DATA_DIR, "subtitle-cache");
   let cached = 0;
@@ -3043,7 +3444,14 @@ app.get("/api/scan/status", requireAuth, async (req, res) => {
   const allMoviesForCollections = await dbFind(db.media, {type:"movie", collection_id: {$exists: true}});
   const collectionIds = new Set(allMoviesForCollections.filter(m => m.collection_id).map(m => m.collection_id));
   const collections = collectionIds.size;
-  res.json({scanning:isScanning,counts:[{type:"movie",c:movies,collections},{type:"tvshow",c:tvshows,episodes},{type:"music",c:musicTracks,albums:musicAlbums}]});
+  res.json({scanning:isScanning,progress:_scanProgress,counts:[{type:"movie",c:movies,collections},{type:"tvshow",c:tvshows,episodes},{type:"music",c:musicTracks,albums:musicAlbums}]});
+});
+
+// Minimal, non-sensitive subset of config — safe for any logged-in user (unlike the full
+// /api/config, which includes API keys and is admin-only). Just enough for cosmetic display
+// like showing the server's name in the UI.
+app.get("/api/public-config", requireAuth, (req, res) => {
+  res.json({ server_name: config.server_name || null });
 });
 
 app.get("/api/config", requireAdmin, (req, res) => {

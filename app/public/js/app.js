@@ -1,5 +1,15 @@
 // StreamVault v10 - Main App
 let currentUser = null;
+
+// Best-effort cleanup when the tab/browser closes (or the app is backgrounded on some
+// platforms). Not the primary defense — the server also detects and kills orphaned
+// transcodes on its own — but this stops them a lot sooner in the common "closed the tab"
+// case. sendBeacon can't set headers, so the token goes in the query string here.
+window.addEventListener("pagehide", () => {
+  if (!currentItemId) return;
+  const token = localStorage.getItem("sv_token") || API._token || "";
+  try { navigator.sendBeacon("/api/dash/" + currentItemId + "/stop?token=" + encodeURIComponent(token)); } catch {}
+});
 let nowPlayingId = null;
 let allLibraries = [];
 
@@ -8,9 +18,20 @@ window.addEventListener("DOMContentLoaded", async () => {
   const token = localStorage.getItem("sv_token");
   if (token) {
     const user = JSON.parse(localStorage.getItem("sv_user") || "null");
-    if (user) { currentUser = user; showApp(); 
-      API.get("/config").then(c => { window._serverName = c.server_name || "StreamVault"; }).catch(()=>{});
-      return; }
+    if (user) {
+      currentUser = user; showApp();
+      API.get("/public-config").then(c => { window._serverName = c.server_name || "StreamVault"; }).catch(()=>{});
+      // The localStorage copy can go stale (e.g. after changing language/password on another
+      // tab, or if a previous save didn't update it) — refresh from the server in the
+      // background so a reload never silently reverts a setting back to an old value.
+      API.get("/me").then(fresh => {
+        if (fresh && fresh._id) {
+          currentUser = Object.assign({}, currentUser, fresh, { id: fresh._id });
+          localStorage.setItem("sv_user", JSON.stringify(currentUser));
+        }
+      }).catch(() => {});
+      return;
+    }
   }
   try {
     const data = await API.post("/auth/refresh", { refreshToken: API._refresh });
@@ -125,6 +146,8 @@ async function loadSidebarLibraries() {
 function switchSection(name) {
   document.querySelectorAll(".section").forEach(s => s.classList.remove("active"));
   document.querySelectorAll(".sb-item").forEach(b => b.classList.remove("active"));
+  if (name !== "settings" && _liveActivityInterval) { clearInterval(_liveActivityInterval); _liveActivityInterval = null; }
+  if (name !== "settings" && _scanProgressInterval) { clearInterval(_scanProgressInterval); _scanProgressInterval = null; }
   const sec = document.getElementById("sec-" + name);
   if (sec) sec.classList.add("active");
   const sbEl = document.getElementById("sb-" + name);
@@ -1829,12 +1852,18 @@ async function playItem(id, title) {
     const notDone = !hasDur || (progress.position / progress.duration) < 0.95;
     const resumeSec = (progress?.position > 10 && notDone) ? Math.floor(progress.position) : 0;
     console.log("[RESUME] position:", progress?.position, "duration:", progress?.duration, "resumeSec:", resumeSec);
-    // Auto-load Swedish subtitles
-    autoLoadSubtitles(id);
+    // NOTE: subtitles are NOT auto-loaded here anymore. Loading them before we know whether
+    // playback will be direct or DASH caused a race: DASH resets the video's local clock to
+    // 0 on resume, so a subtitle activated with no offset (absolute timestamps) could win the
+    // race against the correctly-offset load below, leaving captions off by exactly the
+    // resume position. Direct play loads its subtitles right after `video.src` is set below;
+    // DASH loads its (offset-aware) subtitles via _pendingSubtitleLoad once the first frame
+    // is captured, further down.
 
     if (info.method === "direct") {
       video.src = info.url;
       video.play().catch(() => {});
+      autoLoadSubtitles(id); // safe here: direct play's video.currentTime matches the real position, no offset needed
       // Reset DASH state for new episode
       window._dashStartSec = 0;
       window._dashFirstCT = null;
@@ -2505,7 +2534,7 @@ async function openSubtitles(mediaId, title) {
         row.innerHTML = "<span style='font-size:18px'>" + flag + "</span><div style='flex:1'><div style='font-size:13px;font-weight:500'>" + esc(s.label) + "</div><div style='font-size:11px;color:var(--muted)'>" + (s.type === "embedded" ? "Inbakad" : "SRT-fil") + "</div></div>";
         if (s.url) {
           var btn = document.createElement("button");
-          var isActiveSub = _activeSubtitleUrl && s.url && s.url.split("?")[0] === _activeSubtitleUrl;
+          var isActiveSub = _activeSubtitleUrl && s.url && subtitleIdentityUrl(s.url) === _activeSubtitleUrl;
           btn.textContent = isActiveSub ? "✅ Aktiv" : "Aktivera";
           btn.style.cssText = isActiveSub
             ? "background:#1a7a3c;border:none;color:#4eff8a;font-size:12px;padding:6px 12px;border-radius:6px;cursor:default;font-weight:700"
@@ -2603,6 +2632,19 @@ async function recacheAllSubtitles() {
   }
 }
 
+// Admin-only: wipes every cached subtitle file and resets the counters/DB fields, for testing
+// the whole pipeline (OCR gating, auto-download of Tesseract data, etc.) from a clean slate.
+async function clearSubtitleCache() {
+  if (!confirm("Detta raderar ALLA cachade undertextfiler (både textbaserade och OCR-konverterade) och nollställer statistiken.\n\nDina videofiler påverkas inte, och du kan köra 'Cacha om alla undertexter' igen efteråt för att bygga upp allt på nytt.\n\nFortsätt?")) return;
+  try {
+    var data = await API.post("/subtitles/clear-cache", {});
+    toast(`✓ ${data.removed} cachade undertextfiler borttagna`, "success");
+    loadSettings();
+  } catch(e) {
+    toast("Fel: " + e.message, "error");
+  }
+}
+
 async function searchSubtitles(mediaId) {
   var query = document.getElementById("sub-search-input")?.value?.trim();
   var lang = document.getElementById("sub-lang-select")?.value || "sv";
@@ -2643,8 +2685,23 @@ async function downloadSubtitle(fileId, mediaId) {
   } catch(e) { toast("Fel: " + e.message, "error"); }
 }
 
+// Strips only volatile query params (token, offset, cache-buster) when comparing subtitle
+// URLs for "is this the active one" — NOT the whole query string. Embedded subtitle tracks
+// are only distinguished by their ?index=N param, and cached ones by ?file=X, so stripping
+// everything after "?" made every embedded track (or every cached file) compare as identical.
+function subtitleIdentityUrl(url) {
+  if (!url) return null;
+  var parts = url.split("?");
+  if (parts.length < 2) return parts[0];
+  var keep = parts[1].split("&").filter(function(p) {
+    var key = p.split("=")[0];
+    return key !== "token" && key !== "dtoken" && key !== "offset" && key !== "_t";
+  });
+  return keep.length ? parts[0] + "?" + keep.join("&") : parts[0];
+}
+
 function activateSubtitle(url, label) {
-  _activeSubtitleUrl = url ? url.split("?")[0] : null; // Store base URL without params
+  _activeSubtitleUrl = subtitleIdentityUrl(url);
   var video = document.getElementById("main-video");
   if (!video) { toast("Starta filmen först för att aktivera undertext", "info"); return; }
   
@@ -2784,6 +2841,13 @@ async function saveUserLanguage(userId) {
   try {
     const result = await API.patch("/users/" + userId + "/language", { language: language || null });
     toast("✓ Språk sparat!", "success");
+    // Keep the in-memory currentUser AND the localStorage copy in sync immediately —
+    // otherwise a page reload reverts back to whatever language was cached at last login,
+    // which is worse than doing nothing (looks like the change silently didn't take).
+    if (currentUser && (userId === currentUser._id || userId === currentUser.id)) {
+      currentUser.language = language || null;
+      localStorage.setItem("sv_user", JSON.stringify(currentUser));
+    }
     if (result?.needsOcrLanguage) {
       if (currentUser?.role === "admin") {
         promptAddOcrLanguage(result.needsOcrLanguage);
@@ -2806,7 +2870,13 @@ function promptAddOcrLanguage(lang) {
   if (!confirm(`Lägg till ${label} i undertext-OCR-listan?\n\nDetta köar en riktad omcachning som bara konverterar bildbaserade undertexter på ${label} – övriga språk påverkas inte.`)) return;
   API.post("/subtitles/ocr-languages", { lang: lang, backfill: true })
     .then(function(res) {
-      toast(`✓ ${label} tillagt – ${res.queued || 0} filer köade`, "success");
+      if (res.tessdataWarning) {
+        toast("⚠️ " + res.tessdataWarning, "error");
+      } else if (res.tessdataDownloaded) {
+        toast(`✓ ${label} tillagt – språkdata för Tesseract hämtades automatiskt, ${res.queued || 0} filer köade`, "success");
+      } else {
+        toast(`✓ ${label} tillagt – ${res.queued || 0} filer köade`, "success");
+      }
       startCacheStatusPolling();
       checkPendingOcrRequests();
     })
@@ -2830,7 +2900,13 @@ async function addOcrLanguage(explicitLang) {
   if (!confirm(`Lägg till ${label} i OCR-listan och köa en riktad omcachning för det språket?`)) return;
   try {
     var res = await API.post("/subtitles/ocr-languages", { lang: lang, backfill: true });
-    toast(`✓ ${label} tillagt – ${res.queued || 0} filer köade`, "success");
+    if (res.tessdataWarning) {
+      toast("⚠️ " + res.tessdataWarning, "error");
+    } else if (res.tessdataDownloaded) {
+      toast(`✓ ${label} tillagt – språkdata för Tesseract hämtades automatiskt, ${res.queued || 0} filer köade`, "success");
+    } else {
+      toast(`✓ ${label} tillagt – ${res.queued || 0} filer köade`, "success");
+    }
     startCacheStatusPolling();
     checkPendingOcrRequests();
     loadSettings();
@@ -2937,14 +3013,18 @@ async function autoLoadSubtitles(mediaId, offsetSec) {
       var l = (s.lang || "").toLowerCase();
       return l === code || (code === "swe" && l === "sv") || (code === "eng" && l === "en");
     }
-    // Priority: 1) Any subtitle matching the user's own language, 2) Any SRT file (legacy default,
-    // usually Swedish), 3) Embedded Swedish, 4) Nothing
+    // Priority: 1) Any subtitle matching the user's own language, 2) English (widely understood
+    // fallback), 3) Swedish (server default), 4) embedded Swedish, 5) nothing.
+    // Deliberately NOT "any srt file" — with multiple languages now cached, that used to
+    // silently resolve to whatever the server happened to sort first (usually Swedish),
+    // even for a user whose language is e.g. Finnish and who can't read Swedish at all.
     var userSub = subs.find(function(s) { return matchesLang(s, userSubLang); });
-    var srtSub = subs.find(function(s) { return s.type === "srt"; });
+    var engSub = subs.find(function(s) { return s.type === "srt" && matchesLang(s, "eng"); });
+    var sweSub = subs.find(function(s) { return s.type === "srt" && matchesLang(s, "swe"); });
     var embeddedSv = subs.find(function(s) { 
       return s.type === "embedded" && (s.lang === "sv" || s.lang === "swe" || (s.label || "").toLowerCase().includes("swedish")); 
     });
-    var sub = userSub || srtSub || embeddedSv || null;
+    var sub = userSub || engSub || sweSub || embeddedSv || null;
     if (!sub || !sub.url) return;
     // Apply offset to URL only for SRT files, not embedded (embedded have absolute times)
     if (offsetSec && offsetSec > 0 && sub.url && sub.type !== "embedded") {
@@ -3138,6 +3218,9 @@ function closePlayer() {
   if (video) { video.src = ""; video.load(); }
   document.getElementById("player-bar").style.display = "none";
   document.body.style.paddingBottom = "";
+  // Tell the server to actually kill the FFmpeg transcode (if any) — otherwise it just
+  // keeps running/counting on the server after the player is closed, wasting CPU forever.
+  if (currentItemId) API.post("/dash/" + currentItemId + "/stop").catch(() => {});
   nowPlayingId = null;
   currentItemId = null;
   currentEpisodeData = null;
@@ -3228,6 +3311,105 @@ var _cacheStatusInterval = null;
 // Adjective forms for the "X med Y text" lines in the subtitle-cache dashboard.
 // Falls back to the raw code for anything not in the list, so new/rare languages still show up.
 var SUBTITLE_LANG_ADJ = { swe:"svensk", eng:"engelsk", nor:"norsk", dan:"dansk", deu:"tysk", fra:"fransk", spa:"spansk", nld:"nederländsk", fin:"finsk", ita:"italiensk", por:"portugisisk", pol:"polsk", jpn:"japansk", und:"okänd" };
+// ── LIVE ACTIVITY (admin dashboard) ────────────────────────────────────────────
+var _liveActivityInterval = null;
+
+function renderLiveActivitySection(data) {
+  return `<div class="settings-section" id="live-activity-section">
+    <div class="settings-section-title">🔴 Live-aktivitet</div>
+    <div id="live-activity-content">${renderLiveActivityContent(data)}</div>
+  </div>`;
+}
+
+function fmtTime(sec) {
+  sec = Math.max(0, Math.floor(sec || 0));
+  var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  return h > 0 ? `${h}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}` : `${m}:${String(s).padStart(2,"0")}`;
+}
+
+function renderLiveActivityContent(data) {
+  var sessions = data.sessions || [];
+  var transcodes = data.transcodes || [];
+  var downloads = data.downloads || [];
+  var history = data.recentHistory || [];
+
+  var html = "";
+
+  // Active sessions
+  html += `<div style="font-weight:500;margin-bottom:6px">📺 Just nu (${sessions.length})</div>`;
+  if (!sessions.length) {
+    html += `<div style="font-size:12px;color:var(--muted);margin-bottom:14px">Ingen tittar just nu</div>`;
+  } else {
+    html += `<div style="display:flex;flex-direction:column;gap:6px;margin-bottom:14px">` + sessions.map(s => `
+      <div style="background:var(--card2);border-radius:8px;padding:8px 12px;font-size:13px">
+        <div style="display:flex;justify-content:space-between;gap:8px">
+          <div><b>${esc(s.username)}</b> – ${esc(s.title)}</div>
+          <span style="font-size:11px;padding:2px 8px;border-radius:10px;background:${s.method === "direct" ? "rgba(46,204,113,0.15);color:#2ecc71" : "rgba(230,126,34,0.15);color:#e67e22"}">${s.method === "direct" ? "Direct" : "Transkodning"}</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;margin-top:4px">
+          <div style="flex:1;height:4px;background:var(--border);border-radius:2px;overflow:hidden"><div style="height:100%;width:${s.progressPct}%;background:var(--accent,#3498db)"></div></div>
+          <span style="font-size:11px;color:var(--muted);white-space:nowrap">${fmtTime(s.position)} / ${fmtTime(s.duration)}</span>
+        </div>
+      </div>`).join("") + `</div>`;
+  }
+
+  // Active transcodes (server load)
+  html += `<div style="font-weight:500;margin-bottom:6px">⚙️ Aktiva transkodningar (${transcodes.length})</div>`;
+  if (!transcodes.length) {
+    html += `<div style="font-size:12px;color:var(--muted);margin-bottom:14px">Inga just nu</div>`;
+  } else {
+    var modeLabels = { "copy-hevc": "HEVC (kopierad, ingen kvalitetsförlust)", "copy-h264": "H264 (kopierad, ingen kvalitetsförlust)" };
+    html += `<div style="display:flex;flex-direction:column;gap:6px;margin-bottom:14px">` + transcodes.map(t => `
+      <div style="background:var(--card2);border-radius:8px;padding:8px 12px;font-size:13px">
+        <b>${esc(t.title)}</b>
+        <div style="font-size:11px;color:var(--muted)">${esc(modeLabels[t.videoMode] || t.videoMode)} · körts i ${fmtTime(t.elapsedSeconds)}</div>
+      </div>`).join("") + `</div>`;
+  }
+
+  // Active downloads
+  html += `<div style="font-weight:500;margin-bottom:6px">⬇️ Nedladdningar (${downloads.length})</div>`;
+  if (!downloads.length) {
+    html += `<div style="font-size:12px;color:var(--muted);margin-bottom:14px">Inga pågående</div>`;
+  } else {
+    html += `<div style="display:flex;flex-direction:column;gap:6px;margin-bottom:14px">` + downloads.map(d => `
+      <div style="background:var(--card2);border-radius:8px;padding:8px 12px;font-size:13px">
+        <div style="display:flex;justify-content:space-between;gap:8px">
+          <div><b>${esc(d.username)}</b> – ${esc(d.title)}</div>
+          ${d.stalled ? `<span style="font-size:11px;color:var(--muted)">Pausad/klar</span>` : ""}
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;margin-top:4px">
+          <div style="flex:1;height:4px;background:var(--border);border-radius:2px;overflow:hidden"><div style="height:100%;width:${d.progressPct}%;background:var(--accent,#3498db)"></div></div>
+          <span style="font-size:11px;color:var(--muted);white-space:nowrap">${d.progressPct}%</span>
+        </div>
+      </div>`).join("") + `</div>`;
+  }
+
+  // Recent history feed (all users)
+  html += `<div style="font-weight:500;margin-bottom:6px">🕓 Senaste aktivitet</div>`;
+  if (!history.length) {
+    html += `<div style="font-size:12px;color:var(--muted)">Ingen historik ännu</div>`;
+  } else {
+    html += `<div style="display:flex;flex-direction:column;gap:4px;max-height:240px;overflow-y:auto">` + history.slice(0, 20).map(h => `
+      <div style="font-size:12px;color:var(--muted);padding:4px 0;border-bottom:1px solid var(--border)">
+        <b style="color:var(--text)">${esc(h.username)}</b> ${h.completed ? "såg klart" : "tittade på"} <b style="color:var(--text)">${esc(h.title)}</b>
+        <span style="float:right">${new Date(h.watchedAt).toLocaleString("sv-SE")}</span>
+      </div>`).join("") + `</div>`;
+  }
+
+  return html;
+}
+
+function startLiveActivityPolling() {
+  if (_liveActivityInterval) return;
+  _liveActivityInterval = setInterval(async () => {
+    try {
+      var data = await API.get("/admin/live-activity");
+      var el = document.getElementById("live-activity-content");
+      if (el) el.innerHTML = renderLiveActivityContent(data);
+    } catch {}
+  }, 5000);
+}
+
 function subtitleLangBreakdownHtml(counts, featured) {
   counts = counts || {};
   featured = featured && featured.length ? featured : ["eng"];
@@ -3245,6 +3427,31 @@ function subtitleLangBreakdownHtml(counts, featured) {
     lines.push(`<div style="padding-left:12px;color:var(--muted)">${otherCount} med övriga språk</div>`);
   }
   return lines.join("");
+}
+
+// Files are found on disk almost instantly; TMDB lookups for each one are what's actually
+// slow. This shows both numbers so "found 150, processed 7" is visible immediately instead
+// of the admin seeing nothing until the first couple of TMDB calls finish.
+function scanProgressText(progress) {
+  if (!progress || !progress.found) return "⏳ Söker efter filer...";
+  return `⏳ Skannar "${progress.library || "?"}": ${progress.processed} av ${progress.found} bearbetade (hämtar filminfo...)`;
+}
+
+var _scanProgressInterval = null;
+function startScanProgressPolling() {
+  if (_scanProgressInterval) return;
+  _scanProgressInterval = setInterval(async () => {
+    try {
+      var data = await API.get("/scan/status");
+      var el = document.getElementById("scan-progress-info");
+      if (el) el.textContent = data.scanning ? scanProgressText(data.progress) : "";
+      if (!data.scanning) {
+        clearInterval(_scanProgressInterval);
+        _scanProgressInterval = null;
+        loadSettings(); // refresh the counts once the scan is actually done
+      }
+    } catch {}
+  }, 3000);
 }
 
 function startCacheStatusPolling() {
@@ -3302,13 +3509,14 @@ async function loadSettings() {
     // Start updating next scan label
     setTimeout(updateNextScanLabel, 500);
     setInterval(updateNextScanLabel, 30000);
-    const [cfg, users, libs, scanStatus, updateInfo, cacheStatus, pgsStatus, ocrLangConfig, pendingOcr] = await Promise.all([
+    const [cfg, users, libs, scanStatus, updateInfo, cacheStatus, pgsStatus, ocrLangConfig, pendingOcr, liveActivity] = await Promise.all([
       API.get("/config"), API.get("/users"), API.get("/libraries"),
       API.get("/scan/status"), API.get("/updates/check").catch(() => null),
       API.get("/subtitles/cache-status").catch(() => null),
       API.get("/tools/pgstosrt-status").catch(() => ({ installed: false })),
       API.get("/subtitles/ocr-languages").catch(() => ({ mode: "selected", languages: [] })),
-      currentUser?.role === "admin" ? API.get("/subtitles/ocr-pending").catch(() => ({ pending: [] })) : Promise.resolve({ pending: [] })
+      currentUser?.role === "admin" ? API.get("/subtitles/ocr-pending").catch(() => ({ pending: [] })) : Promise.resolve({ pending: [] }),
+      currentUser?.role === "admin" ? API.get("/admin/live-activity").catch(() => null) : Promise.resolve(null)
     ]);
     console.log("[SETTINGS] cacheStatus:", JSON.stringify(cacheStatus)?.slice(0,100));
     const counts = Object.fromEntries((scanStatus.counts || []).map(c => [c.type, c.c]));
@@ -3321,6 +3529,9 @@ async function loadSettings() {
     // Auto-refresh cache status while queue is running
     if (cacheStatus && (cacheStatus.running || cacheStatus.queued > 0)) {
       startCacheStatusPolling();
+    }
+    if (scanStatus.scanning) {
+      startScanProgressPolling();
     }
 
     sec.innerHTML = `<div class="settings-wrap">
@@ -3344,6 +3555,8 @@ async function loadSettings() {
         </div>
       </div>` : ""}
 
+      ${liveActivity ? renderLiveActivitySection(liveActivity) : ""}
+
       <div class="settings-section">
         <div class="settings-section-title">Biblioteksstatus</div>
         <div style="display:flex;gap:12px;margin-bottom:12px">
@@ -3365,7 +3578,8 @@ async function loadSettings() {
           <button class="s-btn" onclick="updateCollections()">🎬 Uppdatera samlingar</button>
           <button class="s-btn" onclick="fullRescan()" style="border-color:#e74c3c;color:#e74c3c;">🗑 Rensa och skanna om allt</button>
         </div>
-        <div style="font-size:12px;color:var(--muted);margin-top:8px;">👁 Filbevakning aktiv · <span id="next-scan-label">Beräknar...</span></div>
+        <div id="scan-progress-info" style="font-size:12px;color:var(--muted);margin-top:8px;">${scanStatus.scanning ? scanProgressText(scanStatus.progress) : ""}</div>
+        <div style="font-size:12px;color:var(--muted);margin-top:4px;">👁 Filbevakning aktiv · <span id="next-scan-label">Beräknar...</span></div>
       </div>
 
       ${cacheStatus ? `<div class="settings-section" id="subtitle-cache-section">
@@ -3391,6 +3605,7 @@ async function loadSettings() {
         ${currentUser?.role === "admin" ? `<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
           <button class="btn-fav" style="font-size:12px" onclick="openSubtitleLog()">📋 Visa undertext-logg${cacheStatus.errors > 0 ? ` (${cacheStatus.errors} fel)` : ""}</button>
           <button class="btn-fav" style="font-size:12px" onclick="recacheAllSubtitles()">🔄 Cacha om alla undertexter</button>
+          <button class="btn-fav" style="font-size:12px" onclick="clearSubtitleCache()">🗑 Rensa all undertextcache</button>
         </div>` : ""}
       </div>` : ''}
 
@@ -3519,6 +3734,9 @@ async function loadSettings() {
           </select>
           <button class="s-btn primary" onclick="addUser()">Lägg till</button>
         </div>
+        <div style="margin-top:8px">
+          <button class="btn-fav" style="font-size:11px;color:var(--muted)" onclick="purgeGhostUsers()" title="Städar bort gamla borttagna konton som blockerar återanvändning av användarnamn">🧹 Städa bort gamla borttagna konton</button>
+        </div>
       </div>
 
       <div class="settings-section">
@@ -3553,6 +3771,7 @@ async function loadSettings() {
           <div><div class="setting-label">TMDB API-nyckel</div><div class="setting-desc">Filmaffischer och beskrivningar</div></div>
           <input class="s-input" type="password" id="s-tmdb" value="${esc(cfg.tmdb_api_key || "")}" placeholder="Ej angiven" autocomplete="off"/>
         </div>
+        <div style="margin:-4px 0 12px"><button class="btn-fav" style="font-size:12px" onclick="testTmdbConnection()">🔍 Testa TMDB-anslutning</button></div>
         <div class="setting-row">
           <div><div class="setting-label">OpenSubtitles API-nyckel</div><div class="setting-desc">Automatiska undertexter</div></div>
           <input class="s-input" type="password" id="s-opensub" value="${esc(cfg.opensubtitles_api_key || "")}" placeholder="Ej angiven" autocomplete="off"/>
@@ -3576,6 +3795,8 @@ async function loadSettings() {
 
       <div style="padding:20px 0;font-size:12px;color:var(--muted)">StreamVault v${updateInfo?.current || "–"}</div>
     </div>`;
+
+    if (currentUser?.role === "admin" && liveActivity) startLiveActivityPolling();
   } catch (e) {
     sec.innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><h3>${e.message}</h3></div>`;
   }
@@ -3780,6 +4001,31 @@ async function deleteUser(id) {
   if (!confirm("Ta bort användaren?")) return;
   try { await API.delete("/users/" + id); toast("Användare borttagen", "success"); loadSettings(); }
   catch (e) { toast(e.message, "error"); }
+}
+
+// One-time cleanup for accounts removed by the OLD (soft-delete) behavior — they're invisible
+// in the user list above but still occupy their username. Safe to click even if there's
+// nothing to clean up.
+async function testTmdbConnection() {
+  toast("⏳ Testar TMDB-anslutning...", "info");
+  try {
+    var result = await API.get("/tmdb/test");
+    toast(result.ok ? "✅ " + result.message : "❌ " + result.message, result.ok ? "success" : "error");
+  } catch(e) {
+    toast("Fel: " + e.message, "error");
+  }
+}
+
+async function purgeGhostUsers() {
+  if (!confirm("Detta letar reda på och permanent tar bort gamla konton som tidigare bara \"inaktiverades\" istället för att raderas helt (från innan den här uppdateringen). Deras användarnamn blir lediga igen. Fortsätt?")) return;
+  try {
+    var data = await API.post("/users/purge-inactive", {});
+    if (data.purged > 0) {
+      toast(`✓ ${data.purged} gammalt konto städat bort: ${data.usernames.join(", ")}`, "success");
+    } else {
+      toast("Inga gamla borttagna konton hittades – redan rent", "info");
+    }
+  } catch (e) { toast(e.message, "error"); }
 }
 
 async function addLib() {
