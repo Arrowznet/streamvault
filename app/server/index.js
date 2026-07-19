@@ -86,8 +86,47 @@ const SUBTITLE_LANG_ALIASES = {
 };
 const SUBTITLE_LANG_LABELS = { swe:"Svenska", eng:"English", nor:"Norsk", dan:"Dansk", deu:"Deutsch", fra:"Français", spa:"Español", nld:"Nederlands", fin:"Suomi", ita:"Italiano", por:"Português", pol:"Polski", jpn:"日本語", und:"Okänt språk" };
 const TESSERACT_LANG_MAP = { swe:"swe", eng:"eng", nor:"nor", dan:"dan", deu:"deu", fra:"fra", spa:"spa", nld:"nld", fin:"fin", ita:"ita", por:"por", pol:"pol", jpn:"jpn" };
+
+// "Bitmap subtitle" covers two structurally different formats that are NOT interchangeable:
+//  - PGS (Blu-ray, hdmv_pgs_subtitle): what PgsToSrt is actually built for. FFmpeg can extract
+//    this straight into a .sup container, which PgsToSrt reads directly.
+//  - VobSub/DVD-style (dvd_subtitle, dvdsub, xsub, dvb_subtitle): a different bitmap format
+//    entirely. FFmpeg's .sup muxer flatly refuses these ("sup muxer supports only codec
+//    hdmv_pgs_subtitle"), and PgsToSrt has no VobSub support — OCR'ing these would need a
+//    completely different tool (e.g. vobsub2srt) working from a .sub/.idx pair instead of a
+//    .sup file. Until/unless that's built, these are treated as a known, permanent limitation
+//    rather than retried and logged as a mysterious repeated failure.
+const PGS_COMPATIBLE_CODECS = ["hdmv_pgs_subtitle"];
+const UNSUPPORTED_BITMAP_CODECS = ["dvd_subtitle", "dvdsub", "xsub", "dvb_subtitle"];
+const bitmapCodecs = [...PGS_COMPATIBLE_CODECS, ...UNSUPPORTED_BITMAP_CODECS]; // still "bitmap", just handled differently below
 // Maps a user's UI language setting (e.g. "sv-SE") to the 3-letter subtitle code
 const USER_LANG_TO_SUB_LANG = { "sv-SE":"swe","en-US":"eng","no-NO":"nor","da-DK":"dan","de-DE":"deu","fr-FR":"fra","es-ES":"spa","nl-NL":"nld","fi-FI":"fin","ja-JP":"jpn" };
+
+// Decodes common HTML entities and strips unsupported markup from subtitle text. Many SRT
+// files — especially ones downloaded from OpenSubtitles or other web sources — contain raw
+// HTML entities like "&amp;" or "&#39;" and font-styling tags. WebVTT does NOT auto-decode
+// general HTML entities the way a browser renders normal HTML, so without this they show up
+// literally on screen (e.g. "Tom &amp; Jerry" instead of "Tom & Jerry"). Applied to the whole
+// converted body, not just cue text — timestamp lines never contain any of these characters,
+// so this is safe to run over the entire thing in one pass.
+function cleanSubtitleText(text) {
+  return text
+    // <font ...>...</font> isn't a real WebVTT tag (only <b>/<i>/<u>/<c>/<v>/<ruby> are) — strip
+    // the wrapper but keep the text inside, rather than leaving it to render unpredictably.
+    .replace(/<\/?font[^>]*>/gi, "")
+    // Numeric entities (decimal and hex)
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(parseInt(n, 10)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCharCode(parseInt(n, 16)))
+    // Common named entities — &amp; must be decoded LAST, otherwise something like "&amp;lt;"
+    // would incorrectly unescape twice into "<" instead of staying as the literal text "&lt;".
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&quot;/gi, "\"")
+    .replace(/&apos;/gi, "'")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&amp;/gi, "&");
+}
+
 
 function normalizeLangCode(raw) {
   const l = (raw || "").toLowerCase().trim();
@@ -97,6 +136,18 @@ function normalizeLangCode(raw) {
   return safe || "und";
 }
 function subtitleLangLabel(lang) { return SUBTITLE_LANG_LABELS[lang] || lang; }
+
+// Media IDs are base64url-encoded full file paths (see scanLibraries), which can easily be
+// 200-300+ characters for well-tagged releases with long folder+file names. Used directly in
+// a subtitle cache filename (which also needs "_{subIdx}_{lang}.srt" appended, plus the full
+// cache directory path), this routinely blows past Windows' 260-character MAX_PATH limit —
+// causing FFmpeg to fail creating the output file for EVERY subtitle track on such a movie,
+// silently and identically regardless of language. A short, fixed-length hash avoids this
+// entirely. External-file caching already did this; this makes embedded/converted caching
+// consistent with it.
+function shortMediaId(id) {
+  return require("crypto").createHash("md5").update(id).digest("hex");
+}
 
 // ── OCR LANGUAGE ALLOWLIST ─────────────────────────────────────────────────────
 // Text-based subtitles and external .srt files are cheap, so we always cache every
@@ -153,16 +204,13 @@ async function countExistingSubtitleCache() {
     const movies = await dbFind(db.media, { type: "movie" });
     const episodes = await dbFind(db.media, { type: "episode" });
 
-    // Media IDs are base64url-encoded file paths (see scanLibraries), so they CAN contain
-    // underscores — can't naively split filenames on "_". Instead this does a single pass
-    // over the cache directory (not one pass PER MOVIE, which is what made this O(movies ×
-    // cache files) and turned Settings sluggish once every language started getting cached).
-    const movieIds = new Set(movies.map(m => m._id));
-    const epIds = new Set(episodes.map(e => e._id));
-    const crypto = require("crypto");
-    const hashToItem = new Map(); // md5(id) -> { id, kind } for external-cache lookups
-    for (const m of movies) hashToItem.set(crypto.createHash("md5").update(m._id).digest("hex"), { id: m._id, kind: "movie" });
-    for (const e of episodes) hashToItem.set(crypto.createHash("md5").update(e._id).digest("hex"), { id: e._id, kind: "episode" });
+    // All subtitle cache filenames (embedded/converted AND external) now start with a fixed-
+    // length md5 hash of the media id — see shortMediaId(). That means matching a cache file
+    // back to its media item is always an unambiguous O(1) lookup, regardless of what
+    // characters happen to be in the (base64url-encoded) media id itself.
+    const hashToItem = new Map();
+    for (const m of movies) hashToItem.set(shortMediaId(m._id), { id: m._id, kind: "movie" });
+    for (const e of episodes) hashToItem.set(shortMediaId(e._id), { id: e._id, kind: "episode" });
 
     const movieLangs = new Map(); // id -> Set(lang)
     const epLangs = new Map();
@@ -173,21 +221,12 @@ async function countExistingSubtitleCache() {
 
     for (const f of files) {
       if (!f.endsWith(".srt")) continue;
-      // External cache: "{md5(id)}_ext_{lang}.srt" — hash is fixed-length hex, unambiguous.
-      const extMatch = f.match(/^([a-f0-9]{32})_ext_([a-z0-9]+)\.srt$/);
-      if (extMatch) {
-        const hit = hashToItem.get(extMatch[1]);
-        if (hit) addLang(hit.kind === "movie" ? movieLangs : epLangs, hit.id, extMatch[2]);
-        continue;
-      }
-      // Embedded/converted cache: "{id}_{subIdx}_{lang}.srt" — subIdx is always digits and
-      // lang is always lowercase alnum, so stripping those two trailing segments recovers
-      // the id even when the id itself contains underscores.
-      const m = f.match(/^(.+)_(\d+)_([a-z0-9]+)\.srt$/);
+      // Matches both "{hash}_ext_{lang}.srt" (external) and "{hash}_{subIdx}_{lang}.srt"
+      // (embedded/converted) — either way, the language is always the last "_"-delimited part.
+      const m = f.match(/^([a-f0-9]{32})_(?:ext_)?(?:\d+_)?([a-z0-9]+)\.srt$/);
       if (!m) continue;
-      const candidateId = m[1], lang = m[3];
-      if (movieIds.has(candidateId)) addLang(movieLangs, candidateId, lang);
-      else if (epIds.has(candidateId)) addLang(epLangs, candidateId, lang);
+      const hit = hashToItem.get(m[1]);
+      if (hit) addLang(hit.kind === "movie" ? movieLangs : epLangs, hit.id, m[2]);
     }
 
     const movieCounts = {};
@@ -504,7 +543,7 @@ function checkNeedsOcrLanguage(language, userId, changedByUserId, changedByLabel
   const current = getEffectiveOcrLanguages(); // Set, since mode isn't "all" here
   if (current.has(subLang)) return null;
   const who = changedByUserId === userId ? "användaren själv" : `admin (${changedByLabel || changedByUserId})`;
-  logSubtitle("warn", null, `Nytt användarspråk (${subtitleLangLabel(subLang)}) är inte i OCR-listan än – satt av ${who}`, { subLang, userId });
+  logSubtitle("warn", null, `Nytt användarspråk (${subtitleLangLabel(subLang)}) är inte i språklistan än – satt av ${who}`, { subLang, userId });
   addPendingOcrRequest(subLang, userId);
   return subLang;
 }
@@ -913,11 +952,27 @@ async function getMovieMeta(title, year) {
     collection_poster: collection?.poster_path ? `https://image.tmdb.org/t/p/w500${collection.poster_path}` : null,
     collection_backdrop: collection?.backdrop_path ? `https://image.tmdb.org/t/p/w1280${collection.backdrop_path}` : null
   };
-// Fetch English title and poster separately so we always keep originals
+// Fetch English title separately so we always keep originals — title/overview text fields
+  // ARE reliably localized by TMDB's `language` param, unlike poster images (see below).
   if (config.language && config.language !== "en-US" && config.language !== "auto") {
     const enData = await tmdbFetch(`/movie/${m.id}`, "en-US");
     if (enData?.title) meta.title_en = enData.title;
-    if (enData?.poster_path) meta.poster_url = `https://image.tmdb.org/t/p/w500${enData.poster_path}`;
+  }
+  // Fetch the poster via the dedicated images endpoint rather than trusting `poster_path` on
+  // a language-filtered details call. Per TMDB's own docs: poster_path for a requested
+  // `language` falls back to the movie's original-language poster if none is tagged for that
+  // language, and if THAT doesn't exist either, falls all the way back to the single highest-
+  // rated poster overall — which can end up in any language, unrelated to what was requested.
+  // Querying /images directly with include_image_language lets us explicitly pick an
+  // English-tagged poster ourselves, guaranteeing the "always English" policy regardless of
+  // what quirks TMDB's automatic per-movie fallback chain happens to produce.
+  try {
+    const images = await tmdbFetch(`/movie/${m.id}/images?include_image_language=en,null`);
+    const posters = images?.posters || [];
+    const englishPoster = posters.find(p => p.iso_639_1 === "en") || posters[0];
+    if (englishPoster?.file_path) meta.poster_url = `https://image.tmdb.org/t/p/w500${englishPoster.file_path}`;
+  } catch(e) {
+    // Keep whatever poster_url was already set above — not worth failing the whole scan over.
   }
   metaCache.set(key, meta);
   return meta;
@@ -928,7 +983,19 @@ async function getTVMeta(title) {
   if(metaCache.has(key)) return metaCache.get(key);
   const data = await tmdbFetch(`/search/tv?query=${encodeURIComponent(title)}`);
   const m = data?.results?.[0];
-  const meta = m ? { tmdb_id:m.id, overview:m.overview||"", poster_url:m.poster_path?`https://image.tmdb.org/t/p/w500${m.poster_path}`:null, backdrop_url:m.backdrop_path?`https://image.tmdb.org/t/p/w1280${m.backdrop_path}`:null, rating:m.vote_average||null, status:m.status||null } : null;
+  if (!m) { metaCache.set(key, null); return null; }
+  const meta = { tmdb_id:m.id, overview:m.overview||"", poster_url:m.poster_path?`https://image.tmdb.org/t/p/w500${m.poster_path}`:null, backdrop_url:m.backdrop_path?`https://image.tmdb.org/t/p/w1280${m.backdrop_path}`:null, rating:m.vote_average||null, status:m.status||null };
+  // Same fix as movies: fetch the poster via /images with an explicit English pick, since
+  // poster_path on the basic details/search response can silently fall back to any language
+  // per TMDB's own documented behavior (see getMovieMeta for the full explanation).
+  try {
+    const images = await tmdbFetch(`/tv/${m.id}/images?include_image_language=en,null`);
+    const posters = images?.posters || [];
+    const englishPoster = posters.find(p => p.iso_639_1 === "en") || posters[0];
+    if (englishPoster?.file_path) meta.poster_url = `https://image.tmdb.org/t/p/w500${englishPoster.file_path}`;
+  } catch(e) {
+    // Keep whatever poster_url was already set above.
+  }
   metaCache.set(key, meta);
   return meta;
 }
@@ -1042,6 +1109,14 @@ async function queueLanguageBackfill(lang) {
 
 async function processSubtitleCacheQueue() {
   while (_subtitleCacheQueue.length > 0) {
+    // A scan takes priority — it's quick and mostly network-bound (TMDB), so there's no
+    // reason to make it compete with heavy FFmpeg/OCR work for CPU and disk. Just wait here
+    // between items (never interrupting one already in progress) until the scan is done,
+    // then carry on exactly where the queue left off — no manual restart needed either way.
+    while (isScanning) {
+      await new Promise(r => setTimeout(r, 2000));
+    }
+
     const entry = _subtitleCacheQueue.shift();
 
     try {
@@ -1071,9 +1146,9 @@ async function convertPgsTosrt(item, subIdx, cacheFile, targetLang) {
     return false;
   }
 
+  let ffmpegStderr = "", pgsStdout = "", pgsStderr = "";
   try {
     // Step 1: Extract .sup file with FFmpeg
-    let ffmpegStderr = "";
     await new Promise((resolve, reject) => {
       const proc = execFile(getFfmpegPath(), [
         "-y", "-i", item.file_path,
@@ -1083,6 +1158,7 @@ async function convertPgsTosrt(item, subIdx, cacheFile, targetLang) {
       ], { timeout: 300000, windowsHide: true }, (err) => {
         if (err) reject(err); else resolve();
       });
+      deprioritizeBackgroundProcess(proc);
       proc.stderr?.on("data", d => { ffmpegStderr += d.toString(); if (ffmpegStderr.length > 4000) ffmpegStderr = ffmpegStderr.slice(-4000); });
     });
 
@@ -1097,7 +1173,6 @@ async function convertPgsTosrt(item, subIdx, cacheFile, targetLang) {
     }
 
     // Step 2: Convert .sup to .srt using PgsToSrt
-    let pgsStdout = "", pgsStderr = "";
     await new Promise((resolve, reject) => {
       const proc = execFile(PGSTOSRT_EXE, [
         "--input", supFile,
@@ -1107,6 +1182,7 @@ async function convertPgsTosrt(item, subIdx, cacheFile, targetLang) {
       ], { timeout: 600000, windowsHide: true }, (err) => {
         if (err) reject(err); else resolve();
       });
+      deprioritizeBackgroundProcess(proc);
       proc.stdout?.on("data", d => { pgsStdout += d.toString(); if (pgsStdout.length > 4000) pgsStdout = pgsStdout.slice(-4000); });
       proc.stderr?.on("data", d => { pgsStderr += d.toString(); if (pgsStderr.length > 4000) pgsStderr = pgsStderr.slice(-4000); });
     });
@@ -1122,7 +1198,13 @@ async function convertPgsTosrt(item, subIdx, cacheFile, targetLang) {
     });
     return false;
   } catch(e) {
-    logSubtitle("error", item, `PgsToSrt-konvertering misslyckades för spår ${subIdx} (${targetLang})`, { subIdx, targetLang, tessLang, error: e.message?.split("\n")[0] });
+    logSubtitle("error", item, `PgsToSrt-konvertering misslyckades för spår ${subIdx} (${targetLang})`, {
+      subIdx, targetLang, tessLang,
+      error: e.message?.split("\n")[0],
+      ffmpegStderr: ffmpegStderr.trim().slice(-1000) || null,
+      pgsStdout: pgsStdout.trim().slice(-1000) || null,
+      pgsStderr: pgsStderr.trim().slice(-1000) || null
+    });
     try { fs.unlinkSync(supFile); } catch {}
     try { fs.unlinkSync(cacheFile); } catch {}
     return false;
@@ -1130,12 +1212,27 @@ async function convertPgsTosrt(item, subIdx, cacheFile, targetLang) {
 }
 
 // Extract one text-based embedded subtitle stream directly (no OCR needed)
+// Lowers a background subtitle-processing child process's OS priority (Windows process
+// priority class / POSIX nice value) so it yields CPU to anything more time-sensitive running
+// at the same time — most importantly, active video transcoding for someone actually
+// watching right now. This is pure background work with no real-time deadline; it can afford
+// to run slower rather than compete for CPU on weaker hardware.
+function deprioritizeBackgroundProcess(proc) {
+  try {
+    const os = require("os");
+    if (proc?.pid) os.setPriority(proc.pid, os.constants.priority.PRIORITY_BELOW_NORMAL);
+  } catch(e) {
+    // Not fatal if this fails (e.g. process already exited) — just means it runs at normal
+    // priority instead, no different from before this existed.
+  }
+}
+
 function extractTextSubtitle(item, subIdx, cacheFile) {
   return new Promise((resolve) => {
     const { execFile } = require("child_process");
     const tempFile = cacheFile.replace(".srt", ".part.srt");
     try { if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile); } catch {}
-    execFile(getFfmpegPath(), [
+    const proc = execFile(getFfmpegPath(), [
       "-y", "-i", item.file_path,
       "-map", "0:s:" + subIdx,
       "-f", "srt", "-c:s", "srt",
@@ -1153,6 +1250,7 @@ function extractTextSubtitle(item, subIdx, cacheFile) {
         resolve({ ok: false, error: e.message });
       }
     });
+    deprioritizeBackgroundProcess(proc);
   });
 }
 
@@ -1193,20 +1291,27 @@ async function preCacheSubtitles(item, opts) {
     logSubtitle("error", item, "Oväntat fel vid inläsning av undertextspår", { error: e.message });
   }
 
-  const bitmapCodecs = ["hdmv_pgs_subtitle", "dvd_subtitle", "dvdsub", "xsub", "dvb_subtitle"];
-
   for (let subIdx = 0; subIdx < streams.length; subIdx++) {
     const s = streams[subIdx];
     const rawLang = s.tags?.language || s.tags?.LANGUAGE || "und";
     const lang = normalizeLangCode(rawLang);
     if (onlyLang && lang !== onlyLang) continue; // targeted backfill: skip everything else
     const codec = s.codec_name || "";
-    const cacheFile = path.join(cacheDir, `${item._id}_${subIdx}_${lang}.srt`);
+    const cacheFile = path.join(cacheDir, `${shortMediaId(item._id)}_${subIdx}_${lang}.srt`);
     if (fs.existsSync(cacheFile)) { cachedLangs.add(lang); continue; }
+
+    if (UNSUPPORTED_BITMAP_CODECS.includes(codec)) {
+      // Not a failure — a genuine, permanent limitation of the current tool (PgsToSrt only
+      // reads PGS/.sup, not VobSub-style formats). Logged once, informationally, so it
+      // doesn't look like a mysterious repeated crash.
+      logSubtitle("info", item, `Bildbaserat spår (${subtitleLangLabel(lang)}, ${codec}) hoppas över – DVD/VobSub-format stöds inte av nuvarande OCR-verktyg (bara Blu-ray/PGS)`, { subIdx, lang, codec });
+      hadGatedSkip = true;
+      continue;
+    }
 
     if (bitmapCodecs.includes(codec)) {
       if (ocrLangs !== null && !ocrLangs.has(lang)) {
-        logSubtitle("info", item, `Bildbaserat spår (${subtitleLangLabel(lang)}) hoppas över – inte i OCR-listan just nu`, { subIdx, lang, codec });
+        logSubtitle("info", item, `Bildbaserat spår (${subtitleLangLabel(lang)}) hoppas över – inte i språklistan just nu`, { subIdx, lang, codec });
         hadGatedSkip = true;
         continue;
       }
@@ -1228,7 +1333,14 @@ async function preCacheSubtitles(item, opts) {
       continue;
     }
 
-    // Text-based track: cheap direct extraction, done regardless of the OCR allowlist
+    // Text-based track: cheap PER LANGUAGE, but "cheap x thousands of files x dozens of
+    // language tracks each" adds up to real hours on a big library — so this now respects
+    // the same language allowlist as bitmap OCR, not just bitmap. Skipped the same way.
+    if (ocrLangs !== null && !ocrLangs.has(lang)) {
+      logSubtitle("info", item, `Textbaserat spår (${subtitleLangLabel(lang)}) hoppas över – inte i språklistan just nu`, { subIdx, lang, codec });
+      hadGatedSkip = true;
+      continue;
+    }
     const t0 = Date.now();
     const result = await extractTextSubtitle(item, subIdx, cacheFile);
     const secs = ((Date.now() - t0) / 1000).toFixed(1);
@@ -1240,7 +1352,7 @@ async function preCacheSubtitles(item, opts) {
       if (errMsg.includes("bitmap to bitmap") || errMsg.includes("only possible from text")) {
         // ffprobe said "text" but ffmpeg disagrees – treat as bitmap after all
         if (ocrLangs !== null && !ocrLangs.has(lang)) {
-          logSubtitle("info", item, `Bildbaserat spår (${subtitleLangLabel(lang)}, upptäckt sent) hoppas över – inte i OCR-listan just nu`, { subIdx, lang });
+          logSubtitle("info", item, `Bildbaserat spår (${subtitleLangLabel(lang)}, upptäckt sent) hoppas över – inte i språklistan just nu`, { subIdx, lang });
           hadGatedSkip = true;
         } else if (isPgsToSrtInstalled()) {
           const t1 = Date.now();
@@ -1258,7 +1370,7 @@ async function preCacheSubtitles(item, opts) {
           hadGatedSkip = true;
         }
       } else {
-        logSubtitle("error", item, `Kunde inte extrahera textbaserad undertext – ${subtitleLangLabel(lang)}`, { subIdx, lang, codec, error: errMsg.split("\n")[0] });
+        logSubtitle("error", item, `Kunde inte extrahera textbaserad undertext – ${subtitleLangLabel(lang)}`, { subIdx, lang, codec, error: errMsg.slice(-800) });
         hadRealFailure = true;
       }
     }
@@ -1270,12 +1382,19 @@ async function preCacheSubtitles(item, opts) {
     const videoBase = path.basename(item.file_path, path.extname(item.file_path)).toLowerCase();
     const shortId = require("crypto").createHash("md5").update(item._id).digest("hex");
     const localFiles = fs.readdirSync(videoDir).filter(f => f.toLowerCase().endsWith(".srt"));
+    const langsFoundOnDisk = new Set();
     for (const file of localFiles) {
       const fileLower = file.toLowerCase();
       if (!fileLower.startsWith(videoBase)) continue; // only files that clearly belong to this video
       const suffix = fileLower.slice(videoBase.length).replace(/\.srt$/, "").replace(/^\./, "");
       const lang = suffix ? normalizeLangCode(suffix) : "und";
+      langsFoundOnDisk.add(lang);
       if (onlyLang && lang !== onlyLang) continue; // targeted backfill: skip everything else
+      if (!onlyLang && ocrLangs !== null && !ocrLangs.has(lang)) {
+        logSubtitle("info", item, `Extern undertextfil (${subtitleLangLabel(lang)}) hoppas över – inte i språklistan just nu`, { file, lang });
+        hadGatedSkip = true;
+        continue;
+      }
       const extCacheFile = path.join(cacheDir, `${shortId}_ext_${lang}.srt`);
       if (fs.existsSync(extCacheFile)) { cachedLangs.add(lang); continue; }
       try {
@@ -1284,6 +1403,30 @@ async function preCacheSubtitles(item, opts) {
         logSubtitle("info", item, `Extern undertextfil hittad och cachad – ${subtitleLangLabel(lang)}`, { file });
       } catch(e) {
         logSubtitle("error", item, `Kunde inte kopiera extern undertextfil – ${subtitleLangLabel(lang)}`, { file, error: e.message });
+      }
+    }
+
+    // Clean up orphaned external cache entries: if a cached "{id}_ext_{lang}.srt" no longer
+    // has a matching .srt file on disk (e.g. the source file was renamed or removed), the
+    // cache entry is stale and just clutters the language list forever otherwise. Skipped
+    // during a targeted single-language backfill, since that only ever looks at one language.
+    if (!onlyLang) {
+      try {
+        const existingExtCache = fs.readdirSync(cacheDir).filter(f => f.startsWith(`${shortId}_ext_`) && f.endsWith(".srt"));
+        for (const cachedFile of existingExtCache) {
+          const m = cachedFile.match(/_ext_([a-z0-9]+)\.srt$/);
+          const cachedLang = m ? m[1] : null;
+          if (cachedLang && !langsFoundOnDisk.has(cachedLang)) {
+            try {
+              fs.unlinkSync(path.join(cacheDir, cachedFile));
+              logSubtitle("info", item, `Övergiven undertextcache borttagen – ${subtitleLangLabel(cachedLang)} (källfilen finns inte längre / har döpts om)`, { cachedFile });
+            } catch(e) {
+              logSubtitle("warn", item, `Kunde inte ta bort övergiven undertextcache – ${subtitleLangLabel(cachedLang)}`, { cachedFile, error: e.message });
+            }
+          }
+        }
+      } catch(e) {
+        logSubtitle("warn", item, "Kunde inte kontrollera övergivna undertextcachefiler", { error: e.message });
       }
     }
   } catch(e) {
@@ -1376,7 +1519,10 @@ async function enrichEpisodeMeta(episode) {
   }
   if (episode.season === 0 || episode.episode === 0) return;
   try {
-    const data = await tmdbFetch(`/tv/${show.tmdb_id}/season/${episode.season}/episode/${episode.episode}?`);
+    // Always fetch the episode name in English, same "titel alltid engelsk" policy as movies —
+    // this previously used the server's default language (tmdbFetch's fallback), which is
+    // why episode names showed up in Swedish on a Swedish-default server.
+    const data = await tmdbFetch(`/tv/${show.tmdb_id}/season/${episode.season}/episode/${episode.episode}?`, "en-US");
     if (!data || !data.name) {
       console.log(`[ENRICH] No data for ${show.title} S${episode.season}E${episode.episode}`);
       return;
@@ -1422,7 +1568,6 @@ async function scanEpisodes(showPath,showId,libId,depth=0) {
   for (const entry of fs.readdirSync(showPath,{withFileTypes:true})) {
     const fullPath=path.join(showPath,entry.name);
     if (entry.isDirectory()) {
-      if (depth === 0) console.log(`[SCAN] Scanning season folder: "${entry.name}"`);
       await scanEpisodes(fullPath,showId,libId,depth+1);
       continue;
     }
@@ -1648,6 +1793,24 @@ const HLS_CACHE = path.join(DATA_DIR, "hls");
 const DASH_CACHE = path.join(DATA_DIR, "dash");
 fs.mkdirSync(HLS_CACHE, { recursive: true });
 fs.mkdirSync(DASH_CACHE, { recursive: true });
+
+// Nothing can legitimately be "in progress" the instant the server starts, so any transcode
+// segments already sitting in these folders are leftovers — either from before per-session
+// cleanup existed, or from a crash/hard restart that skipped the normal stop-cleanup path.
+// Wiped once here rather than left to accumulate indefinitely (these can easily reach tens
+// of GB over time, one per movie ever transcoded).
+for (const cacheDir of [HLS_CACHE, DASH_CACHE]) {
+  try {
+    const entries = fs.readdirSync(cacheDir);
+    let cleaned = 0;
+    for (const entry of entries) {
+      try { fs.rmSync(path.join(cacheDir, entry), { recursive: true, force: true }); cleaned++; } catch {}
+    }
+    if (cleaned > 0) console.log(`[STARTUP] Rensade ${cleaned} gamla transkodningsmappar i ${cacheDir}`);
+  } catch (e) {
+    console.log(`[STARTUP] Kunde inte rensa ${cacheDir}:`, e.message);
+  }
+}
 
 const { spawn } = require("child_process");
 const activeTranscodes = new Map(); // itemId -> { proc, startTime, segCount }
@@ -1952,7 +2115,7 @@ app.get("/api/media/:id/offline-manifest", requireAuth, async (req, res) => {
       const cacheDir = path.join(DATA_DIR, "subtitle-cache");
       const shortId = require("crypto").createHash("md5").update(item._id).digest("hex");
       const cacheFiles = fs.existsSync(cacheDir) ? fs.readdirSync(cacheDir) : [];
-      const ownCached = cacheFiles.filter(f => f.startsWith(item._id + "_") && f.endsWith(".srt"));
+      const ownCached = cacheFiles.filter(f => f.startsWith(shortId + "_") && !f.includes("_ext_") && f.endsWith(".srt"));
       for (const file of ownCached) {
         const m = file.match(/_(\d+)_([a-z0-9]+)\.srt$/);
         const lang = m ? m[2] : "und";
@@ -2118,7 +2281,7 @@ async function startHlsTranscode(item, startSec = 0) {
   proc.stderr.on("data", d => {
     const msg = d.toString().trim();
     stderrBuf += msg + "\n";
-    if (msg) console.log(`[HLS ERR] ${msg}`);
+    if (msg && !HARMLESS_STDERR_PATTERNS.some(p => p.test(msg))) console.log(`[HLS ERR] ${msg}`);
   });
 
   proc.on("error", err => {
@@ -2170,12 +2333,29 @@ setInterval(() => {
       console.log(`[DASH] No active viewer for "${t.title}" — killing orphaned transcode (ran for ${Math.round((now - t.startTime)/1000)}s)`);
       try { t.proc.kill("SIGKILL"); } catch {}
       activeDashTranscodes.delete(itemId);
+      const dashDir = path.join(DASH_CACHE, itemId);
+      setTimeout(() => {
+        fs.rm(dashDir, { recursive: true, force: true }, (e) => {
+          if (e) console.log(`[DASH] Kunde inte städa bort ${dashDir}:`, e.message);
+        });
+      }, 1000);
     }
   }
 }, 10000);
 
 // ── DASH TRANSCODE ───────────────────────────────────────────────────────────
 const activeDashTranscodes = new Map();
+// Known-harmless FFmpeg stderr messages, filtered out of the console log (but still kept in
+// each transcode's stderrBuf) so real problems aren't buried in noise. Shared by both the
+// DASH and HLS transcode stderr handlers below.
+const HARMLESS_STDERR_PATTERNS = [
+  /Could not find codec parameters for stream .* \(Subtitle: hdmv_pgs_subtitle/,
+  /Consider increasing the value for the 'analyzeduration'/,
+  // Old "packed" XviD/DivX AVI encodes (a ~2003-2005-era B-frame storage trick) trigger this
+  // once per frame FFmpeg has to correct — harmless and extremely noisy, easily thousands of
+  // lines for a single episode. Playback is unaffected; FFmpeg handles it automatically.
+  /Discarding excessive bitstream in packed xvid/
+];
 const seekLocks = new Map(); // Prevent concurrent seeks for same item
 
 async function startDashTranscode(item, seekSec = 0, audioTrackIndex = null, allowedVideoCodecs = null) {
@@ -2298,7 +2478,15 @@ async function startDashTranscode(item, seekSec = 0, audioTrackIndex = null, all
     "-f", "dash",
     "-seg_duration", "4",
     "-use_template", "1",
-    "-use_timeline", "0",
+    // use_timeline=1 makes the manifest list each segment's ACTUAL duration (DASH
+    // SegmentTimeline) instead of assuming every segment is exactly 4 seconds. That
+    // assumption breaks down for copy-mode (canCopyVideo skips -force_key_frames above,
+    // since it only applies when re-encoding) — without control over keyframe placement,
+    // segments end up irregular, and the player's fixed-interval math drifts further out of
+    // sync with reality the longer playback goes, eventually requesting a segment that
+    // doesn't line up with anything and stalling. Safe to enable unconditionally — it works
+    // fine for evenly-spaced re-encoded segments too, just a slightly more detailed manifest.
+    "-use_timeline", "1",
     "-window_size", "0",
     "-adaptation_sets", "id=0,streams=v id=1,streams=a",
     mpdPath
@@ -2314,10 +2502,17 @@ async function startDashTranscode(item, seekSec = 0, audioTrackIndex = null, all
   });
 
   let stderrBuf = "";
+  // FFmpeg dumps its own warnings/info to stderr by design (not just real errors), so
+  // everything here gets a scary "[DASH ERR]" prefix regardless of severity. This one
+  // specific pattern is well-known and harmless — FFmpeg can't determine display size for
+  // certain PGS (bitmap) subtitle streams during its initial probe, even though those
+  // streams are never actually used in the DASH output (only video + one audio track are
+  // mapped — see audioSelectArgs above). Still captured in stderrBuf for debugging, just
+  // not spammed to the console.
   proc.stderr.on("data", d => {
     const msg = d.toString().trim();
     stderrBuf += msg + "\n";
-    if (msg) console.log(`[DASH ERR] ${msg}`);
+    if (msg && !HARMLESS_STDERR_PATTERNS.some(p => p.test(msg))) console.log(`[DASH ERR] ${msg}`);
   });
 
   proc.on("error", err => {
@@ -2455,6 +2650,15 @@ app.post("/api/dash/:id/stop", requireAuth, (req, res) => {
     try { t.proc.kill("SIGKILL"); } catch {}
     activeDashTranscodes.delete(req.params.id);
   }
+  // Nobody's watching this anymore — the segment files (can easily be several GB for a long
+  // movie) have no reason to keep existing. Delayed slightly so FFmpeg has time to actually
+  // release its file handles after SIGKILL before we try to remove them.
+  const dashDir = path.join(DASH_CACHE, req.params.id);
+  setTimeout(() => {
+    fs.rm(dashDir, { recursive: true, force: true }, (e) => {
+      if (e) console.log(`[DASH] Kunde inte städa bort ${dashDir}:`, e.message);
+    });
+  }, 1000);
   res.json({ ok: true });
 });
 
@@ -2757,7 +2961,7 @@ app.get("/api/media/:id/subtitles", requireAuth, async (req, res) => {
       const cacheFiles = fs.existsSync(cacheDir) ? fs.readdirSync(cacheDir) : [];
 
       // Embedded/converted cache: {id}_{subIdx}_{lang}.srt
-      const ownCached = cacheFiles.filter(f => f.startsWith(item._id + "_") && f.endsWith(".srt"));
+      const ownCached = cacheFiles.filter(f => f.startsWith(shortId + "_") && !f.includes("_ext_") && f.endsWith(".srt"));
       for (const cachedFile of ownCached) {
         const m = cachedFile.match(/_(\d+)_([a-z0-9]+)\.srt$/);
         const lang = m ? m[2] : "und";
@@ -2855,7 +3059,7 @@ app.get("/api/media/:id/subtitle-cache", requireMediaAccess, async (req, res) =>
       .replace(/(\d+)\n(\d{2}):(\d{2}):(\d{2}),(\d{3}) --> (\d{2}):(\d{2}):(\d{2}),(\d{3})/g, function(match,idx,h1,m1,s1,ms1,h2,m2,s2,ms2) {
         return shiftTime(h1,m1,s1,ms1,offsetSec) + " --> " + shiftTime(h2,m2,s2,ms2,offsetSec);
       });
-    const vtt = "WEBVTT\n\n" + vttBody;
+    const vtt = "WEBVTT\n\n" + cleanSubtitleText(vttBody);
     res.setHeader("Content-Type", "text/vtt; charset=utf-8");
     res.send(vtt);
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -2907,7 +3111,7 @@ app.get("/api/media/:id/subtitle-file", requireMediaAccess, async (req, res) => 
         return `${shiftTime(h1,m1,s1,ms1,offsetSec)} --> ${shiftTime(h2,m2,s2,ms2,offsetSec)}`;
       });
 
-    const vtt = "WEBVTT\n\n" + vttBody;
+    const vtt = "WEBVTT\n\n" + cleanSubtitleText(vttBody);
     res.setHeader("Content-Type", "text/vtt; charset=utf-8");
     res.send(vtt);
   } catch(e) {
@@ -2942,11 +3146,14 @@ app.get("/api/media/:id/subtitle-extract", requireMediaAccess, async (req, res) 
       logSubtitle("warn", item, `Kunde inte läsa spårinfo för spår ${trackIndex} vid extraktion`, { trackIndex, error: e.message });
     }
 
-    const cacheFile = path.join(cacheDir, `${item._id}_${trackIndex}_${lang}.srt`);
+    const cacheFile = path.join(cacheDir, `${shortMediaId(item._id)}_${trackIndex}_${lang}.srt`);
     const tempFile = cacheFile + ".tmp";
-    const bitmapCodecs = ["hdmv_pgs_subtitle", "dvd_subtitle", "dvdsub", "xsub", "dvb_subtitle"];
 
     if (!fs.existsSync(cacheFile)) {
+      if (UNSUPPORTED_BITMAP_CODECS.includes(codec)) {
+        logSubtitle("info", item, `Bildbaserat spår (${subtitleLangLabel(lang)}, ${codec}) kan inte visas – DVD/VobSub-format stöds inte av nuvarande OCR-verktyg`, { trackIndex, lang, codec });
+        return res.status(404).json({ error: "DVD/VobSub subtitle format not supported by current OCR tool (PGS only)" });
+      }
       if (bitmapCodecs.includes(codec)) {
         if (!isPgsToSrtInstalled()) {
           logSubtitle("warn", item, `Bildbaserat spår (${subtitleLangLabel(lang)}) kan inte visas – PgsToSrt är inte installerat`, { trackIndex, lang });
@@ -3009,7 +3216,7 @@ app.get("/api/media/:id/subtitle-extract", requireMediaAccess, async (req, res) 
         var p2 = t2.split(/[:,]/);
         return shiftTime(p1[0],p1[1],p1[2],p1[3],offsetSec) + " --> " + shiftTime(p2[0],p2[1],p2[2],p2[3],offsetSec);
       });
-    const vtt = "WEBVTT\n\n" + vttBody;
+    const vtt = "WEBVTT\n\n" + cleanSubtitleText(vttBody);
     res.setHeader("Content-Type", "text/vtt; charset=utf-8");
     res.send(vtt);
 
@@ -3075,41 +3282,95 @@ app.get("/api/tmdb/lookup", requireAuth, async (req, res) => {
   }
 });
 
+// Shared OpenSubtitles REST helper (follows redirects) — used by both the single-item
+// search endpoint and the season batch-search endpoint below.
+function doOpenSubsRequest(params) {
+  return new Promise((resolve, reject) => {
+    function doRequest(url, redirects) {
+      if (redirects > 5) return reject(new Error("Too many redirects"));
+      const parsed = new URL(url);
+      https.get({
+        hostname: parsed.hostname,
+        path: parsed.pathname + parsed.search,
+        headers: {
+          "Api-Key": config.opensubtitles_api_key,
+          "User-Agent": "StreamVault/" + STREAMVAULT_VERSION,
+          "Accept": "application/json"
+        }
+      }, r => {
+        if (r.statusCode === 301 || r.statusCode === 302) {
+          r.resume();
+          const loc = r.headers.location;
+          const nextUrl = loc.startsWith("http") ? loc : "https://api.opensubtitles.com" + loc;
+          return doRequest(nextUrl, redirects + 1);
+        }
+        let d = ""; r.on("data", c => d += c);
+        r.on("end", () => {
+          try { resolve(JSON.parse(d)); }
+          catch(e) { console.log("[SUBTITLES] Parse error:", d.substring(0, 200)); reject(new Error("parse")); }
+        });
+      }).on("error", reject);
+    }
+    doRequest("https://api.opensubtitles.com/api/v1/subtitles?" + params.toString(), 0);
+  });
+}
+
+// Downloads a specific OpenSubtitles file_id and saves it next to a media item's video file,
+// tagged with the given language suffix. Shared by the single-download endpoint and the
+// season batch-search endpoint.
+async function downloadOpenSubtitlesFile(fileId, item, langSuffix) {
+  const linkData = await new Promise((resolve, reject) => {
+    const body = JSON.stringify({ file_id: fileId });
+    function doRequest(hostname, urlPath, redirects) {
+      if (redirects > 5) return reject(new Error("Too many redirects"));
+      const options = {
+        hostname, path: urlPath, method: "POST",
+        headers: {
+          "Api-Key": config.opensubtitles_api_key,
+          "User-Agent": "StreamVault/" + STREAMVAULT_VERSION,
+          "Content-Type": "application/json",
+          "Accept": "application/json",
+          "Content-Length": Buffer.byteLength(body)
+        }
+      };
+      const r = https.request(options, resp => {
+        if (resp.statusCode === 301 || resp.statusCode === 302) {
+          resp.resume();
+          const loc = resp.headers.location;
+          const newUrl = loc.startsWith("http") ? new URL(loc) : new URL("https://api.opensubtitles.com" + loc);
+          return doRequest(newUrl.hostname, newUrl.pathname + newUrl.search, redirects + 1);
+        }
+        let d = ""; resp.on("data", c => d += c);
+        resp.on("end", () => { try { resolve(JSON.parse(d)); } catch(e) { reject(new Error("parse")); } });
+      });
+      r.on("error", reject); r.write(body); r.end();
+    }
+    doRequest("api.opensubtitles.com", "/api/v1/download", 0);
+  });
+  if (!linkData.link) throw new Error("Ingen nedladdningslänk från OpenSubtitles");
+  const dir = path.dirname(item.file_path);
+  const baseName = path.basename(item.file_path, path.extname(item.file_path));
+  const savePath = path.join(dir, `${baseName}.${langSuffix}.srt`);
+  await new Promise((resolve, reject) => {
+    function download(url) {
+      const parsedUrl = new URL(url);
+      https.get({ hostname: parsedUrl.hostname, path: parsedUrl.pathname + parsedUrl.search }, r => {
+        if (r.statusCode === 301 || r.statusCode === 302) { r.resume(); return download(r.headers.location); }
+        const file = fs.createWriteStream(savePath);
+        r.pipe(file);
+        file.on("finish", () => { file.close(); resolve(); });
+      }).on("error", reject);
+    }
+    download(linkData.link);
+  });
+  return savePath;
+}
+
 app.get("/api/subtitles/search", requireAuth, async (req, res) => {
   try {
     const { query, lang = "sv", imdb_id, media_id } = req.query;
     if (!config.opensubtitles_api_key) return res.json({ subtitles: [] });
 
-    async function doOpenSubsRequest(params) {
-      return new Promise((resolve, reject) => {
-        function doRequest(url, redirects) {
-          if (redirects > 5) return reject(new Error("Too many redirects"));
-          const parsed = new URL(url);
-          https.get({
-            hostname: parsed.hostname,
-            path: parsed.pathname + parsed.search,
-            headers: {
-              "Api-Key": config.opensubtitles_api_key,
-              "User-Agent": "StreamVault/" + STREAMVAULT_VERSION,
-              "Accept": "application/json"
-            }
-          }, r => {
-            if (r.statusCode === 301 || r.statusCode === 302) {
-              r.resume();
-              const loc = r.headers.location;
-              const nextUrl = loc.startsWith("http") ? loc : "https://api.opensubtitles.com" + loc;
-              return doRequest(nextUrl, redirects + 1);
-            }
-            let d = ""; r.on("data", c => d += c);
-            r.on("end", () => {
-              try { resolve(JSON.parse(d)); }
-              catch(e) { console.log("[SUBTITLES] Parse error:", d.substring(0, 200)); reject(new Error("parse")); }
-            });
-          }).on("error", reject);
-        }
-        doRequest("https://api.opensubtitles.com/api/v1/subtitles?" + params.toString(), 0);
-      });
-    }
 
     let data = null;
 
@@ -3221,6 +3482,131 @@ app.post("/api/subtitles/download", requireAuth, async (req, res) => {
   } catch(e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// Batch-searches OpenSubtitles for every episode in a season (or a whole show, if no season
+// given) and downloads the best match for each — instead of doing it one episode at a time
+// manually. Runs sequentially with a pause between episodes to stay well within OpenSubtitles'
+// own rate limits, and skips any episode that already has an external subtitle in that
+// language on disk.
+app.post("/api/subtitles/batch-search", requireAuth, async (req, res) => {
+  const { show_id, season, lang = "sv" } = req.body;
+  if (!config.opensubtitles_api_key) return res.status(400).json({ error: "Ingen OpenSubtitles API-nyckel är inställd" });
+  if (!show_id) return res.status(400).json({ error: "show_id krävs" });
+
+  const query = { type: "episode", parent_id: show_id };
+  if (season !== undefined && season !== null && season !== "") query.season = parseInt(season);
+  const episodes = await dbFind(db.media, query);
+  if (!episodes.length) return res.status(404).json({ error: "Inga avsnitt hittades" });
+
+  // Respond immediately with how many episodes were queued, then keep working in the
+  // background — searching+downloading subtitles for a whole season can take a couple of
+  // minutes, too long to hold one HTTP request open for.
+  res.json({ ok: true, queued: episodes.length });
+
+  let done = 0, found = 0, skipped = 0, failed = 0;
+  for (const ep of episodes) {
+    try {
+      // Skip if this episode already has an external subtitle in this language on disk.
+      const dir = path.dirname(ep.file_path);
+      const baseName = path.basename(ep.file_path, path.extname(ep.file_path)).toLowerCase();
+      const alreadyHasSub = fs.existsSync(dir) && fs.readdirSync(dir).some(f => {
+        const fl = f.toLowerCase();
+        return fl.startsWith(baseName) && fl.endsWith(`.${lang}.srt`);
+      });
+      if (alreadyHasSub) {
+        skipped++;
+        logSubtitle("info", ep, `Batch-sök (OpenSubtitles): hoppar över – har redan en ${lang}-undertext på disk`, { show_id, season });
+      } else {
+        const show = await dbFindOne(db.media, { _id: ep.parent_id });
+        // Hash-based search first (most accurate) — narrowed further with the show's real
+        // TMDB id + season/episode when we have it.
+        let data = null;
+        try {
+          const hash = await calcOpenSubtitlesHash(ep.file_path);
+          const hashParams = new URLSearchParams({ languages: lang, moviehash: hash });
+          if (show?.tmdb_id) {
+            hashParams.set("parent_tmdb_id", String(show.tmdb_id));
+            hashParams.set("season_number", String(ep.season));
+            hashParams.set("episode_number", String(ep.episode));
+          }
+          const hashData = await doOpenSubsRequest(hashParams);
+          if (hashData?.data?.length) data = hashData;
+        } catch(e) { /* fall through to id/name search below */ }
+        if (!data) {
+          const params = new URLSearchParams({ languages: lang });
+          if (show?.tmdb_id) {
+            // OpenSubtitles' own guidance: when you know the parent id + season/episode,
+            // don't ALSO send a text query — it changes how the search is prioritized and
+            // can return unrelated results instead of narrowing things down.
+            params.set("parent_tmdb_id", String(show.tmdb_id));
+            params.set("season_number", String(ep.season));
+            params.set("episode_number", String(ep.episode));
+          } else {
+            // No TMDB id for the show at all — text query is the only option left. Include
+            // the show's own name, not just the (often generic, e.g. "Avsnitt 1") episode
+            // title, or the search has nothing meaningful to match against.
+            params.set("query", `${show?.title || ""} S${String(ep.season).padStart(2,"0")}E${String(ep.episode).padStart(2,"0")}`.trim());
+          }
+          data = await doOpenSubsRequest(params);
+        }
+        const results = data?.data || [];
+        // Pick the most-downloaded result as the best guess at quality, same signal a person
+        // would use when browsing results manually.
+        const best = results.slice().sort((a, b) => (b.attributes?.download_count || 0) - (a.attributes?.download_count || 0))[0];
+        const fileId = best?.attributes?.files?.[0]?.file_id;
+        if (!fileId) {
+          skipped++;
+          logSubtitle("info", ep, `Batch-sök (OpenSubtitles): ingen träff hittades`, { show_id, season, lang });
+        } else {
+          await downloadOpenSubtitlesFile(fileId, ep, lang);
+          found++;
+          logSubtitle("info", ep, `Batch-sök (OpenSubtitles): undertext hämtad`, { show_id, season, lang, release: best.attributes?.release });
+        }
+      }
+    } catch(e) {
+      failed++;
+      logSubtitle("error", ep, `Batch-sök (OpenSubtitles): misslyckades`, { show_id, season, lang, error: e.message });
+    }
+    done++;
+    // Small pause between episodes so a 24-episode season doesn't hammer OpenSubtitles'
+    // API in a tight loop — same spirit as the subtitle-cache queue's own pacing.
+    await new Promise(r => setTimeout(r, 1500));
+  }
+  logSubtitle("info", null, `Batch-sök (OpenSubtitles) klar för säsong ${season ?? "(alla)"}: ${found} hittade, ${skipped} hoppade över, ${failed} misslyckades av ${episodes.length}`, { show_id, season, lang });
+});
+
+// Removes external .{lang}.srt files (and their cache entries) for every episode in a season —
+// mainly for cleaning up after a batch-search that grabbed wrong subtitles (e.g. before the
+// parent_tmdb_id fix), without having to hunt down and delete files by hand one at a time.
+app.post("/api/subtitles/batch-remove-external", requireAuth, async (req, res) => {
+  const { show_id, season, lang } = req.body;
+  if (!show_id || !lang) return res.status(400).json({ error: "show_id och lang krävs" });
+
+  const query = { type: "episode", parent_id: show_id };
+  if (season !== undefined && season !== null && season !== "") query.season = parseInt(season);
+  const episodes = await dbFind(db.media, query);
+  if (!episodes.length) return res.status(404).json({ error: "Inga avsnitt hittades" });
+
+  const cacheDir = path.join(DATA_DIR, "subtitle-cache");
+  let removed = 0;
+  for (const ep of episodes) {
+    try {
+      const dir = path.dirname(ep.file_path);
+      const baseName = path.basename(ep.file_path, path.extname(ep.file_path));
+      const srtPath = path.join(dir, `${baseName}.${lang}.srt`);
+      if (fs.existsSync(srtPath)) { fs.unlinkSync(srtPath); removed++; }
+      // Also drop the matching cache entry, if the subtitle-cache queue already picked this
+      // file up — otherwise the wrong subtitle would still show as "cached" until the next
+      // full re-cache noticed it was orphaned.
+      const cacheFile = path.join(cacheDir, `${shortMediaId(ep._id)}_ext_${lang}.srt`);
+      if (fs.existsSync(cacheFile)) fs.unlinkSync(cacheFile);
+    } catch(e) {
+      logSubtitle("warn", ep, `Kunde inte ta bort extern undertext (${lang})`, { error: e.message });
+    }
+  }
+  logSubtitle("info", null, `Tog bort ${removed} externa ${lang}-undertexter för säsong ${season ?? "(alla)"}`, { show_id, season, lang });
+  res.json({ ok: true, removed });
 });
 
 
@@ -4186,13 +4572,15 @@ app.get("/api/tvshow/:id/season/:season", requireAuth, async (req, res) => {
     const episodes = await dbFind(db.media, { parent_id: req.params.id, type: "episode", season: seasonNum });
     episodes.sort((a,b) => a.episode - b.episode);
 
-    // Get episode thumbnails + names from TMDB
+    // Get episode thumbnails + names from TMDB. Always in English — same "titel alltid
+    // engelsk" policy as movies and the scan-time enrichment above. Without this, a Swedish-
+    // default server would show Swedish episode names here even after enrichEpisodeMeta had
+    // already stored the correct English title, since this fetch runs fresh on every page
+    // view and was taking priority over the stored value.
     let tmdbEpisodes = [];
     if (show.tmdb_id && config.tmdb_api_key) {
       const url = `/tv/${show.tmdb_id}/season/${seasonNum}`;
-      console.log("[TMDB] fetching:", `https://api.themoviedb.org/3${url}&api_key=${config.tmdb_api_key.slice(0,8)}...`);
-      const data = await tmdbFetch(url);
-      console.log("[TMDB] season data:", JSON.stringify(data)?.slice(0,300));
+      const data = await tmdbFetch(url, "en-US");
       if (data?.episodes) tmdbEpisodes = data.episodes;
     }
 
@@ -4569,6 +4957,20 @@ const watchers = [];
 let watchDebounceTimer = null;
 let nextAutoScan = null;
 
+// Debounce – wait 10 seconds after the last genuine change before actually scanning. This
+// prevents scanning mid-copy when large files are being transferred, and (combined with the
+// known-file/size check above) means routine subtitle-processing reads never trigger this.
+function scheduleWatcherScan(libName) {
+  if (watchDebounceTimer) clearTimeout(watchDebounceTimer);
+  nextAutoScan = Date.now() + 10000;
+  watchDebounceTimer = setTimeout(async () => {
+    if (!isScanning) {
+      console.log(`File watcher: detected change in ${libName}, scanning...`);
+      await scanLibraries().catch(console.error);
+    }
+  }, 10000);
+}
+
 function startFileWatchers() {
   // Stop existing watchers
   watchers.forEach(w => { try { w.close(); } catch {} });
@@ -4584,16 +4986,25 @@ function startFileWatchers() {
                          ".mp3",".flac",".aac",".ogg",".wav",".m4a",".opus"].includes(ext);
         if (!isMedia) return;
 
-        // Debounce – wait 10 seconds after last change before scanning
-        // This prevents scanning mid-copy when large files are being transferred
-        if (watchDebounceTimer) clearTimeout(watchDebounceTimer);
-        nextAutoScan = Date.now() + 10000;
-        watchDebounceTimer = setTimeout(async () => {
-          if (!isScanning) {
-            console.log(`File watcher: detected change in ${lib.name}, scanning...`);
-            await scanLibraries().catch(console.error);
+        // Windows' change notifications (what fs.watch uses under the hood here) can fire
+        // for metadata-only touches too — e.g. FFmpeg repeatedly reading a large video file
+        // during subtitle extraction can update its last-accessed time, which Windows then
+        // reports as a "change". Without this check, that alone was enough to trigger a full
+        // library rescan every time subtitle caching touched a file — completely spurious,
+        // since nothing about the file (or the library) actually changed.
+        try {
+          const fullPath = path.join(lib.path, filename);
+          const id = Buffer.from(fullPath).toString("base64url");
+          const stat = fs.existsSync(fullPath) ? fs.statSync(fullPath) : null;
+          if (stat) {
+            db.media.findOne({ _id: id }, (err, existing) => {
+              if (existing && existing.file_size === stat.size) return; // known, unchanged size — ignore
+              scheduleWatcherScan(lib.name);
+            });
+            return;
           }
-        }, 10000);
+        } catch(e) { /* fall through and scan to be safe if we couldn't check */ }
+        scheduleWatcherScan(lib.name);
       });
       watchers.push(watcher);
       console.log(`👁  Watching: ${lib.path}`);

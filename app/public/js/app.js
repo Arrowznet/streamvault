@@ -1333,6 +1333,10 @@ async function openSeason(showId, seasonNum) {
               <div class="detail-meta-row">
                 <span class="detail-meta-item">${episodes.length} avsnitt</span>
               </div>
+              <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
+                <button class="btn-fav" style="font-size:12px" onclick="batchSearchSeasonSubtitles('${showId}', ${seasonNum})">🔍 Sök undertexter för hela säsongen</button>
+                <button class="btn-fav" style="font-size:12px" onclick="batchRemoveSeasonSubtitles('${showId}', ${seasonNum})">🗑 Ta bort externa undertexter för säsongen</button>
+              </div>
               ${seasonData.overview ? `<p class="detail-page-overview">${esc(seasonData.overview)}</p>` : ""}
             </div>
           </div>
@@ -2450,7 +2454,23 @@ async function openSubtitles(mediaId, title) {
   closeBtn2.onclick = function() { overlay.remove(); };
   header.appendChild(closeBtn2);
   modal.appendChild(header);
-  
+
+  // Manual sync adjustment — nudges the currently active subtitle's timing, no reload needed.
+  // Only meaningful once a subtitle is actually playing, but harmless to show always (the
+  // adjust function just tells you if nothing's active yet).
+  var syncRow = document.createElement("div");
+  syncRow.style.cssText = "padding:10px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted)";
+  syncRow.innerHTML = `
+    <span>Synk:</span>
+    <button class="btn-fav" style="font-size:12px;padding:4px 10px" onclick="adjustSubtitleSync(-0.5)">−0.5s</button>
+    <button class="btn-fav" style="font-size:12px;padding:4px 10px" onclick="adjustSubtitleSync(-0.1)">−0.1s</button>
+    <span id="sv-sync-offset-display" style="min-width:40px;text-align:center;color:var(--text)">${(window._subtitleSyncOffset || 0).toFixed(1)}s</span>
+    <button class="btn-fav" style="font-size:12px;padding:4px 10px" onclick="adjustSubtitleSync(0.1)">+0.1s</button>
+    <button class="btn-fav" style="font-size:12px;padding:4px 10px" onclick="adjustSubtitleSync(0.5)">+0.5s</button>
+    <button class="btn-fav" style="font-size:12px;padding:4px 10px;margin-left:auto" onclick="resetSubtitleSync()">Nollställ</button>
+  `;
+  modal.appendChild(syncRow);
+
   // Content area
   const contentEl = document.createElement("div");
   contentEl.id = "subtitle-content";
@@ -2640,6 +2660,37 @@ async function clearSubtitleCache() {
     var data = await API.post("/subtitles/clear-cache", {});
     toast(`✓ ${data.removed} cachade undertextfiler borttagna`, "success");
     loadSettings();
+  } catch(e) {
+    toast("Fel: " + e.message, "error");
+  }
+}
+
+// Batch-searches OpenSubtitles for every episode in a season and downloads the best match for
+// each, instead of doing it one episode at a time. Runs in the background on the server —
+// this just kicks it off and points to the subtitle log for progress/results.
+async function batchSearchSeasonSubtitles(showId, seasonNum) {
+  var lang = prompt("Vilket språk vill du söka undertexter på?\n\nSkriv en språkkod, t.ex. \"sv\" för svenska eller \"en\" för engelska.", "sv");
+  if (!lang) return;
+  lang = lang.trim().toLowerCase();
+  if (!confirm(`Söker och laddar ner undertexter (${lang}) för hela säsongen från OpenSubtitles. Det här kan ta någon minut och körs i bakgrunden — du kan lämna sidan under tiden. Fortsätt?`)) return;
+  try {
+    var res = await API.post("/subtitles/batch-search", { show_id: showId, season: seasonNum, lang: lang });
+    toast(`✓ ${res.queued} avsnitt köade för undertextsökning – kolla undertext-loggen i Inställningar om en stund för resultat`, "success");
+  } catch(e) {
+    toast("Fel: " + e.message, "error");
+  }
+}
+
+// Cleans up external .{lang}.srt files (and their cache entries) for a whole season — mainly
+// meant for undoing a bad batch-search result before trying again.
+async function batchRemoveSeasonSubtitles(showId, seasonNum) {
+  var lang = prompt("Ta bort externa undertexter för vilket språk?\n\nSkriv en språkkod, t.ex. \"sv\" för svenska.", "sv");
+  if (!lang) return;
+  lang = lang.trim().toLowerCase();
+  if (!confirm(`Detta tar bort ALLA externa ${lang}-undertextfiler (och deras cache) för samtliga avsnitt i den här säsongen. Går inte att ångra. Fortsätt?`)) return;
+  try {
+    var res = await API.post("/subtitles/batch-remove-external", { show_id: showId, season: seasonNum, lang: lang });
+    toast(`✓ ${res.removed} undertextfiler borttagna`, "success");
   } catch(e) {
     toast("Fel: " + e.message, "error");
   }
@@ -3106,8 +3157,13 @@ var _subtitleOverlayInterval = null;
 var _subtitleOverlayId = 0; // Unique ID to prevent multiple intervals
 
 function startSubtitleOverlay(cues, video) {
-  // Stop any existing overlay
+  // Stop any existing overlay (this also resets window._currentSubtitleCues to null, so it's
+  // important that the two lines below run AFTER this, not before)
   stopSubtitleOverlay();
+  // Stored so adjustSubtitleSync() can shift these live, in place, without re-fetching —
+  // the rendering loop below reads from this same array reference on every tick.
+  window._currentSubtitleCues = cues;
+  window._subtitleSyncOffset = 0;
   // Disable any native track elements to prevent double subtitles
   Array.from(video.querySelectorAll("track")).forEach(function(t) { t.remove(); });
   if (video.textTracks && video.textTracks.length > 0) {
@@ -3173,6 +3229,8 @@ function startSubtitleOverlay(cues, video) {
 }
 
 function stopSubtitleOverlay() {
+  window._currentSubtitleCues = null;
+  window._subtitleSyncOffset = 0;
   if (_subtitleOverlayInterval) {
     clearInterval(_subtitleOverlayInterval);
     _subtitleOverlayInterval = null;
@@ -3193,6 +3251,42 @@ function stopSubtitleOverlay() {
     tracks.forEach(function(t) { t.src = ""; t.remove(); });
   }
 }
+
+// Nudges the currently active subtitle's timing by deltaSeconds — shifts every cue already
+// in memory, in place, so the change is visible on the very next overlay render tick (100ms
+// later) with no server round-trip or reload. Positive delta = subtitle appears LATER
+// (use this if the text currently shows too early), negative = appears EARLIER.
+function adjustSubtitleSync(deltaSeconds) {
+  var cues = window._currentSubtitleCues;
+  if (!cues || !cues.length) { toast("Ingen undertext aktiv just nu", "info"); return; }
+  for (var i = 0; i < cues.length; i++) {
+    cues[i].start += deltaSeconds;
+    cues[i].end += deltaSeconds;
+  }
+  window._subtitleSyncOffset = (window._subtitleSyncOffset || 0) + deltaSeconds;
+  updateSubtitleSyncDisplay();
+}
+
+function resetSubtitleSync() {
+  var cues = window._currentSubtitleCues;
+  var current = window._subtitleSyncOffset || 0;
+  if (cues && cues.length && current) {
+    for (var i = 0; i < cues.length; i++) {
+      cues[i].start -= current;
+      cues[i].end -= current;
+    }
+  }
+  window._subtitleSyncOffset = 0;
+  updateSubtitleSyncDisplay();
+}
+
+function updateSubtitleSyncDisplay() {
+  var el = document.getElementById("sv-sync-offset-display");
+  if (!el) return;
+  var v = window._subtitleSyncOffset || 0;
+  el.textContent = (v > 0 ? "+" : "") + v.toFixed(1) + "s";
+}
+
 
 function parseVTTTime(timeStr) {
   // Parse HH:MM:SS.mmm or MM:SS.mmm
@@ -3610,8 +3704,8 @@ async function loadSettings() {
       </div>` : ''}
 
       ${currentUser?.role === "admin" ? `<div class="settings-section" id="subtitle-ocr-section">
-        <div class="settings-section-title">Bildbaserade undertexter (OCR)</div>
-        <div style="font-size:12px;color:var(--muted);margin-bottom:10px">Textbaserade undertexter cachas alltid för alla språk – det är billigt. Bildbaserade (PGS/VOBSUB) kräver tung OCR-konvertering, så det styrs separat här.</div>
+        <div class="settings-section-title">Undertextspråk att cacha</div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:10px">Styr vilka språk som cachas överhuvudtaget — textbaserade spår, externa .srt-filer, OCH bildbaserade (PGS/VOBSUB, som dessutom kräver tung OCR-konvertering). Med många filer och många språkspår per fil blir "cacha allt" fort tungt även för textspår — särskilt på svagare hårdvara.</div>
         <div style="margin-bottom:10px">
           <select class="s-input" id="s-ocr-mode" onchange="saveOcrMode(this.value)" style="cursor:pointer">
             <option value="selected" ${ocrLangConfig.mode !== "all" ? "selected" : ""}>Cacha bara valda språk (rekommenderas)</option>
