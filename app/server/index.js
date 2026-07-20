@@ -128,6 +128,25 @@ function cleanSubtitleText(text) {
 }
 
 
+// Best-effort, human-readable device/client label from a User-Agent string, for the Live
+// Activity dashboard. Order matters — more specific checks (TV platforms, app frameworks)
+// come before generic ones (Chrome/Safari), since some of those substrings overlap.
+function describeClient(ua) {
+  const u = (ua || "").toLowerCase();
+  if (!u) return "Okänd klient";
+  if (u.includes("web0s") || u.includes("webos")) return "📺 LG TV (webOS)";
+  if (u.includes("tizen")) return "📺 Samsung TV (Tizen)";
+  if (u.includes("smarttv") || u.includes("smart-tv") || u.includes("googletv") || u.includes("aft")) return "📺 Smart-TV";
+  if (u.includes("okhttp") || u.includes("exoplayer")) return "📱 Android-app";
+  if (u.includes("android")) return "📱 Android (webbläsare)";
+  if (u.includes("iphone") || u.includes("ipad")) return "📱 iOS (webbläsare)";
+  if (u.includes("edg/") || u.includes("edga") || u.includes("edgios")) return "💻 Edge";
+  if (u.includes("firefox")) return "💻 Firefox";
+  if (u.includes("chrome")) return "💻 Chrome";
+  if (u.includes("safari")) return "💻 Safari";
+  return "❓ Okänd klient";
+}
+
 function normalizeLangCode(raw) {
   const l = (raw || "").toLowerCase().trim();
   if (!l) return "und";
@@ -720,6 +739,17 @@ app.get("/api/version", (req, res) => {
   res.json({ version: STREAMVAULT_VERSION, repo: GITHUB_REPO });
 });
 
+// Compares two "1.2.3"-style version strings. Returns >0 if a is newer, <0 if b is newer, 0 if equal.
+function compareVersions(a, b) {
+  const pa = (a || "0").split(".").map(n => parseInt(n) || 0);
+  const pb = (b || "0").split(".").map(n => parseInt(n) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const diff = (pa[i] || 0) - (pb[i] || 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
 app.get("/api/updates/check", requireAuth, async (req, res) => {
   try {
     const channel = config.update_channel || "stable"; // "stable" or "beta"
@@ -756,7 +786,29 @@ app.get("/api/updates/check", requireAuth, async (req, res) => {
       ? latest !== STREAMVAULT_VERSION
       : latestBase !== currentBase;
     const downloadUrl = (data.assets || []).find(a => a.name && a.name.endsWith(".exe"))?.browser_download_url || null;
-    res.json({ current: STREAMVAULT_VERSION, latest, hasUpdate, releaseNotes: data.body || "", htmlUrl: data.html_url || null, downloadUrl, channel, isBeta: !!data.prerelease });
+
+    // Android app updates — completely separate version numbering from the server's own
+    // (e.g. app "1.0.1" vs server "2.6.2"), so these are tracked independently: the Android
+    // version is read from the APK's filename (e.g. "streamvault-android-v1.0.1.apk"), not
+    // from the GitHub release tag, which represents the SERVER version instead. Scans the
+    // last several releases (not just the newest one) in case a release was published with
+    // only a server update and no new APK that time — otherwise a real APK update sitting in
+    // an older release would be invisible once a newer, APK-less release comes along.
+    let apkDownloadUrl = null, apkVersion = null;
+    for (const rel of eligible.slice(0, 10)) {
+      const apkAsset = (rel.assets || []).find(a => a.name && a.name.endsWith(".apk"));
+      if (!apkAsset) continue;
+      const m = apkAsset.name.match(/(\d+\.\d+(?:\.\d+)?)/);
+      const v = m ? m[1] : null;
+      if (v && (!apkVersion || compareVersions(v, apkVersion) > 0)) {
+        apkVersion = v;
+        apkDownloadUrl = apkAsset.browser_download_url;
+      }
+    }
+    const requestedVersionName = req.query.versionName || null;
+    const hasAndroidUpdate = !!(apkVersion && requestedVersionName && compareVersions(apkVersion, requestedVersionName) > 0);
+
+    res.json({ current: STREAMVAULT_VERSION, latest, hasUpdate, releaseNotes: data.body || "", htmlUrl: data.html_url || null, downloadUrl, channel, isBeta: !!data.prerelease, apkDownloadUrl, apkVersion, hasAndroidUpdate });
   } catch {
     res.json({ current: STREAMVAULT_VERSION, latest: STREAMVAULT_VERSION, hasUpdate: false });
   }
@@ -1725,6 +1777,8 @@ app.post("/api/media/:id/progress", requireAuth, async (req, res) => {
       // Inferred, not client-reported: if this file currently has an active FFmpeg
       // transcode running, this session is (almost certainly) watching via DASH.
       method: activeDashTranscodes.has(req.params.id) ? "dash" : "direct",
+      ip: req.ip,
+      device: describeClient(req.headers["user-agent"]),
       startedAt: _activeSessions.get(sessionKey)?.startedAt || Date.now(),
       lastHeartbeat: Date.now()
     });
@@ -2889,6 +2943,55 @@ app.get("/api/watch-providers/:tmdb_id", requireAuth, async (req, res) => {
   if (!config.tmdb_api_key) return res.json({});
   const data = await tmdbFetch(`/movie/${req.params.tmdb_id}/watch/providers?watch_region=SE`);
   res.json(data?.results?.SE || {});
+});
+
+// Related movies/shows for a detail page — pulls TMDB's recommendations for the title, then
+// filters down to only what's actually in this library, so every result is guaranteed
+// clickable (no dead-end links to things you don't own). Falls back to TMDB's "similar"
+// endpoint if recommendations comes back empty, since recommendations relies on TMDB user
+// behavior data and can be thin for less mainstream titles.
+app.get("/api/media/:id/related", requireAuth, async (req, res) => {
+  try {
+    const item = await dbFindOne(db.media, { _id: req.params.id });
+    if (!item) return res.json({ items: [] });
+
+    // Same-collection entries first (e.g. every Johan Falk movie) — this is exact, reliable
+    // data we already have from scanning, unlike TMDB's recommendations/similar endpoints,
+    // which are algorithmic guesses that don't reliably surface sequels for franchises
+    // outside TMDB's own most-watched-together data (works well for Marvel, poorly for a
+    // niche non-English franchise with less TMDB user activity behind it).
+    let collectionItems = [];
+    if (item.collection_id) {
+      const inCollection = await dbFind(db.media, { type: "movie", collection_id: item.collection_id, _id: { $ne: item._id } });
+      collectionItems = inCollection.map(o => ({ id: o._id, title: o.title, year: o.year, poster_url: o.poster_url, type: o.type }));
+    }
+
+    let recItems = [];
+    if (item.tmdb_id) {
+      const kind = item.type === "tvshow" ? "tv" : "movie";
+      let data = await tmdbFetch(`/${kind}/${item.tmdb_id}/recommendations`);
+      let candidates = data?.results || [];
+      if (!candidates.length) {
+        data = await tmdbFetch(`/${kind}/${item.tmdb_id}/similar`);
+        candidates = data?.results || [];
+      }
+      const candidateIds = candidates.map(c => c.id).filter(Boolean);
+      if (candidateIds.length) {
+        const owned = await dbFind(db.media, { type: item.type, tmdb_id: { $in: candidateIds } });
+        const ownedByTmdbId = new Map(owned.map(o => [o.tmdb_id, o]));
+        recItems = candidateIds.map(id => ownedByTmdbId.get(id)).filter(Boolean)
+          .map(o => ({ id: o._id, title: o.title, year: o.year, poster_url: o.poster_url, type: o.type }));
+      }
+    }
+
+    // Collection entries first, then fill the rest with TMDB recommendations, deduplicated
+    const seen = new Set(collectionItems.map(i => i.id));
+    const items = [...collectionItems, ...recItems.filter(i => !seen.has(i.id) && (seen.add(i.id), true))].slice(0, 20);
+
+    res.json({ items });
+  } catch(e) {
+    res.json({ items: [] }); // never let a broken related-media lookup break the detail page
+  }
 });
 
 // ── SUBTITLES ─────────────────────────────────────────────────────────────────

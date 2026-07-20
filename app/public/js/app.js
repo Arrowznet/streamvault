@@ -143,11 +143,46 @@ async function loadSidebarLibraries() {
 
 
 // ── UPDATE CHECK ──────────────────────────────────────────────────────────────
+var _inSettingsSidebarMode = false;
+var _settingsActiveTab = "overview";
+const SETTINGS_TABS = [
+  { id: "overview", icon: "📊", label: "Översikt" },
+  { id: "subs", icon: "💬", label: "Undertexter" },
+  { id: "library", icon: "📚", label: "Bibliotek" },
+  { id: "users", icon: "👥", label: "Användare" },
+  { id: "server", icon: "⚙️", label: "Server" }
+];
+
+function enterSettingsSidebarMode() {
+  _inSettingsSidebarMode = true;
+  const container = document.getElementById("sb-libraries");
+  if (!container) return;
+  container.innerHTML = `
+    <div class="sb-item" onclick="exitSettingsSidebarMode()">
+      <span class="sb-icon">←</span>
+      <span>Tillbaka</span>
+    </div>
+    <div class="sb-sep">INSTÄLLNINGAR</div>
+    <div style="height:1px;background:var(--border);margin:0 18px 4px"></div>
+  ` + SETTINGS_TABS.map(t => `
+    <div class="sb-item${_settingsActiveTab === t.id ? " active" : ""}" id="sb-stab-${t.id}" onclick="switchSettingsTab('${t.id}')">
+      <span class="sb-icon">${t.icon}</span>
+      <span>${t.label}</span>
+    </div>`).join("");
+}
+
+function exitSettingsSidebarMode() {
+  _inSettingsSidebarMode = false;
+  loadSidebarLibraries();
+  switchSection("home");
+}
+
 function switchSection(name) {
   document.querySelectorAll(".section").forEach(s => s.classList.remove("active"));
   document.querySelectorAll(".sb-item").forEach(b => b.classList.remove("active"));
   if (name !== "settings" && _liveActivityInterval) { clearInterval(_liveActivityInterval); _liveActivityInterval = null; }
   if (name !== "settings" && _scanProgressInterval) { clearInterval(_scanProgressInterval); _scanProgressInterval = null; }
+  if (name !== "settings" && _inSettingsSidebarMode) { _inSettingsSidebarMode = false; loadSidebarLibraries(); }
   const sec = document.getElementById("sec-" + name);
   if (sec) sec.classList.add("active");
   const sbEl = document.getElementById("sb-" + name);
@@ -157,7 +192,7 @@ function switchSection(name) {
   else if (name === "tvshows") loadMediaSection("tvshows");
   else if (name === "music") loadMusicPage();
   else if (name === "search") loadSearchPage();
-  else if (name === "settings") loadSettings();
+  else if (name === "settings") { if (!_inSettingsSidebarMode) enterSettingsSidebarMode(); loadSettings(); }
   else if (name === "collections") loadCollections();
   const userMenu = document.getElementById("userMenu");
   if (userMenu) userMenu.style.display = "none";
@@ -1520,6 +1555,7 @@ async function openDetail(id) {
           </div>
           ${castHtml}
           ${episodesHtml}
+          ${item.tmdb_id ? `<div class="detail-section" id="related-${id}"></div>` : ""}
         </div>
       </div>`;
     if (item.tmdb_id && item.type === "movie") {
@@ -1532,6 +1568,30 @@ async function openDetail(id) {
           ? `<div style="font-size:11px;color:var(--muted);margin-bottom:4px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">Fler sätt att se den på</div>` + providers.map(n => `<span class="wtw-pill ${flat.has(n)?"stream":"rent"}">${esc(n)}</span>`).join("")
           : "";
         el.innerHTML = providerHtml;
+      }).catch(()=>{});
+    }
+    if (item.tmdb_id) {
+      API.get("/media/" + id + "/related").then(data => {
+        const el = document.getElementById("related-" + id);
+        if (!el || !data.items || !data.items.length) return;
+        const label = item.type === "tvshow" ? "Liknande serier" : "Liknande filmer";
+        el.innerHTML = `
+          <h3 class="detail-section-title">${label}</h3>
+          <div class="cast-scroll-wrap">
+            <button class="cast-scroll-btn left" onclick="document.getElementById('related-scroll-${id}').scrollBy({left:-300,behavior:'smooth'})">‹</button>
+            <div class="cast-scroll" id="related-scroll-${id}">
+              ${data.items.map(r => `
+                <div class="mcard" style="width:140px;flex-shrink:0" onclick="openDetail('${r.id}')">
+                  ${r.poster_url
+                    ? `<img class="mcard-poster" src="${r.poster_url}" alt="" loading="lazy">`
+                    : `<div class="mcard-poster-ph"><span>${r.type==="tvshow"?"📺":"🎬"}</span><span>${esc((r.title||"").slice(0,14))}</span></div>`}
+                  <div class="mcard-info">
+                    <div class="mcard-title">${esc(r.title||"")}</div>
+                  </div>
+                </div>`).join("")}
+            </div>
+            <button class="cast-scroll-btn right" onclick="document.getElementById('related-scroll-${id}').scrollBy({left:300,behavior:'smooth'})">›</button>
+          </div>`;
       }).catch(()=>{});
     }
   } catch(e) {
@@ -2642,7 +2702,7 @@ async function openSubtitleLog(onlyErrors) {
 // Admin-only: re-queues subtitle caching for the ENTIRE existing library. Needed once
 // after upgrading, since a normal scan only picks up new files, not already-added ones.
 async function recacheAllSubtitles() {
-  if (!confirm("Detta köar om undertextcachning för hela biblioteket. Det kan ta lång tid (timmar/dagar) för stora bibliotek, men körs i bakgrunden utan att störa uppspelning. Fortsätt?")) return;
+  if (!confirm("Detta köar om undertextcachning för hela biblioteket, enligt din språklista i Inställningar (inte nödvändigtvis alla språk som finns i filerna). Kan ta lång tid (timmar/dagar) för stora bibliotek, men körs i bakgrunden utan att störa uppspelning. Fortsätt?")) return;
   try {
     var data = await API.post("/subtitles/recache-all", {});
     toast(data.message || "Omcachning startad", "success");
@@ -2655,7 +2715,7 @@ async function recacheAllSubtitles() {
 // Admin-only: wipes every cached subtitle file and resets the counters/DB fields, for testing
 // the whole pipeline (OCR gating, auto-download of Tesseract data, etc.) from a clean slate.
 async function clearSubtitleCache() {
-  if (!confirm("Detta raderar ALLA cachade undertextfiler (både textbaserade och OCR-konverterade) och nollställer statistiken.\n\nDina videofiler påverkas inte, och du kan köra 'Cacha om alla undertexter' igen efteråt för att bygga upp allt på nytt.\n\nFortsätt?")) return;
+  if (!confirm("Detta raderar ALLA cachade undertextfiler (både textbaserade och OCR-konverterade) och nollställer statistiken.\n\nDina videofiler påverkas inte, och du kan köra 'Cacha om enligt språklistan' igen efteråt för att bygga upp allt på nytt.\n\nFortsätt?")) return;
   try {
     var data = await API.post("/subtitles/clear-cache", {});
     toast(`✓ ${data.removed} cachade undertextfiler borttagna`, "success");
@@ -3444,6 +3504,7 @@ function renderLiveActivityContent(data) {
           <div style="flex:1;height:4px;background:var(--border);border-radius:2px;overflow:hidden"><div style="height:100%;width:${s.progressPct}%;background:var(--accent,#3498db)"></div></div>
           <span style="font-size:11px;color:var(--muted);white-space:nowrap">${fmtTime(s.position)} / ${fmtTime(s.duration)}</span>
         </div>
+        <div style="font-size:11px;color:var(--muted);margin-top:4px">${esc(s.device || "Okänd klient")} · ${esc(s.ip || "?")}</div>
       </div>`).join("") + `</div>`;
   }
 
@@ -3588,6 +3649,14 @@ function startCacheStatusPolling() {
   }, 3000);
 }
 
+function switchSettingsTab(tabId) {
+  _settingsActiveTab = tabId;
+  document.querySelectorAll("#sb-libraries .sb-item").forEach(el => el.classList.remove("active"));
+  const el = document.getElementById("sb-stab-" + tabId);
+  if (el) el.classList.add("active");
+  loadSettings();
+}
+
 async function loadSettings() {
   if (currentUser.role !== "admin") {
     // Non-admin users see their own profile page instead
@@ -3631,6 +3700,7 @@ async function loadSettings() {
     sec.innerHTML = `<div class="settings-wrap">
       <div class="settings-title">Inställningar</div>
 
+      ${_settingsActiveTab === "overview" ? `
       ${(pendingOcr.pending || []).length > 0 ? `<div class="settings-section" style="border:1px solid var(--danger,#e74c3c);background:rgba(231,76,60,0.08)">
         <div class="settings-section-title">🔔 Väntande undertextspråk (${pendingOcr.pending.length})</div>
         <div style="font-size:12px;color:var(--muted);margin-bottom:10px">Dessa användare har valt ett språk som inte cachas för bildbaserade (OCR) undertexter än.</div>
@@ -3675,7 +3745,9 @@ async function loadSettings() {
         <div id="scan-progress-info" style="font-size:12px;color:var(--muted);margin-top:8px;">${scanStatus.scanning ? scanProgressText(scanStatus.progress) : ""}</div>
         <div style="font-size:12px;color:var(--muted);margin-top:4px;">👁 Filbevakning aktiv · <span id="next-scan-label">Beräknar...</span></div>
       </div>
+      ` : ""}
 
+      ${_settingsActiveTab === "subs" ? `
       ${cacheStatus ? `<div class="settings-section" id="subtitle-cache-section">
         <div class="settings-section-title">Automatiska undertexter</div>
         <div style="font-size:13px;color:var(--muted);margin-bottom:8px" id="subtitle-cache-stats">
@@ -3698,7 +3770,7 @@ async function loadSettings() {
         <div id="subtitle-cache-cached" style="font-size:12px;color:var(--muted)">💾 ${cacheStatus.done > 0 ? cacheStatus.done : cacheStatus.cached} undertextfiler extraherade och sparade</div>
         ${currentUser?.role === "admin" ? `<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
           <button class="btn-fav" style="font-size:12px" onclick="openSubtitleLog()">📋 Visa undertext-logg${cacheStatus.errors > 0 ? ` (${cacheStatus.errors} fel)` : ""}</button>
-          <button class="btn-fav" style="font-size:12px" onclick="recacheAllSubtitles()">🔄 Cacha om alla undertexter</button>
+          <button class="btn-fav" style="font-size:12px" onclick="recacheAllSubtitles()">🔄 Cacha om enligt språklistan</button>
           <button class="btn-fav" style="font-size:12px" onclick="clearSubtitleCache()">🗑 Rensa all undertextcache</button>
         </div>` : ""}
       </div>` : ''}
@@ -3729,23 +3801,6 @@ async function loadSettings() {
       </div>` : ''}
 
       <div class="settings-section">
-        <div class="settings-section-title">Uppdateringskanal</div>
-        <div style="margin-bottom:12px">
-          <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Välj vilken kanal du vill ta emot uppdateringar från.</div>
-          <div style="display:flex;gap:12px">
-            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:14px">
-              <input type="radio" name="update_channel" value="stable" ${(cfg.update_channel||"stable")==="stable"?"checked":""} onchange="saveChannelSetting('stable')">
-              <span>🟢 Stabil</span>
-            </label>
-            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:14px">
-              <input type="radio" name="update_channel" value="beta" ${cfg.update_channel==="beta"?"checked":""} onchange="saveChannelSetting('beta')">
-              <span>🧪 Beta</span>
-            </label>
-          </div>
-          <div style="font-size:11px;color:var(--muted);margin-top:6px">Beta-kanalen kan innehålla instabila funktioner under testning.</div>
-        </div>
-      </div>
-      <div class="settings-section">
         <div class="settings-section-title">Bildbaserade undertexter (PGS/VOBSUB)</div>
         <div id="pgstosrt-status-section">
           ${pgsStatus.installed ? `
@@ -3768,7 +3823,9 @@ async function loadSettings() {
           </div>
         </div>
       </div>
+      ` : ""}
 
+      ${_settingsActiveTab === "library" ? `
       <div class="settings-section">
         <div class="settings-section-title">Bibliotek</div>
         <div class="user-list" id="lib-list">
@@ -3795,7 +3852,9 @@ async function loadSettings() {
           <button class="s-btn primary" onclick="addLib()">Lägg till</button>
         </div>
       </div>
+      ` : ""}
 
+      ${_settingsActiveTab === "users" ? `
       <div class="settings-section">
         <div class="settings-section-title">Användare</div>
         <div class="user-list">
@@ -3832,7 +3891,9 @@ async function loadSettings() {
           <button class="btn-fav" style="font-size:11px;color:var(--muted)" onclick="purgeGhostUsers()" title="Städar bort gamla borttagna konton som blockerar återanvändning av användarnamn">🧹 Städa bort gamla borttagna konton</button>
         </div>
       </div>
+      ` : ""}
 
+      ${_settingsActiveTab === "server" ? `
       <div class="settings-section">
         <div class="settings-section-title">Server</div>
         <div class="setting-row">
@@ -3882,10 +3943,27 @@ async function loadSettings() {
           <div><div class="setting-label">Spotify Client Secret</div><div class="setting-desc">Krävs tillsammans med Client ID</div></div>
           <input class="s-input" type="password" id="s-spotify-secret" value="${esc(cfg.spotify_client_secret || '')}" placeholder="Ej angiven" autocomplete="off"/>
         </div>
-        <div class="setting-row">
-        </div>
         <div style="margin-top:12px"><button class="s-btn primary" onclick="saveApiKeys()">Spara nycklar</button></div>
       </div>
+
+      <div class="settings-section">
+        <div class="settings-section-title">Uppdateringskanal</div>
+        <div style="margin-bottom:12px">
+          <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Välj vilken kanal du vill ta emot uppdateringar från.</div>
+          <div style="display:flex;gap:12px">
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:14px">
+              <input type="radio" name="update_channel" value="stable" ${(cfg.update_channel||"stable")==="stable"?"checked":""} onchange="saveChannelSetting('stable')">
+              <span>🟢 Stabil</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:14px">
+              <input type="radio" name="update_channel" value="beta" ${cfg.update_channel==="beta"?"checked":""} onchange="saveChannelSetting('beta')">
+              <span>🧪 Beta</span>
+            </label>
+          </div>
+          <div style="font-size:11px;color:var(--muted);margin-top:6px">Beta-kanalen kan innehålla instabila funktioner under testning.</div>
+        </div>
+      </div>
+      ` : ""}
 
       <div style="padding:20px 0;font-size:12px;color:var(--muted)">StreamVault v${updateInfo?.current || "–"}</div>
     </div>`;
