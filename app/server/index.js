@@ -794,7 +794,7 @@ app.get("/api/updates/check", requireAuth, async (req, res) => {
     // last several releases (not just the newest one) in case a release was published with
     // only a server update and no new APK that time — otherwise a real APK update sitting in
     // an older release would be invisible once a newer, APK-less release comes along.
-    let apkDownloadUrl = null, apkVersion = null;
+    let apkDownloadUrl = null, apkVersion = null, apkNotesAsset = null;
     for (const rel of eligible.slice(0, 10)) {
       const apkAsset = (rel.assets || []).find(a => a.name && a.name.endsWith(".apk"));
       if (!apkAsset) continue;
@@ -803,12 +803,39 @@ app.get("/api/updates/check", requireAuth, async (req, res) => {
       if (v && (!apkVersion || compareVersions(v, apkVersion) > 0)) {
         apkVersion = v;
         apkDownloadUrl = apkAsset.browser_download_url;
+        // Android gets its own release notes, never the server/Windows text (data.body) —
+        // that's written for the Windows server audience and would be confusing/irrelevant
+        // in the app. Looked for as a sibling asset in the SAME release, matching the APK's
+        // name with a "-notes.txt" suffix (e.g. "streamvault-android-v1.0.1-notes.txt").
+        const baseName = apkAsset.name.replace(/\.apk$/i, "");
+        apkNotesAsset = (rel.assets || []).find(a => a.name === `${baseName}-notes.txt` || a.name === `${baseName}.notes.txt`) || null;
       }
     }
     const requestedVersionName = req.query.versionName || null;
     const hasAndroidUpdate = !!(apkVersion && requestedVersionName && compareVersions(apkVersion, requestedVersionName) > 0);
 
-    res.json({ current: STREAMVAULT_VERSION, latest, hasUpdate, releaseNotes: data.body || "", htmlUrl: data.html_url || null, downloadUrl, channel, isBeta: !!data.prerelease, apkDownloadUrl, apkVersion, hasAndroidUpdate });
+    // Fetch the notes file's actual text content, if one was found. Deliberately left as an
+    // empty string (never data.body) when no notes file exists for this APK — showing the
+    // Windows server's release notes inside the Android app would just be confusing.
+    let apkReleaseNotes = "";
+    if (apkNotesAsset?.browser_download_url) {
+      try {
+        apkReleaseNotes = await new Promise((resolve, reject) => {
+          https.get(apkNotesAsset.browser_download_url, { headers: { "User-Agent": "StreamVault/" + STREAMVAULT_VERSION }, timeout: 5000 }, r => {
+            if (r.statusCode >= 300 && r.statusCode < 400 && r.headers.location) {
+              return https.get(r.headers.location, res2 => {
+                let d = ""; res2.on("data", c => d += c); res2.on("end", () => resolve(d));
+              }).on("error", reject);
+            }
+            let d = ""; r.on("data", c => d += c); r.on("end", () => resolve(d));
+          }).on("error", reject);
+        });
+      } catch(e) {
+        apkReleaseNotes = ""; // fine if this fails — the update itself still works, just without notes text
+      }
+    }
+
+    res.json({ current: STREAMVAULT_VERSION, latest, hasUpdate, releaseNotes: data.body || "", htmlUrl: data.html_url || null, downloadUrl, channel, isBeta: !!data.prerelease, apkDownloadUrl, apkVersion, hasAndroidUpdate, apkReleaseNotes });
   } catch {
     res.json({ current: STREAMVAULT_VERSION, latest: STREAMVAULT_VERSION, hasUpdate: false });
   }
@@ -1058,6 +1085,64 @@ let isScanning = false;
 // until the first one or two finish, even though the scan already knows about all of them.
 let _scanProgress = { library: null, found: 0, processed: 0 };
 
+// Scans a single library entry (movies/tvshows/music) and returns how many new items were
+// added. Extracted out of scanLibraries() so both a full server-wide scan and a scan scoped
+// to just one library can share the exact same logic.
+async function scanOneLibrary(lib) {
+  let added = 0;
+  if (!fs.existsSync(lib.path)) return added;
+  if (lib.type === "movies") {
+    const entries = fs.readdirSync(lib.path,{withFileTypes:true});
+    // Report the raw count immediately — this is instant (local disk listing), unlike
+    // the TMDB lookups below, so there's no reason to make the admin wait for those
+    // just to find out how many files are even in the folder.
+    _scanProgress = { library: lib.name, found: entries.length, processed: 0 };
+    console.log(`[SCAN] Movie library "${lib.name}": found ${entries.length} entries`);
+    for (const entry of entries) {
+      const fullPath = path.join(lib.path,entry.name);
+      let filePath = null;
+      if (entry.isFile() && VIDEO_EXT.has(path.extname(entry.name).toLowerCase())) filePath=fullPath;
+      else if (entry.isDirectory()) {
+        const vf = fs.readdirSync(fullPath,{withFileTypes:true}).find(f=>f.isFile()&&VIDEO_EXT.has(path.extname(f.name).toLowerCase()));
+        if (vf) filePath=path.join(fullPath,vf.name);
+      }
+      if (!filePath) { _scanProgress.processed++; continue; }
+      const id = Buffer.from(filePath).toString("base64url");
+      if (await dbFindOne(db.media,{_id:id})) { _scanProgress.processed++; continue; }
+      const {cleanName,year} = cleanTitle(entry.isDirectory()?entry.name:path.basename(filePath));
+      const meta = await getMovieMeta(cleanName,year);
+      const stat = fs.statSync(filePath);
+      const newItem = {_id:id,library_id:lib.id,type:"movie",title:meta?.title_en || cleanName,year:meta?.year||year,file_path:filePath,file_size:stat.size,tmdb_id:meta?.tmdb_id||null,poster_url:meta?.poster_url||null,backdrop_url:meta?.backdrop_url||null,overview:meta?.overview||null,rating:meta?.rating||null,collection_id:meta?.collection_id||null,collection_name:meta?.collection_name||null,collection_poster:meta?.collection_poster||null,collection_backdrop:meta?.collection_backdrop||null,added_at:new Date().toISOString()};
+      await dbInsert(db.media, newItem);
+      queueSubtitleCache(newItem); // queue Swedish subtitle pre-cache (sequential)
+      added++;
+      _scanProgress.processed++;
+    }
+  }
+  if (lib.type === "tvshows") {
+    const shows = fs.readdirSync(lib.path,{withFileTypes:true}).filter(f=>f.isDirectory());
+    _scanProgress = { library: lib.name, found: shows.length, processed: 0 };
+    console.log(`[SCAN] TV library "${lib.name}": found ${shows.length} show folders`);
+    for (const show of shows) {
+      const showPath=path.join(lib.path,show.name);
+      const showId=Buffer.from(showPath).toString("base64url");
+      if (!await dbFindOne(db.media,{_id:showId})) {
+        const {cleanName}=cleanTitle(show.name);
+        const meta=await getTVMeta(cleanName);
+        if (!meta) console.log(`[SCAN] No TMDB match for TV show: "${cleanName}"`);
+        else console.log(`[SCAN] Matched TV show: "${cleanName}" → "${meta.title || cleanName}" (TMDB ${meta.tmdb_id})`);
+        await dbInsert(db.media,{_id:showId,library_id:lib.id,type:"tvshow",title:cleanName,file_path:showPath,tmdb_id:meta?.tmdb_id||null,poster_url:meta?.poster_url||null,backdrop_url:meta?.backdrop_url||null,overview:meta?.overview||null,rating:meta?.rating||null,status:meta?.status||null,added_at:new Date().toISOString()});
+        added++;
+      }
+      await scanEpisodes(showPath,showId,lib.id);
+      _scanProgress.processed++;
+    }
+    console.log(`[SCAN] TV library "${lib.name}": done`);
+  }
+  if (lib.type === "music") await scanMusic(lib.path,lib.id);
+  return added;
+}
+
 async function scanLibraries() {
   if (isScanning) return;
   isScanning = true;
@@ -1065,56 +1150,7 @@ async function scanLibraries() {
   let added = 0;
   try {
     for (const lib of (config.libraries||[])) {
-      if (!fs.existsSync(lib.path)) continue;
-      if (lib.type === "movies") {
-        const entries = fs.readdirSync(lib.path,{withFileTypes:true});
-        // Report the raw count immediately — this is instant (local disk listing), unlike
-        // the TMDB lookups below, so there's no reason to make the admin wait for those
-        // just to find out how many files are even in the folder.
-        _scanProgress = { library: lib.name, found: entries.length, processed: 0 };
-        console.log(`[SCAN] Movie library "${lib.name}": found ${entries.length} entries`);
-        for (const entry of entries) {
-          const fullPath = path.join(lib.path,entry.name);
-          let filePath = null;
-          if (entry.isFile() && VIDEO_EXT.has(path.extname(entry.name).toLowerCase())) filePath=fullPath;
-          else if (entry.isDirectory()) {
-            const vf = fs.readdirSync(fullPath,{withFileTypes:true}).find(f=>f.isFile()&&VIDEO_EXT.has(path.extname(f.name).toLowerCase()));
-            if (vf) filePath=path.join(fullPath,vf.name);
-          }
-          if (!filePath) { _scanProgress.processed++; continue; }
-          const id = Buffer.from(filePath).toString("base64url");
-          if (await dbFindOne(db.media,{_id:id})) { _scanProgress.processed++; continue; }
-          const {cleanName,year} = cleanTitle(entry.isDirectory()?entry.name:path.basename(filePath));
-          const meta = await getMovieMeta(cleanName,year);
-          const stat = fs.statSync(filePath);
-          const newItem = {_id:id,library_id:lib.id,type:"movie",title:meta?.title_en || cleanName,year:meta?.year||year,file_path:filePath,file_size:stat.size,tmdb_id:meta?.tmdb_id||null,poster_url:meta?.poster_url||null,backdrop_url:meta?.backdrop_url||null,overview:meta?.overview||null,rating:meta?.rating||null,collection_id:meta?.collection_id||null,collection_name:meta?.collection_name||null,collection_poster:meta?.collection_poster||null,collection_backdrop:meta?.collection_backdrop||null,added_at:new Date().toISOString()};
-          await dbInsert(db.media, newItem);
-          queueSubtitleCache(newItem); // queue Swedish subtitle pre-cache (sequential)
-          added++;
-          _scanProgress.processed++;
-        }
-      }
-      if (lib.type === "tvshows") {
-        const shows = fs.readdirSync(lib.path,{withFileTypes:true}).filter(f=>f.isDirectory());
-        _scanProgress = { library: lib.name, found: shows.length, processed: 0 };
-        console.log(`[SCAN] TV library "${lib.name}": found ${shows.length} show folders`);
-        for (const show of shows) {
-          const showPath=path.join(lib.path,show.name);
-          const showId=Buffer.from(showPath).toString("base64url");
-          if (!await dbFindOne(db.media,{_id:showId})) {
-            const {cleanName}=cleanTitle(show.name);
-            const meta=await getTVMeta(cleanName);
-            if (!meta) console.log(`[SCAN] No TMDB match for TV show: "${cleanName}"`);
-            else console.log(`[SCAN] Matched TV show: "${cleanName}" → "${meta.title || cleanName}" (TMDB ${meta.tmdb_id})`);
-            await dbInsert(db.media,{_id:showId,library_id:lib.id,type:"tvshow",title:cleanName,file_path:showPath,tmdb_id:meta?.tmdb_id||null,poster_url:meta?.poster_url||null,backdrop_url:meta?.backdrop_url||null,overview:meta?.overview||null,rating:meta?.rating||null,status:meta?.status||null,added_at:new Date().toISOString()});
-            added++;
-          }
-          await scanEpisodes(showPath,showId,lib.id);
-          _scanProgress.processed++;
-        }
-        console.log(`[SCAN] TV library "${lib.name}": done`);
-      }
-      if (lib.type === "music") await scanMusic(lib.path,lib.id);
+      added += await scanOneLibrary(lib);
     }
   } finally { isScanning=false; }
   console.log(`Scan complete: ${added} new items`);
@@ -1331,7 +1367,8 @@ async function preCacheSubtitles(item, opts) {
     const { execFile } = require("child_process");
     streams = await new Promise((resolve) => {
       execFile(ffprobePath, [
-        "-v", "quiet", "-print_format", "json", "-show_streams",
+        "-v", "quiet", "-analyzeduration", "100M", "-probesize", "100M",
+        "-print_format", "json", "-show_streams",
         "-select_streams", "s", item.file_path
       ], { timeout: 30000, windowsHide: true }, (err, stdout) => {
         if (err) { logSubtitle("warn", item, "ffprobe misslyckades – hoppar över inbäddade spår", { error: err.message?.split("\n")[0] }); return resolve([]); }
@@ -1925,10 +1962,11 @@ async function getDuration(item) {
     const { execFileSync } = require("child_process");
     const out = execFileSync(ffprobe, [
       "-v", "quiet",
+      "-analyzeduration", "100M", "-probesize", "100M",
       "-show_entries", "format=duration:stream=width,height,codec_name,pix_fmt",
       "-of", "json",
       item.file_path
-    ], { timeout: 15000, windowsHide: true }).toString().trim();
+    ], { timeout: 20000, windowsHide: true }).toString().trim();
     const data = JSON.parse(out);
     const dur = Math.floor(parseFloat(data?.format?.duration || "0"));
     const videoStream = (data?.streams || []).find(s => s.width && s.height);
@@ -2030,15 +2068,33 @@ app.get("/api/playback/:id", requireMediaAccess, async (req, res) => {
 
   // Get the audio codec once, since both the browser path and the capability path need it.
   // Only probed on demand since it's the one check here that actually shells out to ffprobe.
+  async function getAllAudioStreams() {
+    try {
+      const { execFileSync } = require("child_process");
+      const ffprobePath = getFfmpegPath().replace("ffmpeg.exe", "ffprobe.exe");
+      const out = execFileSync(ffprobePath, [
+        "-v", "quiet", "-analyzeduration", "100M", "-probesize", "100M",
+        "-show_streams", "-select_streams", "a",
+        "-show_entries", "stream=codec_name",
+        "-of", "json", item.file_path
+      ], { timeout: 12000, windowsHide: true }).toString();
+      return (JSON.parse(out).streams || []).map(s => normalizeCodec(s.codec_name || ""));
+    } catch(e) {
+      console.log("[PLAYBACK] ffprobe all-audio check failed:", e.message);
+      return [];
+    }
+  }
+
   async function getAudioCodec() {
     try {
       const { execFileSync } = require("child_process");
       const ffprobe = getFfprobePath();
       const out = execFileSync(ffprobe, [
-        "-v", "quiet", "-show_streams", "-select_streams", "a:0",
+        "-v", "quiet", "-analyzeduration", "100M", "-probesize", "100M",
+        "-show_streams", "-select_streams", "a:0",
         "-show_entries", "stream=codec_name",
         "-of", "json", item.file_path
-      ], { timeout: 8000, windowsHide: true }).toString();
+      ], { timeout: 12000, windowsHide: true }).toString();
       return normalizeCodec(JSON.parse(out).streams?.[0]?.codec_name || "");
     } catch(e) {
       console.log("[PLAYBACK] ffprobe audio check failed:", e.message);
@@ -2054,10 +2110,11 @@ app.get("/api/playback/:id", requireMediaAccess, async (req, res) => {
     try {
       const { execFileSync } = require("child_process");
       const out = execFileSync(getFfprobePath(), [
-        "-v", "quiet", "-show_streams", "-select_streams", "v:0",
+        "-v", "quiet", "-analyzeduration", "100M", "-probesize", "100M",
+        "-show_streams", "-select_streams", "v:0",
         "-show_entries", "stream=codec_name",
         "-of", "json", item.file_path
-      ], { timeout: 8000, windowsHide: true }).toString();
+      ], { timeout: 12000, windowsHide: true }).toString();
       return normalizeCodec(JSON.parse(out).streams?.[0]?.codec_name || "");
     } catch(e) {
       console.log("[PLAYBACK] ffprobe video check failed:", e.message);
@@ -2066,6 +2123,7 @@ app.get("/api/playback/:id", requireMediaAccess, async (req, res) => {
   }
 
   let needsTranscode;
+  let compatibleAudioIndex = null;
 
   // Capability-based negotiation: a native app (Android/iOS/etc.) can tell us exactly what
   // it supports instead of us guessing from the User-Agent. Any client sending these query
@@ -2084,20 +2142,28 @@ app.get("/api/playback/:id", requireMediaAccess, async (req, res) => {
 
     // Video codec: already cached by getDuration() in the vast majority of cases, so this is
     // normally free too. Falls back to a fresh probe only if genuinely unknown (see above).
+    // If we still can't determine it even after that (e.g. probe genuinely fails), treat it
+    // as INCOMPATIBLE rather than assuming it's fine — a silently broken (audio-only, no
+    // picture) direct-play is worse than transcoding a file that might have been fine.
     let videoOk = true;
     if (containerOk && videoCodecs.size > 0) {
       const videoCodec = await getVideoCodec();
-      videoOk = !videoCodec || videoCodecs.has(videoCodec);
-      if (!videoOk) reasons.push(`video codec "${videoCodec}" not in [${[...videoCodecs].join(",")}]`);
+      videoOk = videoCodec ? videoCodecs.has(videoCodec) : false;
+      if (!videoOk) reasons.push(`video codec "${videoCodec || "unknown"}" not in [${[...videoCodecs].join(",")}]`);
     }
 
-    // Audio codec: the one check that always needs an ffprobe call, so only run it if the
-    // cheaper checks above already passed — no point probing a file we're transcoding anyway.
+    // Audio codec: checks ALL audio tracks, not just the first one — a remux can easily have
+    // track 0 as DTS/TrueHD (incompatible) with a perfectly fine AC3/AAC track sitting right
+    // next to it at index 1+. Picks the first compatible track found; its index is returned
+    // below so the client can actually select it (direct-play just streams the raw file —
+    // the server doesn't remap tracks the way DASH does, so the client MUST switch to this
+    // track index itself, or it'll just get whatever the container's default track is).
     let audioOk = true;
     if (containerOk && videoOk && audioCodecs.size > 0) {
-      const audioCodec = await getAudioCodec();
-      audioOk = !audioCodec || audioCodecs.has(audioCodec);
-      if (!audioOk) reasons.push(`audio codec "${audioCodec}" not in [${[...audioCodecs].join(",")}]`);
+      const audioStreams = await getAllAudioStreams();
+      compatibleAudioIndex = audioStreams.findIndex(c => c && audioCodecs.has(c));
+      audioOk = compatibleAudioIndex !== -1;
+      if (!audioOk) reasons.push(`no compatible audio track among [${audioStreams.join(",")}] for [${[...audioCodecs].join(",")}]`);
     }
 
     needsTranscode = !(containerOk && videoOk && audioOk);
@@ -2130,7 +2196,12 @@ app.get("/api/playback/:id", requireMediaAccess, async (req, res) => {
       ? `/api/dash/${item._id}/manifest.mpd?token=${token}`
       : `/api/stream/${item._id}?token=${token}`,
     duration,
-    title: item.title
+    title: item.title,
+    // Only meaningful for direct play — tells the client which audio track to explicitly
+    // select (e.g. via ExoPlayer track selection), since direct play streams the raw file
+    // as-is and the server has no way to remap tracks the way DASH transcoding does. Null
+    // when not using capability-based negotiation, or when track 0 was already fine.
+    audioTrackIndex: (!needsTranscode && typeof compatibleAudioIndex === "number" && compatibleAudioIndex > 0) ? compatibleAudioIndex : null
   });
 });
 
@@ -2495,9 +2566,10 @@ async function startDashTranscode(item, seekSec = 0, audioTrackIndex = null, all
       const { execFileSync } = require("child_process");
       const ffprobePath = getFfmpegPath().replace("ffmpeg.exe", "ffprobe.exe");
       const probeOut = execFileSync(ffprobePath, [
-        "-v", "quiet", "-print_format", "json", "-show_streams",
+        "-v", "quiet", "-analyzeduration", "100M", "-probesize", "100M",
+        "-print_format", "json", "-show_streams",
         "-select_streams", "a", item.file_path
-      ], { timeout: 8000, windowsHide: true }).toString();
+      ], { timeout: 12000, windowsHide: true }).toString();
       const audioStreams = JSON.parse(probeOut).streams || [];
       const preferred = audioStreams.find(s => ["ac3","eac3","aac","mp3"].includes((s.codec_name||"").toLowerCase()));
       if (preferred) {
@@ -3035,9 +3107,10 @@ app.get("/api/media/:id/subtitles", requireAuth, async (req, res) => {
     try {
       const { execFileSync } = require("child_process");
       const probeOut = execFileSync(ffprobePath, [
-        "-v", "quiet", "-print_format", "json", "-show_streams",
+        "-v", "quiet", "-analyzeduration", "100M", "-probesize", "100M",
+        "-print_format", "json", "-show_streams",
         "-select_streams", "s", item.file_path
-      ], { timeout: 10000, windowsHide: true }).toString();
+      ], { timeout: 15000, windowsHide: true }).toString();
       const probe = JSON.parse(probeOut);
       (probe.streams || []).forEach((s, i) => {
         const lang = normalizeLangCode(s.tags?.language || s.tags?.LANGUAGE || "und");
@@ -3239,9 +3312,10 @@ app.get("/api/media/:id/subtitle-extract", requireMediaAccess, async (req, res) 
       const { execFileSync } = require("child_process");
       const ffprobePath = getFfmpegPath().replace("ffmpeg.exe", "ffprobe.exe");
       const probeOut = execFileSync(ffprobePath, [
-        "-v", "quiet", "-print_format", "json", "-show_streams",
+        "-v", "quiet", "-analyzeduration", "100M", "-probesize", "100M",
+        "-print_format", "json", "-show_streams",
         "-select_streams", "s:" + trackIndex, item.file_path
-      ], { timeout: 8000, windowsHide: true }).toString();
+      ], { timeout: 12000, windowsHide: true }).toString();
       const streams = JSON.parse(probeOut).streams || [];
       lang = normalizeLangCode(streams[0]?.tags?.language || streams[0]?.tags?.LANGUAGE || "und");
       codec = streams[0]?.codec_name || "";
@@ -3939,8 +4013,26 @@ app.get("/api/scan/status", requireAuth, async (req, res) => {
 // Minimal, non-sensitive subset of config — safe for any logged-in user (unlike the full
 // /api/config, which includes API keys and is admin-only). Just enough for cosmetic display
 // like showing the server's name in the UI.
+// Maps our internal 3-letter subtitle-tracking codes to OpenSubtitles' 2-letter ISO codes.
+const OPENSUBS_LANG_CODE = { swe:"sv", eng:"en", nor:"no", dan:"da", fin:"fi", deu:"de", fra:"fr", spa:"es", nld:"nl", ita:"it", por:"pt", pol:"pl", jpn:"ja" };
+const OPENSUBS_LANG_LABEL = { sv:"Svenska", en:"English", no:"Norsk", da:"Dansk", fi:"Suomi", de:"Deutsch", fr:"Français", es:"Español", nl:"Nederlands", it:"Italiano", pt:"Português", pl:"Polski", ja:"日本語" };
+
 app.get("/api/public-config", requireAuth, (req, res) => {
-  res.json({ server_name: config.server_name || null });
+  // Household's subtitle-search language options — the OCR/cache allowlist if one is set,
+  // otherwise just Swedish+English as a sane default. Always includes the requesting user's
+  // own configured language too, even if it isn't on the allowlist (e.g. a guest account set
+  // to a language nobody else in the household uses), so the manual OpenSubtitles search
+  // dropdown is never missing the one language that person actually needs.
+  const allowlist = (config.subtitle_ocr_mode !== "all" && Array.isArray(config.subtitle_ocr_languages) && config.subtitle_ocr_languages.length)
+    ? config.subtitle_ocr_languages
+    : ["swe", "eng"];
+  const codes = new Set(allowlist.map(c => OPENSUBS_LANG_CODE[c]).filter(Boolean));
+  const userSubLang = USER_LANG_TO_SUB_LANG[req.user?.language];
+  if (userSubLang && OPENSUBS_LANG_CODE[userSubLang]) codes.add(OPENSUBS_LANG_CODE[userSubLang]);
+  if (!codes.size) codes.add("sv"), codes.add("en");
+  const subtitleSearchLanguages = [...codes].map(code => ({ code, label: OPENSUBS_LANG_LABEL[code] || code }));
+
+  res.json({ server_name: config.server_name || null, subtitleSearchLanguages });
 });
 
 app.get("/api/config", requireAdmin, (req, res) => {
@@ -4072,8 +4164,26 @@ app.post("/api/media/:id/fix-meta", requireAdmin, async (req, res) => {
   const { tmdb_id, title, year, overview, poster_url, backdrop_url, rating } = req.body;
   if (!tmdb_id) return res.status(400).json({ error: "Saknar tmdb_id" });
   try {
+    const existing = await dbFindOne(db.media, { _id: req.params.id });
+    const kind = existing?.type === "tvshow" ? "tv" : "movie";
+
+    // Same "poster always English" policy as the automatic scan (getMovieMeta/getTVMeta) —
+    // without this, a manual "Fixa info" match saved whatever poster_path came back from the
+    // search results, which reflects the SERVER's default language (e.g. Swedish), not
+    // English. Re-resolves the poster explicitly here at the actual save point, so it applies
+    // regardless of which language the poster_url the frontend sent happened to be in.
+    let finalPosterUrl = poster_url;
+    try {
+      const images = await tmdbFetch(`/${kind}/${tmdb_id}/images?include_image_language=en,null`);
+      const posters = images?.posters || [];
+      const englishPoster = posters.find(p => p.iso_639_1 === "en") || posters[0];
+      if (englishPoster?.file_path) finalPosterUrl = `https://image.tmdb.org/t/p/w500${englishPoster.file_path}`;
+    } catch(e) {
+      // Keep whatever poster_url was sent — not worth failing the whole save over.
+    }
+
     await dbUpdate(db.media, { _id: req.params.id }, {
-      $set: { tmdb_id, title, year: year ? parseInt(year) : undefined, overview, poster_url, backdrop_url, rating }
+      $set: { tmdb_id, title, year: year ? parseInt(year) : undefined, overview, poster_url: finalPosterUrl, backdrop_url, rating }
     });
     res.json({ ok: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -4995,6 +5105,76 @@ app.post("/api/scan/full-rescan", requireAdmin, async (req, res) => {
     console.log("Database cleared, starting full rescan...");
     await scanLibraries();
   } catch(e) { console.error("Full rescan error:", e); }
+});
+
+// Rescans just ONE library (new files only, existing entries untouched) — for when you've
+// added files to one library and don't want to wait for/disturb the others.
+app.post("/api/scan/library/:id/rescan", requireAdmin, async (req, res) => {
+  const lib = (config.libraries || []).find(l => l.id === req.params.id);
+  if (!lib) return res.status(404).json({ error: "Bibliotek hittades inte" });
+  if (isScanning) return res.status(409).json({ error: "En skanning pågår redan — vänta tills den är klar" });
+  res.json({ message: `Skannar biblioteket "${lib.name}"...` });
+  isScanning = true;
+  _scanProgress = { library: null, found: 0, processed: 0 };
+  try {
+    const added = await scanOneLibrary(lib);
+    console.log(`[SCAN] Library "${lib.name}" rescan complete: ${added} new items`);
+  } catch(e) {
+    console.error(`Library rescan error (${lib.name}):`, e);
+  } finally {
+    isScanning = false;
+  }
+  if (!_subtitleCacheRunning && _subtitleCacheQueue.length > 0) {
+    _subtitleCacheRunning = true;
+    setTimeout(processSubtitleCacheQueue, 100);
+  }
+});
+
+// Clears everything belonging to ONE library (its media entries, their watch history, and
+// their subtitle cache) and rescans it completely from scratch — the single-library
+// equivalent of "Rensa och skanna om allt", without touching any other library at all.
+app.post("/api/scan/library/:id/full-rescan", requireAdmin, async (req, res) => {
+  const lib = (config.libraries || []).find(l => l.id === req.params.id);
+  if (!lib) return res.status(404).json({ error: "Bibliotek hittades inte" });
+  if (isScanning) return res.status(409).json({ error: "En skanning pågår redan — vänta tills den är klar" });
+  res.json({ message: `Rensar och skannar om biblioteket "${lib.name}"...` });
+  try {
+    const libItems = await dbFind(db.media, { library_id: lib.id });
+    const libItemIds = libItems.map(i => i._id);
+    await dbRemove(db.media, { library_id: lib.id }, { multi: true });
+    if (libItemIds.length) {
+      await dbRemove(db.history, { media_id: { $in: libItemIds } }, { multi: true });
+      await dbRemove(db.favorites, { media_id: { $in: libItemIds } }, { multi: true }).catch(() => {});
+    }
+    metaCache.clear(); // shared across libraries, but cheap enough to just clear entirely
+
+    // Remove subtitle-cache files for just these items (both embedded/converted and external)
+    const cacheDir = path.join(DATA_DIR, "subtitle-cache");
+    if (fs.existsSync(cacheDir) && libItemIds.length) {
+      const hashes = new Set(libItemIds.map(id => shortMediaId(id)));
+      let removed = 0;
+      for (const f of fs.readdirSync(cacheDir)) {
+        const hash = f.slice(0, 32);
+        if (hashes.has(hash)) { try { fs.unlinkSync(path.join(cacheDir, f)); removed++; } catch {} }
+      }
+      console.log(`[RESCAN] Library "${lib.name}": cleared ${removed} subtitle cache files`);
+    }
+
+    isScanning = true;
+    _scanProgress = { library: null, found: 0, processed: 0 };
+    try {
+      const added = await scanOneLibrary(lib);
+      console.log(`[RESCAN] Library "${lib.name}" full rescan complete: ${added} new items`);
+    } finally {
+      isScanning = false;
+    }
+    if (!_subtitleCacheRunning && _subtitleCacheQueue.length > 0) {
+      _subtitleCacheRunning = true;
+      setTimeout(processSubtitleCacheQueue, 100);
+    }
+  } catch(e) {
+    console.error(`Library full rescan error (${lib.name}):`, e);
+  }
 });
 
 // ── AUTO SCAN STATUS ───────────────────────────────────────────────────────────

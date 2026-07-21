@@ -20,7 +20,7 @@ window.addEventListener("DOMContentLoaded", async () => {
     const user = JSON.parse(localStorage.getItem("sv_user") || "null");
     if (user) {
       currentUser = user; showApp();
-      API.get("/public-config").then(c => { window._serverName = c.server_name || "StreamVault"; }).catch(()=>{});
+      API.get("/public-config").then(c => { window._serverName = c.server_name || "StreamVault"; window._subtitleSearchLanguages = c.subtitleSearchLanguages || []; }).catch(()=>{});
       // The localStorage copy can go stale (e.g. after changing language/password on another
       // tab, or if a previous save didn't update it) — refresh from the server in the
       // background so a reload never silently reverts a setting back to an old value.
@@ -2560,12 +2560,18 @@ async function openSubtitles(mediaId, title) {
   var langSelect = document.createElement("select");
   langSelect.id = "sub-lang-select";
   langSelect.style.cssText = "background:var(--card2);border:1px solid var(--border);color:var(--text);font-size:13px;padding:8px;border-radius:8px";
-  var optSv = document.createElement("option");
-  optSv.value = "sv"; optSv.textContent = "Svenska";
-  var optEn = document.createElement("option");
-  optEn.value = "en"; optEn.textContent = "English";
-  langSelect.appendChild(optSv);
-  langSelect.appendChild(optEn);
+  // Populated from the household's language list (same one that governs subtitle caching),
+  // plus the logged-in user's own language if it isn't already on that list — so someone
+  // like a Norwegian guest isn't stuck with only Swedish/English options. Falls back to
+  // those two if the list hasn't loaded yet for some reason.
+  var langOptions = (window._subtitleSearchLanguages && window._subtitleSearchLanguages.length)
+    ? window._subtitleSearchLanguages
+    : [{ code: "sv", label: "Svenska" }, { code: "en", label: "English" }];
+  langOptions.forEach(function(l) {
+    var opt = document.createElement("option");
+    opt.value = l.code; opt.textContent = l.label;
+    langSelect.appendChild(opt);
+  });
   searchRow.appendChild(langSelect);
   footer.appendChild(searchRow);
   
@@ -3834,6 +3840,8 @@ async function loadSettings() {
             return `<div class="user-row">
               <span style="font-size:20px">${icons[l.type] || "📁"}</span>
               <div class="user-info"><div class="user-name">${esc(l.name)}</div><div class="user-role">${esc(l.path)}</div></div>
+              <button class="s-btn" onclick="rescanOneLibrary('${l.id}','${esc(l.name)}')" title="Skanna efter nya filer i just detta bibliotek">↻ Skanna</button>
+              <button class="s-btn" onclick="fullRescanOneLibrary('${l.id}','${esc(l.name)}')" style="border-color:#e74c3c;color:#e74c3c" title="Rensa och skanna om bara detta bibliotek från grunden">🗑 Rensa om</button>
               <button class="s-btn danger" onclick="removeLib('${l.id}')">Ta bort</button>
             </div>`;
           }).join("") || "<p style='color:var(--muted);font-size:14px'>Inga bibliotek tillagda.</p>"}
@@ -4005,6 +4013,33 @@ async function fullRescan() {
     setTimeout(() => { loadSettings(); switchSection("movies"); }, 3000);
   }
   catch (e) { toast(e.message, "error"); }
+}
+
+// Rescans just one library for new files, leaving everything else (and every other library)
+// completely untouched.
+async function rescanOneLibrary(libId, libName) {
+  toast(`⏳ Skannar "${libName}"...`, "info");
+  try {
+    var data = await API.post(`/scan/library/${libId}/rescan`, {});
+    toast(data.message || "Skanning startad", "success");
+    startScanProgressPolling();
+  } catch(e) {
+    toast("Fel: " + e.message, "error");
+  }
+}
+
+// Clears everything belonging to just this one library (its entries, their history, their
+// subtitle cache) and rescans it from scratch — every other library is left completely alone.
+async function fullRescanOneLibrary(libId, libName) {
+  if (!confirm(`Detta raderar all filminformation för biblioteket "${libName}" (bara det här biblioteket) och skannar om det från noll.\n\nDina faktiska filer på disk rörs inte, och andra bibliotek påverkas inte alls.\n\nFortsätt?`)) return;
+  toast(`⏳ Rensar och skannar om "${libName}"...`, "info");
+  try {
+    var data = await API.post(`/scan/library/${libId}/full-rescan`, {});
+    toast(data.message || "Rensning och skanning startad", "success");
+    startScanProgressPolling();
+  } catch(e) {
+    toast("Fel: " + e.message, "error");
+  }
 }
 
 async function updateNextScanLabel() {
