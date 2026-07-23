@@ -367,7 +367,12 @@ const db = {
   history: new Datastore({ filename: path.join(DATA_DIR, "history.db"), autoload: true }),
   favorites: new Datastore({ filename: path.join(DATA_DIR, "favorites.db"), autoload: true }),
   loginAttempts: new Datastore({ filename: path.join(DATA_DIR, "attempts.db"), autoload: true }),
-  spotifyCache: new Datastore({ filename: path.join(DATA_DIR, "spotify_cache.db"), autoload: true })
+  spotifyCache: new Datastore({ filename: path.join(DATA_DIR, "spotify_cache.db"), autoload: true }),
+  // Append-only log of playback sessions (one entry per "play" request) — the historical
+  // record of who watched what, when, from where, and whether it was direct-played or
+  // transcoded. Separate from db.history (which just tracks each user's latest resume
+  // position per title) — this is for analytics/monitoring, not resume state.
+  playbackLog: new Datastore({ filename: path.join(DATA_DIR, "playback_log.db"), autoload: true })
 };
 
 db.users.ensureIndex({ fieldName: "username", unique: true });
@@ -2032,6 +2037,11 @@ const CODEC_ALIASES = {
   avc: "h264", "avc1": "h264", "h.264": "h264",
   hevc1: "hevc", "h.265": "hevc", h265: "hevc",
   vp09: "vp9", av01: "av1",
+  // XviD/DivX are both MPEG-4 Part 2 (ASP) implementations — ffprobe reports the underlying
+  // stream as "mpeg4" with a fourcc tag (e.g. "DX50", "XVID"), not as a distinct codec_name of
+  // its own, so these aliases just make sure any caller checking for "xvid"/"divx" explicitly
+  // still normalizes consistently to what ffprobe/direct_video_codecs actually deal in.
+  xvid: "mpeg4", divx: "mpeg4",
   // audio
   "ec-3": "eac3", ec3: "eac3", "dd+": "eac3",
   "ac-3": "ac3", dd: "ac3",
@@ -2190,6 +2200,19 @@ app.get("/api/playback/:id", requireMediaAccess, async (req, res) => {
     console.log(`[PLAYBACK] ${item.title} (${ext}): method=${needsTranscode ? "dash" : "direct"} ua=${ua.includes("edg") ? "Edge" : "Chrome"}`);
   }
 
+  // Fire-and-forget: log this playback decision for historical analytics (Tautulli-style —
+  // direct vs transcode rates over time, which containers/codecs transcode most, per-title
+  // play counts). Never blocks or fails the actual playback response.
+  dbInsert(db.playbackLog, {
+    user_id: req.user._id, username: req.user.username,
+    media_id: item._id, title: item.title, type: item.type,
+    method: needsTranscode ? "dash" : "direct",
+    container: ext.replace(".", ""),
+    video_codec: item.codec ? normalizeCodec(item.codec) : null,
+    device: describeClient(ua), ip: req.ip,
+    at: new Date().toISOString()
+  }).catch(() => {});
+
   res.json({
     method: needsTranscode ? "dash" : "direct",
     url: needsTranscode
@@ -2197,6 +2220,11 @@ app.get("/api/playback/:id", requireMediaAccess, async (req, res) => {
       : `/api/stream/${item._id}?token=${token}`,
     duration,
     title: item.title,
+    // Lets the client make its own informed decisions (e.g. route certain codecs to an
+    // alternate player/decoder) instead of only getting a bare direct/dash verdict. Reuses
+    // the already-cached DB field rather than re-probing — cheap either way.
+    container: ext.replace(".", ""),
+    videoCodec: item.codec ? normalizeCodec(item.codec) : null,
     // Only meaningful for direct play — tells the client which audio track to explicitly
     // select (e.g. via ExoPlayer track selection), since direct play streams the raw file
     // as-is and the server has no way to remap tracks the way DASH transcoding does. Null
@@ -3942,6 +3970,73 @@ app.get("/api/admin/live-activity", requireAdmin, async (req, res) => {
     });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
+
+// Historical playback analytics — direct-play vs transcode rates over time, which
+// container/codec combinations transcode most often (so it's visible at a glance instead of
+// manually reading server console logs), and per-title play counts. Reads from the
+// append-only playbackLog collection, separate from db.history (resume-position state).
+app.get("/api/admin/playback-stats", requireAdmin, async (req, res) => {
+  try {
+    const days = Math.min(parseInt(req.query.days) || 30, 365);
+    const since = new Date(Date.now() - days * 86400000).toISOString();
+    const entries = await dbFind(db.playbackLog, { at: { $gte: since } });
+
+    const totalPlays = entries.length;
+    const directCount = entries.filter(e => e.method === "direct").length;
+    const transcodeCount = totalPlays - directCount;
+
+    // Which container/codec combos transcode most — the "why does this always transcode"
+    // question, answered directly instead of reading console logs one playback at a time.
+    const comboMap = new Map();
+    for (const e of entries) {
+      const key = `${e.container || "?"} / ${e.video_codec || "?"}`;
+      if (!comboMap.has(key)) comboMap.set(key, { combo: key, total: 0, transcoded: 0 });
+      const c = comboMap.get(key);
+      c.total++;
+      if (e.method === "dash") c.transcoded++;
+    }
+    const byContainerCodec = [...comboMap.values()]
+      .map(c => ({ ...c, transcodePct: Math.round((c.transcoded / c.total) * 100) }))
+      .sort((a, b) => b.total - a.total)
+      .slice(0, 15);
+
+    // Most-played titles
+    const titleMap = new Map();
+    for (const e of entries) {
+      if (!titleMap.has(e.media_id)) titleMap.set(e.media_id, { title: e.title, type: e.type, plays: 0 });
+      titleMap.get(e.media_id).plays++;
+    }
+    const mostWatched = [...titleMap.values()].sort((a, b) => b.plays - a.plays).slice(0, 10);
+
+    // Per-day breakdown for a simple chart — direct vs transcode, last N days
+    const dayMap = new Map();
+    for (const e of entries) {
+      const day = (e.at || "").slice(0, 10);
+      if (!day) continue;
+      if (!dayMap.has(day)) dayMap.set(day, { date: day, direct: 0, transcode: 0 });
+      const d = dayMap.get(day);
+      if (e.method === "direct") d.direct++; else d.transcode++;
+    }
+    const dailyStats = [...dayMap.values()].sort((a, b) => a.date.localeCompare(b.date));
+
+    // Per-user breakdown — who's actually using the server, and from what
+    const userMap = new Map();
+    for (const e of entries) {
+      if (!userMap.has(e.username)) userMap.set(e.username, { username: e.username, plays: 0, direct: 0, transcode: 0 });
+      const u = userMap.get(e.username);
+      u.plays++;
+      if (e.method === "direct") u.direct++; else u.transcode++;
+    }
+    const byUser = [...userMap.values()].sort((a, b) => b.plays - a.plays);
+
+    res.json({
+      days, totalPlays, directCount, transcodeCount,
+      directPct: totalPlays ? Math.round((directCount / totalPlays) * 100) : 0,
+      byContainerCodec, mostWatched, dailyStats, byUser
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 
 app.get("/api/subtitles/cache-status", requireAuth, async (req, res) => {
   const cacheDir = path.join(DATA_DIR, "subtitle-cache");

@@ -3474,6 +3474,79 @@ var SUBTITLE_LANG_ADJ = { swe:"svensk", eng:"engelsk", nor:"norsk", dan:"dansk",
 // ── LIVE ACTIVITY (admin dashboard) ────────────────────────────────────────────
 var _liveActivityInterval = null;
 
+// Historical playback analytics (Tautulli-style) — direct-play vs transcode rates over time,
+// which container/codec combos transcode most, and most-watched titles. Loaded async after
+// the initial Settings render, same pattern as Live Activity/watch-providers.
+async function loadPlaybackStats() {
+  const el = document.getElementById("playback-stats-section");
+  if (!el) return;
+  try {
+    const s = await API.get("/admin/playback-stats?days=30");
+    if (!s.totalPlays) {
+      el.innerHTML = `<div class="settings-section-title">Uppspelningsstatistik (senaste 30 dagarna)</div>
+        <p style="color:var(--muted);font-size:13px">Inga uppspelningar loggade än.</p>`;
+      return;
+    }
+    const maxDaily = Math.max(1, ...s.dailyStats.map(d => d.direct + d.transcode));
+    el.innerHTML = `
+      <div class="settings-section-title">Uppspelningsstatistik (senaste ${s.days} dagarna)</div>
+      <div style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap">
+        <div style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:14px 20px;text-align:center;flex:1;min-width:120px">
+          <div style="font-size:22px;font-weight:600">${s.totalPlays}</div>
+          <div style="font-size:12px;color:var(--muted)">Uppspelningar</div>
+        </div>
+        <div style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:14px 20px;text-align:center;flex:1;min-width:120px">
+          <div style="font-size:22px;font-weight:600;color:#2ecc71">${s.directPct}%</div>
+          <div style="font-size:12px;color:var(--muted)">Direktuppspelning</div>
+        </div>
+        <div style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:14px 20px;text-align:center;flex:1;min-width:120px">
+          <div style="font-size:22px;font-weight:600;color:#e67e22">${100 - s.directPct}%</div>
+          <div style="font-size:12px;color:var(--muted)">Transkodning</div>
+        </div>
+      </div>
+
+      ${s.dailyStats.length ? `<div style="margin-bottom:18px">
+        <div style="font-size:13px;font-weight:500;margin-bottom:8px">Per dag</div>
+        <div style="display:flex;align-items:flex-end;gap:3px;height:80px">
+          ${s.dailyStats.map(d => {
+            const total = d.direct + d.transcode;
+            const h = Math.max(2, Math.round((total / maxDaily) * 76));
+            const directH = total ? Math.round((d.direct / total) * h) : 0;
+            return `<div title="${d.date}: ${d.direct} direkt, ${d.transcode} transkodat" style="flex:1;display:flex;flex-direction:column;justify-content:flex-end;height:76px">
+              <div style="background:#e67e22;height:${h - directH}px;border-radius:2px 2px 0 0"></div>
+              <div style="background:#2ecc71;height:${directH}px;border-radius:${h - directH > 0 ? "0" : "2px 2px"} 0 0"></div>
+            </div>`;
+          }).join("")}
+        </div>
+      </div>` : ""}
+
+      ${s.byContainerCodec.length ? `<div style="margin-bottom:18px">
+        <div style="font-size:13px;font-weight:500;margin-bottom:8px">Format som transkodas mest</div>
+        <div style="display:flex;flex-direction:column;gap:4px">
+          ${s.byContainerCodec.map(c => `
+            <div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;background:var(--card2);border-radius:6px;padding:6px 10px">
+              <span>${esc(c.combo)}</span>
+              <span style="color:${c.transcodePct > 50 ? "#e67e22" : "var(--muted)"}">${c.transcodePct}% transkodat (${c.total} ggr)</span>
+            </div>`).join("")}
+        </div>
+      </div>` : ""}
+
+      ${s.mostWatched.length ? `<div>
+        <div style="font-size:13px;font-weight:500;margin-bottom:8px">Mest sedda</div>
+        <div style="display:flex;flex-direction:column;gap:4px">
+          ${s.mostWatched.map(m => `
+            <div style="display:flex;justify-content:space-between;font-size:12px;background:var(--card2);border-radius:6px;padding:6px 10px">
+              <span>${m.type === "episode" ? "📺" : "🎬"} ${esc(m.title)}</span>
+              <span style="color:var(--muted)">${m.plays}x</span>
+            </div>`).join("")}
+        </div>
+      </div>` : ""}
+    `;
+  } catch(e) {
+    el.innerHTML = "";
+  }
+}
+
 function renderLiveActivitySection(data) {
   return `<div class="settings-section" id="live-activity-section">
     <div class="settings-section-title">🔴 Live-aktivitet</div>
@@ -3727,6 +3800,8 @@ async function loadSettings() {
 
       ${liveActivity ? renderLiveActivitySection(liveActivity) : ""}
 
+      <div class="settings-section" id="playback-stats-section"></div>
+
       <div class="settings-section">
         <div class="settings-section-title">Biblioteksstatus</div>
         <div style="display:flex;gap:12px;margin-bottom:12px">
@@ -3977,6 +4052,7 @@ async function loadSettings() {
     </div>`;
 
     if (currentUser?.role === "admin" && liveActivity) startLiveActivityPolling();
+    if (currentUser?.role === "admin" && _settingsActiveTab === "overview") loadPlaybackStats();
   } catch (e) {
     sec.innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><h3>${e.message}</h3></div>`;
   }
