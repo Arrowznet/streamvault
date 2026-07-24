@@ -1629,7 +1629,11 @@ async function openPersonDetail(tmdbPersonId) {
                 ${data.known_for ? `<span class="detail-meta-item">${esc(data.known_for)}</span>` : ""}
                 ${data.birthday ? `<span class="detail-meta-item">Född ${data.birthday}</span>` : ""}
               </div>
-              ${data.biography ? `<p class="person-bio">${esc(data.biography.substring(0,400))}${data.biography.length>400?"...":""}</p>` : ""}
+              ${data.biography ? (data.biography.length > 400 ? `
+              <p class="person-bio">
+                <span id="bio-short">${esc(truncateAtWord(data.biography, 400))}</span><span id="bio-full" style="display:none">${esc(data.biography)}</span>
+                <a href="#" onclick="event.preventDefault(); toggleBio()" id="bio-toggle-link" style="color:var(--accent);cursor:pointer;margin-left:4px;white-space:nowrap">Visa mer</a>
+              </p>` : `<p class="person-bio">${esc(data.biography)}</p>`) : ""}
             </div>
           </div>
         </div>
@@ -2980,6 +2984,79 @@ async function saveUserLanguage(userId) {
   }
 }
 
+// Renders the current in-memory working list of subtitle-priority languages, with reorder
+// (↑/↓) and remove controls, plus keeps the "add" dropdown populated with whatever isn't
+// already in the list.
+function renderSubtitlePriorityList() {
+  var list = window._subPriorityWorkingList || [];
+  var container = document.getElementById("sub-priority-list");
+  var addSelect = document.getElementById("sub-priority-add-select");
+  if (!container) return;
+  container.innerHTML = list.length ? list.map(function(lang, i) {
+    return `<div style="display:flex;align-items:center;gap:8px;background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px">
+      <span style="color:var(--muted);min-width:16px">${i + 1}.</span>
+      <span style="flex:1">${esc(SUBTITLE_LANG_ADJ[lang] || lang)}</span>
+      <button onclick="moveSubtitlePriorityLang(${i},-1)" ${i === 0 ? "disabled" : ""} style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px;padding:2px 6px" title="Flytta upp">↑</button>
+      <button onclick="moveSubtitlePriorityLang(${i},1)" ${i === list.length - 1 ? "disabled" : ""} style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px;padding:2px 6px" title="Flytta ner">↓</button>
+      <button onclick="removeSubtitlePriorityLang(${i})" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px;padding:2px 6px" title="Ta bort">✕</button>
+    </div>`;
+  }).join("") : `<p style="color:var(--muted);font-size:13px;margin:0">Inga språk tillagda — använder bara språkinställningen ovan.</p>`;
+
+  if (addSelect) {
+    addSelect.innerHTML = Object.keys(SUBTITLE_LANG_ADJ)
+      .filter(function(l) { return l !== "und" && list.indexOf(l) === -1; })
+      .map(function(l) { return `<option value="${l}">${esc(SUBTITLE_LANG_ADJ[l])}</option>`; })
+      .join("");
+  }
+}
+
+function addSubtitlePriorityLang(userId) {
+  var select = document.getElementById("sub-priority-add-select");
+  var lang = select?.value;
+  if (!lang) return;
+  window._subPriorityWorkingList = window._subPriorityWorkingList || [];
+  window._subPriorityWorkingList.push(lang);
+  renderSubtitlePriorityList();
+}
+
+function moveSubtitlePriorityLang(index, delta) {
+  var list = window._subPriorityWorkingList || [];
+  var newIndex = index + delta;
+  if (newIndex < 0 || newIndex >= list.length) return;
+  var tmp = list[index];
+  list[index] = list[newIndex];
+  list[newIndex] = tmp;
+  renderSubtitlePriorityList();
+}
+
+function removeSubtitlePriorityLang(index) {
+  var list = window._subPriorityWorkingList || [];
+  list.splice(index, 1);
+  renderSubtitlePriorityList();
+}
+
+async function saveSubtitlePriority(userId) {
+  var list = window._subPriorityWorkingList || [];
+  try {
+    var result = await API.patch("/users/" + userId + "/subtitle-languages", { languages: list });
+    toast("✓ Prioritetsordning sparad!", "success");
+    if (currentUser && (userId === currentUser._id || userId === currentUser.id)) {
+      currentUser.subtitleLanguages = list;
+      localStorage.setItem("sv_user", JSON.stringify(currentUser));
+    }
+    if (result?.needsOcrLanguage) {
+      if (currentUser?.role === "admin") {
+        promptAddOcrLanguage(result.needsOcrLanguage);
+      } else {
+        var label = SUBTITLE_LANG_ADJ[result.needsOcrLanguage] || result.needsOcrLanguage;
+        toast(`ℹ️ Bildbaserade undertexter på ${label} är inte aktiverat än – be en administratör lägga till det i Inställningar`, "info");
+      }
+    }
+  } catch(e) {
+    toast("Fel: " + e.message, "error");
+  }
+}
+
 // Half-automatic step: a user just got a language that isn't in the bitmap-subtitle
 // OCR allowlist yet. Ask before kicking off any conversion work.
 function promptAddOcrLanguage(lang) {
@@ -3130,12 +3207,20 @@ async function autoLoadSubtitles(mediaId, offsetSec) {
       var l = (s.lang || "").toLowerCase();
       return l === code || (code === "swe" && l === "sv") || (code === "eng" && l === "en");
     }
-    // Priority: 1) Any subtitle matching the user's own language, 2) English (widely understood
-    // fallback), 3) Swedish (server default), 4) embedded Swedish, 5) nothing.
+    // Priority: 1) each language in the user's own priority list, in order (if set) —
+    // otherwise just their single primary language, 2) English (widely understood fallback),
+    // 3) Swedish (server default), 4) embedded Swedish, 5) nothing.
     // Deliberately NOT "any srt file" — with multiple languages now cached, that used to
     // silently resolve to whatever the server happened to sort first (usually Swedish),
     // even for a user whose language is e.g. Finnish and who can't read Swedish at all.
-    var userSub = subs.find(function(s) { return matchesLang(s, userSubLang); });
+    var priorityList = (currentUser?.subtitleLanguages && currentUser.subtitleLanguages.length)
+      ? currentUser.subtitleLanguages
+      : [userSubLang].filter(Boolean);
+    var userSub = null;
+    for (var pi = 0; pi < priorityList.length; pi++) {
+      userSub = subs.find(function(s) { return matchesLang(s, priorityList[pi]); });
+      if (userSub) break;
+    }
     var engSub = subs.find(function(s) { return s.type === "srt" && matchesLang(s, "eng"); });
     var sweSub = subs.find(function(s) { return s.type === "srt" && matchesLang(s, "swe"); });
     var embeddedSv = subs.find(function(s) { 
@@ -4228,6 +4313,19 @@ async function renderUserPage(user) {
       </div>
 
       <div class="settings-section">
+        <div class="settings-section-title">Undertextspråk (prioritetsordning)</div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:10px">
+          För hushåll med fler än en nationalitet — lägg till flera språk i den ordning du vill att servern ska leta efter undertexter i. Första träffen vinner. Tomt = använd bara språkinställningen ovan, sen den vanliga eng→sv-kedjan.
+        </div>
+        <div id="sub-priority-list" style="display:flex;flex-direction:column;gap:6px;margin-bottom:10px"></div>
+        <div style="display:flex;gap:8px">
+          <select class="s-input" id="sub-priority-add-select" style="flex:1"></select>
+          <button class="btn-fav" style="font-size:12px" onclick="addSubtitlePriorityLang('${user.id}')">+ Lägg till</button>
+        </div>
+        <button class="s-btn s-btn-primary" style="margin-top:10px" onclick="saveSubtitlePriority('${user.id}')">Spara prioritetsordning</button>
+      </div>
+
+      <div class="settings-section">
         <div class="settings-section-title">Byt lösenord</div>
         <div style="display:flex;flex-direction:column;gap:10px;max-width:320px">
           <input id="up-new-pw" type="password" placeholder="Nytt lösenord" class="s-input">
@@ -4237,6 +4335,9 @@ async function renderUserPage(user) {
       </div>
     </div>
   `;
+  // Working copy of the priority list, edited in-memory until "Spara" is clicked
+  window._subPriorityWorkingList = Array.isArray(user.subtitleLanguages) ? [...user.subtitleLanguages] : [];
+  renderSubtitlePriorityList();
   // Load library access checkboxes
   if (currentUser.role === "admin" && user.role !== "admin") {
     loadLibraryAccessUI(user);
@@ -4353,6 +4454,28 @@ async function changeOwnPassword() {
 // ── UTILS ─────────────────────────────────────────────────────────────────────
 function esc(s) {
   return (s || "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");
+}
+
+// Truncates text to roughly maxLen characters, but backs up to the end of the last full word
+// instead of cutting mid-word (e.g. "...Royal Academy o" — chopped a character-count cutoff
+// happened to land inside "of"). Only adds "..." if the text was actually truncated.
+function truncateAtWord(text, maxLen) {
+  if (!text || text.length <= maxLen) return text || "";
+  var cut = text.slice(0, maxLen);
+  var lastSpace = cut.lastIndexOf(" ");
+  if (lastSpace > 0) cut = cut.slice(0, lastSpace);
+  return cut.trim() + "...";
+}
+
+function toggleBio() {
+  var short = document.getElementById("bio-short");
+  var full = document.getElementById("bio-full");
+  var link = document.getElementById("bio-toggle-link");
+  if (!short || !full || !link) return;
+  var isExpanded = full.style.display !== "none";
+  short.style.display = isExpanded ? "inline" : "none";
+  full.style.display = isExpanded ? "none" : "inline";
+  link.textContent = isExpanded ? "Visa mer" : "Visa mindre";
 }
 
 function toast(msg, type = "info") {

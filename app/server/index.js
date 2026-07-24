@@ -560,9 +560,11 @@ app.get("/api/users", requireAdmin, async (req, res) => {
 
 // Shared by user creation and the language-patch endpoint: checks whether a language
 // needs a bitmap-subtitle OCR allowlist entry, and logs + persists a pending notice if so.
-function checkNeedsOcrLanguage(language, userId, changedByUserId, changedByLabel) {
+// Core check: does the OCR/cache allowlist need this specific 3-letter code added? Shared by
+// both the single "UI language" check (below) and the subtitle-priority-list check (used by
+// the multi-language subtitle priority feature).
+function checkNeedsOcrLanguageForCode(subLang, userId, changedByUserId, changedByLabel) {
   if (config.subtitle_ocr_mode === "all") return null;
-  const subLang = USER_LANG_TO_SUB_LANG[language];
   if (!subLang) return null;
   const current = getEffectiveOcrLanguages(); // Set, since mode isn't "all" here
   if (current.has(subLang)) return null;
@@ -570,6 +572,11 @@ function checkNeedsOcrLanguage(language, userId, changedByUserId, changedByLabel
   logSubtitle("warn", null, `Nytt användarspråk (${subtitleLangLabel(subLang)}) är inte i språklistan än – satt av ${who}`, { subLang, userId });
   addPendingOcrRequest(subLang, userId);
   return subLang;
+}
+
+function checkNeedsOcrLanguage(language, userId, changedByUserId, changedByLabel) {
+  const subLang = USER_LANG_TO_SUB_LANG[language];
+  return checkNeedsOcrLanguageForCode(subLang, userId, changedByUserId, changedByLabel);
 }
 
 app.post("/api/users", requireAdmin, async (req, res) => {
@@ -626,6 +633,29 @@ app.patch("/api/users/:id/language", requireAuth, async (req, res) => {
     }
     await dbUpdate(db.users, { _id: req.params.id }, { $set: { language } });
     const needsOcrLanguage = checkNeedsOcrLanguage(language, req.params.id, req.user._id, req.user.username);
+    res.json({ ok: true, needsOcrLanguage });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Manages a user's ordered subtitle-language PRIORITY list — separate from their primary
+// `language` (which still governs UI text and TMDB overview/metadata language). This is for
+// households with more than one nationality under one roof: e.g. a Danish-language account
+// where one family member specifically wants Japanese subtitles first, falling back to
+// Danish, and only then the server's normal eng→swe→embedded-swe→none chain.
+app.patch("/api/users/:id/subtitle-languages", requireAuth, async (req, res) => {
+  try {
+    if (req.params.id !== req.user._id && req.user.role !== "admin") {
+      return res.status(403).json({ error: "Ej tillåtet" });
+    }
+    const languages = Array.isArray(req.body.languages) ? req.body.languages.filter(Boolean).slice(0, 6) : [];
+    await dbUpdate(db.users, { _id: req.params.id }, { $set: { subtitleLanguages: languages } });
+    // Flag any of these languages that aren't in the OCR/cache allowlist yet — same
+    // notification path as the primary-language check, just looped over the whole list.
+    let needsOcrLanguage = null;
+    for (const lang of languages) {
+      const flagged = checkNeedsOcrLanguageForCode(lang, req.params.id, req.user._id, req.user.username);
+      if (flagged && !needsOcrLanguage) needsOcrLanguage = flagged; // surface the first one found
+    }
     res.json({ ok: true, needsOcrLanguage });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -2225,11 +2255,13 @@ app.get("/api/playback/:id", requireMediaAccess, async (req, res) => {
     // the already-cached DB field rather than re-probing — cheap either way.
     container: ext.replace(".", ""),
     videoCodec: item.codec ? normalizeCodec(item.codec) : null,
-    // Only meaningful for direct play — tells the client which audio track to explicitly
-    // select (e.g. via ExoPlayer track selection), since direct play streams the raw file
-    // as-is and the server has no way to remap tracks the way DASH transcoding does. Null
-    // when not using capability-based negotiation, or when track 0 was already fine.
-    audioTrackIndex: (!needsTranscode && typeof compatibleAudioIndex === "number" && compatibleAudioIndex > 0) ? compatibleAudioIndex : null
+    // Field name matches what the Android app (v1.0.10+) explicitly looks for — confirmed
+    // with Cursor. Only meaningful for direct play — tells the client which audio track to
+    // explicitly select (e.g. via ExoPlayer track override or LibVLC setAudioTrack), since
+    // direct play streams the raw file as-is and the server has no way to remap tracks the
+    // way DASH transcoding does. Null when not using capability-based negotiation, or when
+    // track 0 was already fine.
+    serverPlaybackAudioIndex: (!needsTranscode && typeof compatibleAudioIndex === "number" && compatibleAudioIndex > 0) ? compatibleAudioIndex : null
   });
 });
 
@@ -3200,11 +3232,16 @@ app.get("/api/media/:id/subtitles", requireAuth, async (req, res) => {
       logSubtitle("warn", item, "Kunde inte lista cachade undertexter", { error: e.message });
     }
 
-    // Sort: the requesting user's own language first, then Swedish, then English, then others
+    // Sort: the requesting user's own priority list first (in order, if set — otherwise just
+    // their single primary language), then Swedish, then English, then others
     const userSubLang = USER_LANG_TO_SUB_LANG[req.user?.language] || null;
+    const priorityList = (Array.isArray(req.user?.subtitleLanguages) && req.user.subtitleLanguages.length)
+      ? req.user.subtitleLanguages
+      : [userSubLang].filter(Boolean);
     subtitles.sort((a, b) => {
       const priority = (l) => {
-        if (userSubLang && l === userSubLang) return -1;
+        const idx = priorityList.indexOf(l);
+        if (idx !== -1) return idx - 100; // ahead of everything else, in list order
         if (l === "swe") return 0;
         if (l === "eng") return 1;
         return 2;
@@ -4943,11 +4980,12 @@ app.get("/api/tvshow/:id/season/:season", requireAuth, async (req, res) => {
 app.get("/api/person/:tmdb_id", requireAuth, async (req, res) => {
   try {
     if (!config.tmdb_api_key) return res.status(503).json({ error: "Ingen TMDB-nyckel" });
-    const userLang = req.user?.language || null;
+    const userLang = req.query.lang || req.user?.language || null;
     let data = await tmdbFetch(`/person/${req.params.tmdb_id}?append_to_response=combined_credits,movie_credits`, userLang);
     if (!data) return res.status(404).json({ error: "Hittades inte" });
-    // Fallback to English if biography is empty
-    if (!data.biography && userLang && userLang !== "en-US") {
+    // Always fall back to English if biography is empty — TMDB often has no translated
+    // biography for less mainstream people, even when the language request itself succeeds.
+    if (!data.biography) {
       const enData = await tmdbFetch(`/person/${req.params.tmdb_id}?append_to_response=combined_credits,movie_credits`, "en-US");
       if (enData?.biography) data.biography = enData.biography;
     }
