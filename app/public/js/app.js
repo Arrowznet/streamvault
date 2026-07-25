@@ -707,8 +707,14 @@ async function openCollection(collectionId) {
 
     if (inLib.length) {
       filmsHtml += `<div class="detail-section">
-        <h3 class="detail-section-title">I ditt bibliotek (${inLib.length})</h3>
-        <div class="media-grid">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:4px">
+          <h3 class="detail-section-title" style="margin:0">I ditt bibliotek (${inLib.length})</h3>
+          <select class="filter-select" id="collection-filter-sublang" onchange="filterCollectionBySubLang()" title="Visa bara titlar med undertext på valt språk" style="font-size:12px">
+            <option value="">🔤 Alla undertextspråk</option>
+            ${Object.keys(SUBTITLE_LANG_ADJ).filter(l => l !== "und").map(l => `<option value="${l}">${esc(SUBTITLE_LANG_ADJ[l])}</option>`).join("")}
+          </select>
+        </div>
+        <div class="media-grid" id="collection-movies-grid" data-items='${esc(JSON.stringify(localMovies.map(m => ({ id: m.id, title: m.title, year: m.year, rating: m.rating, poster_url: m.poster_url, type: m.type, cached_subtitle_langs: m.cached_subtitle_langs || [] }))))}'>
           ${localMovies.map(m => buildCard(m)).join("")}
         </div>
       </div>`;
@@ -790,6 +796,10 @@ async function loadLibraryView(libId, libName, libType) {
             <option value="year">År (nyast)</option>
             <option value="rating">Betyg</option>
           </select>
+          <select class="filter-select" id="lib-filter-sublang" onchange="filterLibraryView()" title="Visa bara titlar med undertext på valt språk">
+            <option value="">🔤 Alla undertextspråk</option>
+            ${Object.keys(SUBTITLE_LANG_ADJ).filter(l => l !== "und").map(l => `<option value="${l}">${esc(SUBTITLE_LANG_ADJ[l])}</option>`).join("")}
+          </select>
         </div>
         <div class="media-grid" id="lib-grid">
           ${items.length ? items.map(i => buildCard(i)).join("") : '<div class="empty"><div class="empty-icon">📭</div><h3>Tomt bibliotek</h3></div>'}
@@ -802,12 +812,25 @@ async function loadLibraryView(libId, libName, libType) {
   }
 }
 
+function filterCollectionBySubLang() {
+  const grid = document.getElementById("collection-movies-grid");
+  if (!grid) return;
+  const subLang = document.getElementById("collection-filter-sublang")?.value || "";
+  let items = JSON.parse(grid.getAttribute("data-items") || "[]");
+  if (subLang) items = items.filter(m => (m.cached_subtitle_langs || []).includes(subLang));
+  grid.innerHTML = items.length
+    ? items.map(i => buildCard(i)).join("")
+    : '<div style="color:var(--muted);font-size:14px;padding:20px 0">Inga träffar</div>';
+}
+
 function filterLibraryView() {
   const sec = document.getElementById("sec-library");
   const q = (document.getElementById("lib-filter-q")?.value || "").toLowerCase();
   const sort = document.getElementById("lib-filter-sort")?.value || "title";
+  const subLang = document.getElementById("lib-filter-sublang")?.value || "";
   let items = JSON.parse(sec.dataset.items || "[]");
   if (q) items = items.filter(m => (m.title||"").toLowerCase().includes(q) || String(m.year||"").includes(q));
+  if (subLang) items = items.filter(m => (m.cached_subtitle_langs || []).includes(subLang));
   if (sort === "title") items.sort((a,b) => (a.title||"").localeCompare(b.title||""));
   else if (sort === "year") items.sort((a,b) => (b.year||0)-(a.year||0));
   else if (sort === "rating") items.sort((a,b) => (b.rating||0)-(a.rating||0));
@@ -882,6 +905,10 @@ async function loadMediaSection(sectionType) {
           <option value="year">År (nyast)</option>
           <option value="rating">Betyg</option>
         </select>
+        <select class="filter-select" id="filter-sublang-${sectionType}" onchange="filterMediaSection('${sectionType}')" title="Visa bara titlar med undertext på valt språk">
+          <option value="">🔤 Alla undertextspråk</option>
+          ${Object.keys(SUBTITLE_LANG_ADJ).filter(l => l !== "und").map(l => `<option value="${l}">${esc(SUBTITLE_LANG_ADJ[l])}</option>`).join("")}
+        </select>
       </div>
       ${alphaNav}`;
 
@@ -894,7 +921,7 @@ async function loadMediaSection(sectionType) {
             <span class="row-title">📁 ${esc(lib.name)}</span>
             <span class="row-count">${data.items.length} ${sectionType === "movies" ? "titlar" : "serier"}</span>
           </div>
-          <div class="media-grid lib-grid-${lib.id}" data-items='${JSON.stringify(data.items.map(i => ({ id: i.id, title: i.title, year: i.year, rating: i.rating, poster_url: i.poster_url, type: i.type, added_at: i.added_at })))}'>
+          <div class="media-grid lib-grid-${lib.id}" data-items='${esc(JSON.stringify(data.items.map(i => ({ id: i.id, title: i.title, year: i.year, rating: i.rating, poster_url: i.poster_url, type: i.type, added_at: i.added_at, cached_subtitle_langs: i.cached_subtitle_langs || [] }))))}'>
             ${data.items.map(i => buildCard(i)).join("")}
           </div>
         </div>`;
@@ -935,19 +962,21 @@ function jumpToLetter(sectionType, letter) {
 function filterMediaSection(sectionType) {
   const q = (document.getElementById(`filter-q-${sectionType}`)?.value || "").toLowerCase();
   const sort = document.getElementById(`filter-sort-${sectionType}`)?.value || "title";
+  const subLang = document.getElementById(`filter-sublang-${sectionType}`)?.value || "";
   document.querySelectorAll(`.section-group[data-type="${sectionType}"]`).forEach(group => {
     const libId = group.getAttribute("data-lib");
     const grid = group.querySelector(`.lib-grid-${libId}`);
     if (!grid) return;
     let items = JSON.parse(grid.getAttribute("data-items") || "[]");
     if (q) items = items.filter(i => (i.title || "").toLowerCase().includes(q));
+    if (subLang) items = items.filter(i => (i.cached_subtitle_langs || []).includes(subLang));
     if (sort === "title") items.sort((a, b) => a.title.localeCompare(b.title));
     else if (sort === "year") items.sort((a, b) => (b.year || 0) - (a.year || 0));
     else if (sort === "rating") items.sort((a, b) => (b.rating || 0) - (a.rating || 0));
     grid.innerHTML = items.map(i => buildCard(i)).join("") ||
       `<div style="color:var(--muted);font-size:14px;padding:20px 0">Inga träffar</div>`;
     // Show/hide the group based on results
-    group.style.display = q && !items.length ? "none" : "block";
+    group.style.display = (q || subLang) && !items.length ? "none" : "block";
   });
 }
 
@@ -2693,8 +2722,8 @@ async function openSubtitleLog(onlyErrors) {
       contentEl.innerHTML = "<div style='text-align:center;padding:20px;color:var(--muted)'>Inga" + (onlyErrors ? " fel" : " loggposter") + " ännu.</div>";
       return;
     }
-    var colors = { error: "var(--danger)", warn: "#e0a030", info: "var(--muted)" };
-    var icons = { error: "❌", warn: "⚠️", info: "ℹ️" };
+    var colors = { error: "var(--danger)", warn: "#e0a030", info: "var(--muted)", debug: "#8e7cc3" };
+    var icons = { error: "❌", warn: "⚠️", info: "ℹ️", debug: "🔬" };
     contentEl.innerHTML = entries.map(function(e) {
       var time = new Date(e.time).toLocaleString("sv-SE");
       var color = colors[e.level] || "var(--muted)";
@@ -2724,6 +2753,28 @@ async function recacheAllSubtitles() {
 
 // Admin-only: wipes every cached subtitle file and resets the counters/DB fields, for testing
 // the whole pipeline (OCR gating, auto-download of Tesseract data, etc.) from a clean slate.
+// Detailed per-request subtitle logging on the server, for actively debugging what the app
+// is asking for and what the server decides — off by default (noisy), toggled here.
+async function toggleVerboseSubtitleLogging() {
+  var btn = document.getElementById("verbose-sub-log-btn");
+  try {
+    var current = await API.get("/admin/verbose-subtitle-logging");
+    var data = await API.post("/admin/verbose-subtitle-logging", { enabled: !current.enabled });
+    if (btn) btn.textContent = data.enabled ? "🔬 Detaljerad loggning: PÅ" : "🔬 Detaljerad loggning: AV";
+    toast(data.enabled ? "✓ Detaljerad undertextloggning påslagen" : "Detaljerad undertextloggning avstängd", "success");
+  } catch(e) {
+    toast("Fel: " + e.message, "error");
+  }
+}
+async function initVerboseSubtitleLoggingButton() {
+  var btn = document.getElementById("verbose-sub-log-btn");
+  if (!btn) return;
+  try {
+    var data = await API.get("/admin/verbose-subtitle-logging");
+    btn.textContent = data.enabled ? "🔬 Detaljerad loggning: PÅ" : "🔬 Detaljerad loggning: AV";
+  } catch(e) { btn.textContent = "🔬 Detaljerad loggning"; }
+}
+
 async function clearSubtitleCache() {
   if (!confirm("Detta raderar ALLA cachade undertextfiler (både textbaserade och OCR-konverterade) och nollställer statistiken.\n\nDina videofiler påverkas inte, och du kan köra 'Cacha om enligt språklistan' igen efteråt för att bygga upp allt på nytt.\n\nFortsätt?")) return;
   try {
@@ -3938,6 +3989,7 @@ async function loadSettings() {
           <button class="btn-fav" style="font-size:12px" onclick="openSubtitleLog()">📋 Visa undertext-logg${cacheStatus.errors > 0 ? ` (${cacheStatus.errors} fel)` : ""}</button>
           <button class="btn-fav" style="font-size:12px" onclick="recacheAllSubtitles()">🔄 Cacha om enligt språklistan</button>
           <button class="btn-fav" style="font-size:12px" onclick="clearSubtitleCache()">🗑 Rensa all undertextcache</button>
+          <button class="btn-fav" style="font-size:12px" id="verbose-sub-log-btn" onclick="toggleVerboseSubtitleLogging()">🔬 Detaljerad loggning: laddar...</button>
         </div>` : ""}
       </div>` : ''}
 
@@ -4138,6 +4190,7 @@ async function loadSettings() {
 
     if (currentUser?.role === "admin" && liveActivity) startLiveActivityPolling();
     if (currentUser?.role === "admin" && _settingsActiveTab === "overview") loadPlaybackStats();
+    if (currentUser?.role === "admin" && _settingsActiveTab === "subs") initVerboseSubtitleLoggingButton();
   } catch (e) {
     sec.innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><h3>${e.message}</h3></div>`;
   }

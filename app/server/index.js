@@ -990,6 +990,28 @@ const metaCache = new Map();
 // network error. Successful calls clear it.
 let _tmdbLastError = null;
 
+// Verbose subtitle-request logging — off by default (noisy), toggled at runtime via
+// POST /api/admin/verbose-subtitle-logging, no server restart needed. Meant for actively
+// debugging "what exactly did the app ask for, and what did the server decide/return" across
+// all four subtitle-serving endpoints, in one consistent, easy-to-follow format.
+let _verboseSubtitleLogging = false;
+function vlog(...args) {
+  if (!_verboseSubtitleLogging) return;
+  // Routed through logSubtitle (same buffer/file the "Visa undertext-logg" viewer already
+  // reads) instead of a separate raw console.log, so these show up in the existing in-app
+  // log viewer — no need to dig through raw server console/file output to see them.
+  logSubtitle("debug", null, args.join(" "));
+}
+app.post("/api/admin/verbose-subtitle-logging", requireAdmin, (req, res) => {
+  _verboseSubtitleLogging = !!req.body.enabled;
+  console.log(`[SUB-DEBUG] Detaljerad undertextloggning ${_verboseSubtitleLogging ? "PÅSLAGEN" : "avstängd"}`);
+  res.json({ enabled: _verboseSubtitleLogging });
+});
+app.get("/api/admin/verbose-subtitle-logging", requireAdmin, (req, res) => {
+  res.json({ enabled: _verboseSubtitleLogging });
+});
+
+
 function tmdbFetch(endpoint, userLanguage) {
   return new Promise(resolve => {
     if (!config.tmdb_api_key) { _tmdbLastError = { at: new Date().toISOString(), reason: "no_api_key", message: "Ingen TMDB API-nyckel är inställd" }; return resolve(null); }
@@ -1775,7 +1797,7 @@ const safe = i => ({ ...i, file_path: undefined, _id: undefined, id: i._id });
 
 app.get("/api/media", requireAuth, async (req, res) => {
   try {
-    const {type,library_id,search,limit=200} = req.query;
+    const {type,library_id,search,subLang,limit=200} = req.query;
     const query={};
     if (type) query.type=type;
     if (library_id) {
@@ -1785,6 +1807,10 @@ app.get("/api/media", requireAuth, async (req, res) => {
       query.library_id = { $in: req.user.library_ids };
     }
     if (search) query.title=new RegExp(search,"i");
+    // Filter to only items with a cached subtitle in this language — lets someone answer
+    // "which of my movies actually have Norwegian subtitles" instead of just knowing a total
+    // count in Settings with no way to see which titles make it up.
+    if (subLang) query.cached_subtitle_langs = subLang;
     const items = await dbFind(db.media,query);
     const sorted = items.sort((a,b)=>(a.title||"").localeCompare(b.title||"")).slice(0,parseInt(limit)).map(safe);
     // Attach progress (position/completed) for each item
@@ -3130,9 +3156,11 @@ app.get("/api/media/:id/related", requireAuth, async (req, res) => {
 
 // Get available subtitles for a media item (embedded + .srt files)
 app.get("/api/media/:id/subtitles", requireAuth, async (req, res) => {
+  vlog(`GET /subtitles  id=${req.params.id}  user=${req.user?.username}  ua=${req.headers["user-agent"]}`);
   try {
     const item = await dbFindOne(db.media, { _id: req.params.id });
-    if (!item) return res.status(404).json({ error: "Not found" });
+    if (!item) { vlog(`  → 404, media not found`); return res.status(404).json({ error: "Not found" }); }
+    vlog(`  item="${item.title}" (${item.type}) file="${item.file_path}"`);
 
     const subtitles = [];
 
@@ -3263,22 +3291,26 @@ app.get("/api/media/:id/subtitles", requireAuth, async (req, res) => {
       }
     }
 
+    vlog(`  → returning ${subtitles.length} subtitles: [${subtitles.map(s => `${s.lang}/${s.type}`).join(", ")}]`);
     res.json({ subtitles });
   } catch(e) {
+    vlog(`  → 500 ERROR: ${e.message}`);
     res.status(500).json({ error: e.message });
   }
 });
 
 // Serve a cached subtitle file (PgsToSrt-converted or pre-extracted)
 app.get("/api/media/:id/subtitle-cache", requireMediaAccess, async (req, res) => {
+  vlog(`GET /subtitle-cache  id=${req.params.id}  file=${req.query.file}`);
   try {
     const item = await dbFindOne(db.media, { _id: req.params.id });
-    if (!item) return res.status(404).json({ error: "Not found" });
+    if (!item) { vlog(`  → 404, media not found`); return res.status(404).json({ error: "Not found" }); }
     const cacheDir = path.join(DATA_DIR, "subtitle-cache");
     const file = req.query.file;
-    if (!file || file.includes("..")) return res.status(400).json({ error: "Invalid" });
+    if (!file || file.includes("..")) { vlog(`  → 400, invalid file param`); return res.status(400).json({ error: "Invalid" }); }
     const filePath = path.join(cacheDir, file);
-    if (!fs.existsSync(filePath)) return res.status(404).json({ error: "Not found" });
+    if (!fs.existsSync(filePath)) { vlog(`  → 404, file not on disk: ${filePath}`); return res.status(404).json({ error: "Not found" }); }
+    vlog(`  → serving, ${fs.statSync(filePath).size} bytes, offset=${req.query.offset || 0}`);
     const offsetSec = parseFloat(req.query.offset || "0");
     let srt;
     const rawBuffer = fs.readFileSync(filePath);
@@ -3308,14 +3340,16 @@ app.get("/api/media/:id/subtitle-cache", requireMediaAccess, async (req, res) =>
 
 // Serve a .srt file as WebVTT for browser playback
 app.get("/api/media/:id/subtitle-file", requireMediaAccess, async (req, res) => {
+  vlog(`GET /subtitle-file  id=${req.params.id}  file=${req.query.file}`);
   try {
     const item = await dbFindOne(db.media, { _id: req.params.id });
-    if (!item) return res.status(404).json({ error: "Not found" });
+    if (!item) { vlog(`  → 404, media not found`); return res.status(404).json({ error: "Not found" }); }
     const dir = path.dirname(item.file_path);
     const file = req.query.file;
-    if (!file || file.includes("..")) return res.status(400).json({ error: "Invalid" });
+    if (!file || file.includes("..")) { vlog(`  → 400, invalid file param`); return res.status(400).json({ error: "Invalid" }); }
     const filePath = path.join(dir, file);
-    if (!fs.existsSync(filePath)) return res.status(404).json({ error: "File not found" });
+    if (!fs.existsSync(filePath)) { vlog(`  → 404, file not on disk: ${filePath}`); return res.status(404).json({ error: "File not found" }); }
+    vlog(`  → serving, ${fs.statSync(filePath).size} bytes`);
     // Convert SRT to WebVTT - handle multiple encodings
     let srt;
     const rawBuffer = fs.readFileSync(filePath);
@@ -3362,9 +3396,10 @@ app.get("/api/media/:id/subtitle-file", requireMediaAccess, async (req, res) => 
 
 // Extract embedded subtitle track to VTT
 app.get("/api/media/:id/subtitle-extract", requireMediaAccess, async (req, res) => {
+  vlog(`GET /subtitle-extract  id=${req.params.id}  index=${req.query.index}  offset=${req.query.offset}`);
   try {
     const item = await dbFindOne(db.media, { _id: req.params.id });
-    if (!item) return res.status(404).json({ error: "Not found" });
+    if (!item) { vlog(`  → 404, media not found`); return res.status(404).json({ error: "Not found" }); }
     const trackIndex = parseInt(req.query.index || "0");
     const offsetSec = parseFloat(req.query.offset || "0");
 
@@ -3384,39 +3419,49 @@ app.get("/api/media/:id/subtitle-extract", requireMediaAccess, async (req, res) 
       const streams = JSON.parse(probeOut).streams || [];
       lang = normalizeLangCode(streams[0]?.tags?.language || streams[0]?.tags?.LANGUAGE || "und");
       codec = streams[0]?.codec_name || "";
+      vlog(`  probed track ${trackIndex}: lang=${lang} codec=${codec}`);
     } catch(e) {
+      vlog(`  probe FAILED for track ${trackIndex}: ${e.message}`);
       logSubtitle("warn", item, `Kunde inte läsa spårinfo för spår ${trackIndex} vid extraktion`, { trackIndex, error: e.message });
     }
 
     const cacheFile = path.join(cacheDir, `${shortMediaId(item._id)}_${trackIndex}_${lang}.srt`);
     const tempFile = cacheFile + ".tmp";
+    vlog(`  cacheFile=${cacheFile}  exists=${fs.existsSync(cacheFile)}  tempExists=${fs.existsSync(tempFile)}`);
 
     if (!fs.existsSync(cacheFile)) {
       if (UNSUPPORTED_BITMAP_CODECS.includes(codec)) {
+        vlog(`  → 404, unsupported VobSub/DVD codec (${codec})`);
         logSubtitle("info", item, `Bildbaserat spår (${subtitleLangLabel(lang)}, ${codec}) kan inte visas – DVD/VobSub-format stöds inte av nuvarande OCR-verktyg`, { trackIndex, lang, codec });
         return res.status(404).json({ error: "DVD/VobSub subtitle format not supported by current OCR tool (PGS only)" });
       }
       if (bitmapCodecs.includes(codec)) {
         if (!isPgsToSrtInstalled()) {
+          vlog(`  → 404, PgsToSrt not installed`);
           logSubtitle("warn", item, `Bildbaserat spår (${subtitleLangLabel(lang)}) kan inte visas – PgsToSrt är inte installerat`, { trackIndex, lang });
           return res.status(404).json({ error: "Bitmap subtitle not supported without PgsToSrt" });
         }
-        if (fs.existsSync(tempFile)) return res.status(202).json({ status: "extracting", retryAfter: 5 });
+        if (fs.existsSync(tempFile)) { vlog(`  → 202, already converting (PGS)`); return res.status(202).json({ status: "extracting", retryAfter: 5 }); }
+        vlog(`  → 202, starting on-demand PGS conversion`);
         fs.writeFileSync(tempFile, "");
         convertPgsTosrt(item, trackIndex, cacheFile, lang).then(ok => {
           try { fs.unlinkSync(tempFile); } catch {}
+          vlog(`  on-demand PGS conversion ${ok ? "succeeded" : "FAILED"} for track ${trackIndex}`);
           if (ok) logSubtitle("info", item, `Undertext konverterad on-demand – ${subtitleLangLabel(lang)}`, { trackIndex });
-        }).catch(e => { try { fs.unlinkSync(tempFile); } catch {}; logSubtitle("error", item, "Oväntat fel vid on-demand PgsToSrt", { trackIndex, error: e.message }); });
+        }).catch(e => { try { fs.unlinkSync(tempFile); } catch {}; vlog(`  on-demand PGS conversion THREW: ${e.message}`); logSubtitle("error", item, "Oväntat fel vid on-demand PgsToSrt", { trackIndex, error: e.message }); });
         return res.status(202).json({ status: "extracting", retryAfter: 5 });
       }
 
       // Already extracting?
       if (fs.existsSync(tempFile)) {
+        vlog(`  → 202, already extracting (text)`);
         return res.status(202).json({ status: "extracting", retryAfter: 3 });
       }
+      vlog(`  → 202, starting on-demand text extraction`);
       fs.writeFileSync(tempFile, "");
       extractTextSubtitle(item, trackIndex, cacheFile).then(result => {
         try { fs.unlinkSync(tempFile); } catch {}
+        vlog(`  on-demand text extraction result: ${JSON.stringify(result)}`);
         if (result.ok) {
           logSubtitle("info", item, `Undertext extraherad on-demand – ${subtitleLangLabel(lang)}`, { trackIndex });
         } else {
@@ -3426,6 +3471,7 @@ app.get("/api/media/:id/subtitle-extract", requireMediaAccess, async (req, res) 
       return res.status(202).json({ status: "extracting", retryAfter: 3 });
     }
     const tmpFile = cacheFile;
+    vlog(`  → cache hit, serving existing file directly (${fs.statSync(tmpFile).size} bytes)`);
 
     // Convert SRT to VTT with optional offset
     const rawBuffer = fs.readFileSync(tmpFile);

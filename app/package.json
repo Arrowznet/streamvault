@@ -1,6 +1,6 @@
 {
   "name": "streamvault",
-  "version": "2.6.6",
+  "version": "2.6.7",
   "description": "StreamVault - Self-hosted media server",
   "main": "server/index.js",
   "scripts": {
