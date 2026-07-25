@@ -2016,7 +2016,7 @@ function getFfprobePath() {
 
 // Get duration + video metadata via ffprobe, cache in DB
 async function getDuration(item) {
-  const needsMetadata = !item.width || !item.codec;
+  const needsMetadata = !item.width || !item.codec || item.display_aspect_ratio === undefined;
   if (item.duration && !needsMetadata) return item.duration;
   try {
     const ffprobe = getFfprobePath();
@@ -2024,7 +2024,7 @@ async function getDuration(item) {
     const out = execFileSync(ffprobe, [
       "-v", "quiet",
       "-analyzeduration", "100M", "-probesize", "100M",
-      "-show_entries", "format=duration:stream=width,height,codec_name,pix_fmt",
+      "-show_entries", "format=duration:stream=width,height,codec_name,pix_fmt,display_aspect_ratio,sample_aspect_ratio",
       "-of", "json",
       item.file_path
     ], { timeout: 20000, windowsHide: true }).toString().trim();
@@ -2038,6 +2038,10 @@ async function getDuration(item) {
       updates.height    = videoStream.height;
       updates.codec     = videoStream.codec_name || "";
       updates.bit_depth = (videoStream.pix_fmt || "").includes("10") ? 10 : 8;
+      // "0:1" or missing means ffprobe couldn't determine it (common for some containers) —
+      // don't cache a bogus ratio, let the client fall back to computing it from width/height.
+      updates.display_aspect_ratio = (videoStream.display_aspect_ratio && videoStream.display_aspect_ratio !== "0:1") ? videoStream.display_aspect_ratio : null;
+      updates.sample_aspect_ratio = (videoStream.sample_aspect_ratio && videoStream.sample_aspect_ratio !== "0:1") ? videoStream.sample_aspect_ratio : "1:1";
     }
     if (Object.keys(updates).length > 0) {
       await dbUpdate(db.media, { _id: item._id }, { $set: updates });
@@ -2281,6 +2285,12 @@ app.get("/api/playback/:id", requireMediaAccess, async (req, res) => {
     // the already-cached DB field rather than re-probing — cheap either way.
     container: ext.replace(".", ""),
     videoCodec: item.codec ? normalizeCodec(item.codec) : null,
+    // For the Android app's video-scaling decisions (widescreen vs. embedded letterbox).
+    // Already-cached from getDuration() — no extra probing cost here.
+    videoWidth: item.width || null,
+    videoHeight: item.height || null,
+    displayAspectRatio: item.display_aspect_ratio || null,
+    sampleAspectRatio: item.sample_aspect_ratio || "1:1",
     // Field name matches what the Android app (v1.0.10+) explicitly looks for — confirmed
     // with Cursor. Only meaningful for direct play — tells the client which audio track to
     // explicitly select (e.g. via ExoPlayer track override or LibVLC setAudioTrack), since
@@ -3108,6 +3118,124 @@ app.get("/api/watch-providers/:tmdb_id", requireAuth, async (req, res) => {
 // clickable (no dead-end links to things you don't own). Falls back to TMDB's "similar"
 // endpoint if recommendations comes back empty, since recommendations relies on TMDB user
 // behavior data and can be thin for less mainstream titles.
+// Tracks media IDs currently having cropdetect run, so a burst of requests for the same
+// file (e.g. the app polling while waiting) doesn't kick off multiple concurrent ffmpeg runs.
+const _cropDetectInProgress = new Set();
+
+// Detects embedded letterbox black bars baked into the video itself (as opposed to genuine
+// widescreen content) — lets a client zoom to fill the screen without cropping real picture.
+// Deliberately NOT run during scanning (cropdetect needs to actually decode frames, unlike
+// the metadata-only ffprobe calls elsewhere — on a library with thousands of files that adds
+// hours of work for something most files will never need). Instead computed lazily the first
+// time a specific file's layout is actually requested, then cached permanently.
+// Detects embedded letterbox black bars baked into the video itself (as opposed to genuine
+// widescreen content) — lets a client zoom to fill the screen without cropping real picture.
+// Samples several points spread across the film rather than a single fixed timestamp — a
+// single sample can land on a dark scene, transition, or (for older/less well-indexed files)
+// a bad seek position, giving a misleadingly aggressive crop reading. Picks the most
+// conservative (smallest crop / largest active area) result across samples, since
+// under-cropping a real letterbox is harmless while over-cropping real picture isn't.
+async function runCropDetect(item) {
+  const duration = item.duration || 0;
+  // Sample at 25/50/75% through the runtime — avoids opening titles and end credits, and
+  // spreads the samples so one unusual scene can't dominate the result. Falls back to a
+  // single sample near the start for very short or duration-unknown files.
+  const samplePoints = duration > 300
+    ? [Math.floor(duration * 0.25), Math.floor(duration * 0.5), Math.floor(duration * 0.75)]
+    : [Math.min(60, Math.floor(duration * 0.3) || 10)];
+
+  console.log(`[CROPDETECT] Starting analysis for "${item.title}" — ${samplePoints.length} sample point(s) at ${samplePoints.join("s, ")}s`);
+
+  const results = [];
+  for (const seekSec of samplePoints) {
+    const result = await runCropDetectSample(item, seekSec);
+    if (result) results.push(result);
+  }
+
+  if (!results.length) {
+    console.log(`[CROPDETECT] "${item.title}": no usable crop data from any sample point`);
+    return null;
+  }
+
+  // Pick the sample with the LARGEST active area (i.e. the smallest, most conservative crop)
+  // — a genuine consistent letterbox will show up similarly across all samples anyway, while
+  // a one-off bad reading (an anomalously small area) gets naturally out-voted.
+  results.sort((a, b) => (b.width * b.height) - (a.width * a.height));
+  const best = results[0];
+  console.log(`[CROPDETECT] "${item.title}": ${results.length}/${samplePoints.length} samples usable, picked largest active area — ${JSON.stringify(best)}`);
+  return best;
+}
+
+function runCropDetectSample(item, seekSec) {
+  return new Promise((resolve) => {
+    const args = [
+      "-y", "-ss", String(seekSec),
+      "-i", item.file_path,
+      "-vframes", "40",
+      "-vf", "cropdetect=24:16:0",
+      "-f", "null", "-"
+    ];
+    const t0 = Date.now();
+    const proc = require("child_process").execFile(getFfmpegPath(), args, { timeout: 30000, windowsHide: true }, (err, stdout, stderr) => {
+      const secs = ((Date.now() - t0) / 1000).toFixed(1);
+      if (err) console.log(`[CROPDETECT] FFmpeg error at ${seekSec}s for "${item.title}" after ${secs}s: ${err.message}`);
+      const matches = [...(stderr || "").matchAll(/crop=(\d+):(\d+):(\d+):(\d+)/g)];
+      if (!matches.length) {
+        console.log(`[CROPDETECT] "${item.title}" @ ${seekSec}s: no crop values in ${secs}s`);
+        resolve(null);
+        return;
+      }
+      const [, w, h, x, y] = matches[matches.length - 1];
+      console.log(`[CROPDETECT] "${item.title}" @ ${seekSec}s: crop=${w}:${h}:${x}:${y} in ${secs}s (${matches.length} samples)`);
+      resolve({ x: parseInt(x), y: parseInt(y), width: parseInt(w), height: parseInt(h) });
+    });
+    deprioritizeBackgroundProcess(proc); // background analysis shouldn't compete with active playback
+  });
+}
+
+app.get("/api/media/:id/video-layout", requireMediaAccess, async (req, res) => {
+  try {
+    const item = await dbFindOne(db.media, { _id: req.params.id });
+    if (!item) { console.log(`[CROPDETECT] GET video-layout: media ${req.params.id} not found`); return res.status(404).json({ error: "Not found" }); }
+
+    if (item.activePicture) {
+      console.log(`[CROPDETECT] "${item.title}": already cached — ${JSON.stringify(item.activePicture)}`);
+      return res.json({ status: "ready", activePicture: item.activePicture });
+    }
+    if (_cropDetectInProgress.has(item._id)) {
+      console.log(`[CROPDETECT] "${item.title}": already in progress, told client to retry`);
+      return res.json({ status: "computing", retryAfter: 5 });
+    }
+
+    console.log(`[CROPDETECT] "${item.title}": no cache yet — kicking off analysis`);
+    _cropDetectInProgress.add(item._id);
+    runCropDetect(item).then(result => {
+      _cropDetectInProgress.delete(item._id);
+      // Sanity check: real embedded letterboxing/pillarboxing rarely removes more than
+      // ~35% of either dimension (even 4:3-in-16:9 pillarboxing is ~25% per side). A more
+      // aggressive reading than that is more likely a bad sample (dark scene, bad seek on an
+      // older/less well-indexed file) than a genuine crop — safer to ignore it than to zoom
+      // into and cut real picture based on a probably-wrong reading.
+      if (result && item.width && item.height) {
+        const wRatio = result.width / item.width, hRatio = result.height / item.height;
+        if (wRatio < 0.65 || hRatio < 0.65) {
+          console.log(`[CROPDETECT] "${item.title}": discarding implausibly aggressive crop (${result.width}x${result.height} of ${item.width}x${item.height}) — likely a bad sample, not genuine letterboxing`);
+          result = null;
+        }
+      }
+      // Cache a "no letterbox detected" result too (as the full frame), so we never redo
+      // this expensive analysis for the same file twice, even when there was nothing to find.
+      const activePicture = result || { x: 0, y: 0, width: item.width || 0, height: item.height || 0 };
+      console.log(`[CROPDETECT] "${item.title}": caching result — ${JSON.stringify(activePicture)}`);
+      dbUpdate(db.media, { _id: item._id }, { $set: { activePicture } }).catch(e => console.log(`[CROPDETECT] Failed to save result for "${item.title}": ${e.message}`));
+    }).catch(e => { _cropDetectInProgress.delete(item._id); console.log(`[CROPDETECT] "${item.title}" THREW: ${e.message}`); });
+
+    res.json({ status: "computing", retryAfter: 5 });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get("/api/media/:id/related", requireAuth, async (req, res) => {
   try {
     const item = await dbFindOne(db.media, { _id: req.params.id });

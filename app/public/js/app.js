@@ -1933,6 +1933,11 @@ async function playItem(id, title) {
   document.getElementById("pb-sub").textContent = "Förbereder...";
   document.body.style.paddingBottom = "320px";
   nowPlayingId = id;
+  // Fill-screen (letterbox-aware zoom) is per-file — never carry a previous movie's zoom
+  // state into a new one, and re-check the button exists (controls markup is static HTML).
+  resetFillScreen();
+  ensureFillScreenButton();
+  bar.style.overflow = "hidden"; // so a fill-screen zoom crops visually instead of overflowing
   currentItemId = id;
 
   try {
@@ -1942,6 +1947,10 @@ async function playItem(id, title) {
       API.get("/media/" + id + "/progress").catch(() => ({ position: 0 }))
     ]);
     document.getElementById("pb-sub").textContent = "";
+    // From the server's already-cached probe — used by fill-screen instead of the <video>
+    // element's own videoWidth/videoHeight, which aren't populated until the browser has
+    // loaded enough of the stream to read metadata (a race if fill-screen is clicked early).
+    window._currentVideoDims = { width: info.videoWidth || 0, height: info.videoHeight || 0 };
 
     // Resume from saved position
     // Accept if position > 10s AND (no duration stored OR position < 95% of duration)
@@ -2498,6 +2507,107 @@ function toggleFullscreen() {
     bar.requestFullscreen().catch(function() {});
   } else {
     document.exitFullscreen();
+  }
+}
+
+// Injects the "Fyll skärmen" toggle into the static player controls markup, once per
+// player-bar lifetime (idempotent — safe to call on every playItem()).
+function ensureFillScreenButton() {
+  var controls = document.querySelector("#custom-controls .ctrl-row");
+  if (!controls || document.getElementById("fill-screen-btn")) return;
+  var btn = document.createElement("button");
+  btn.className = "ctrl-btn";
+  btn.id = "fill-screen-btn";
+  btn.onclick = toggleFillScreen;
+  var fsBtn = controls.querySelector("[onclick*='toggleFullscreen']");
+  if (fsBtn) controls.insertBefore(btn, fsBtn); else controls.appendChild(btn);
+  setFillScreenBtnState("idle");
+}
+
+// Single source of truth for both the button's icon AND its hover tooltip, so you can always
+// tell what's going on just by hovering — no need to click and guess.
+function setFillScreenBtnState(state, extra) {
+  var btn = document.getElementById("fill-screen-btn");
+  if (!btn) return;
+  var labels = {
+    idle:       { text: "⛶+", title: "Fyll skärmen — av. Klicka för att kolla om filmen har inbäddade svarta kanter att zooma bort." },
+    checking:   { text: "⏳" + (extra ? " " + extra : ""), title: "Analyserar bildformat" + (extra ? " (försök " + extra + ")" : "") + " — kan ta upp till 30 sekunder första gången för just den här filmen." },
+    active:     { text: "⛶+", title: "Fyll skärmen — PÅ. Inbäddad svart kant borttagen. Klicka för att stänga av." },
+    none_found: { text: "⛶+", title: "Fyll skärmen — av. Ingen inbäddad svart kant hittades i den här filmen (troligen genuint bredbildsformat, går inte att fylla utan att klippa bild)." },
+    error:      { text: "⛶+", title: "Fyll skärmen — kunde inte analysera den här filens bildformat. Klicka för att försöka igen." }
+  };
+  var l = labels[state] || labels.idle;
+  btn.textContent = l.text;
+  btn.title = l.title;
+  btn.classList.toggle("active", state === "active");
+}
+
+var _fillScreenActive = false;
+var _fillScreenPending = false;
+
+function resetFillScreen() {
+  _fillScreenActive = false;
+  _fillScreenPending = false;
+  var video = document.getElementById("main-video");
+  if (video) { video.style.transform = ""; video.style.transformOrigin = ""; }
+  setFillScreenBtnState("idle");
+}
+
+async function toggleFillScreen() {
+  if (_fillScreenActive) { resetFillScreen(); return; }
+  if (_fillScreenPending || !nowPlayingId) return;
+  _fillScreenPending = true;
+  setFillScreenBtnState("checking");
+  try {
+    await applyFillScreen(nowPlayingId, 0);
+  } finally {
+    _fillScreenPending = false;
+  }
+}
+
+// Fetches the (possibly-not-yet-computed) letterbox layout and applies a CSS zoom that crops
+// exactly the detected black bars — not a blind aspect-ratio guess — so genuine widescreen
+// content never gets cropped by mistake. Polls a few times if the server is still analyzing
+// this file for the first time.
+async function applyFillScreen(mediaId, attempt) {
+  try {
+    var data = await API.get("/media/" + mediaId + "/video-layout");
+    if (data.status === "computing") {
+      if (mediaId !== nowPlayingId) { setFillScreenBtnState("idle"); return; } // user moved to a different title, quietly drop it
+      if (attempt >= 6) {
+        toast("Kunde inte analysera filmen i tid — försök igen om en liten stund", "info");
+        setFillScreenBtnState("error");
+        return;
+      }
+      setFillScreenBtnState("checking", (attempt + 1) + "/6");
+      await new Promise(function(r) { setTimeout(r, (data.retryAfter || 5) * 1000); });
+      return applyFillScreen(mediaId, attempt + 1);
+    }
+    var pic = data.activePicture;
+    var video = document.getElementById("main-video");
+    if (!pic || !video || !pic.width || !pic.height) {
+      toast("Kunde inte analysera bildformatet för den här filen", "error");
+      setFillScreenBtnState("error");
+      return;
+    }
+    var dims = window._currentVideoDims || {};
+    var fullW = dims.width || video.videoWidth || pic.width;
+    var fullH = dims.height || video.videoHeight || pic.height;
+    var scale = Math.max(fullW / pic.width, fullH / pic.height);
+    if (scale <= 1.01) {
+      // No meaningful letterboxing detected — nothing to zoom, don't pretend otherwise
+      toast("Ingen inbäddad svart kant hittades att zooma bort — filmen är troligen genuint bredbild", "info");
+      setFillScreenBtnState("none_found");
+      return;
+    }
+    video.style.transform = "scale(" + scale.toFixed(4) + ")";
+    video.style.transformOrigin = "center center";
+    _fillScreenActive = true;
+    setFillScreenBtnState("active");
+    toast("✓ Zoomade bort inbäddad svart kant", "success");
+  } catch(e) {
+    toast("Fel vid analys av bildformat: " + e.message, "error");
+    setFillScreenBtnState("error");
   }
 }
 
