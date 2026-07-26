@@ -812,6 +812,38 @@ async function loadLibraryView(libId, libName, libType) {
   }
 }
 
+// Builds a single episode's poster card — extracted so both the initial season render and
+// the subtitle-language filter's re-render use identical markup.
+function buildEpisodeCard(ep, showId, showTitle, seasonNum) {
+  const label = `S${String(seasonNum).padStart(2,"0")} E${String(ep.episode||0).padStart(2,"0")}`;
+  return `<div class="mcard" onclick='playEpisode("${ep.id}","${esc(showTitle)}","${showId}",${seasonNum},${ep.episode||0})'>
+    <div style="position:relative">
+      ${ep.still_url
+        ? `<img class="mcard-poster" src="${ep.still_url}" alt="" loading="lazy" style="aspect-ratio:16/9;object-fit:cover">`
+        : `<div class="mcard-poster-ph" style="aspect-ratio:16/9"><span>📺</span><span>${esc(label)}</span></div>`}
+      <div class="mcard-overlay"><span class="mcard-play">▶</span></div>
+    </div>
+    <div class="mcard-info">
+      <div class="mcard-title">${esc(ep.title||"Avsnitt "+ep.episode)}</div>
+      <div class="mcard-meta">Avsnitt ${ep.episode||""}${ep.runtime ? " · "+ep.runtime+" min" : ""}</div>
+    </div>
+  </div>`;
+}
+
+function filterSeasonBySubLang() {
+  const grid = document.getElementById("season-episodes-grid");
+  if (!grid) return;
+  const subLang = document.getElementById("season-filter-sublang")?.value || "";
+  const showId = grid.getAttribute("data-show-id");
+  const showTitle = grid.getAttribute("data-show-title");
+  const seasonNum = grid.getAttribute("data-season");
+  let items = JSON.parse(grid.getAttribute("data-items") || "[]");
+  if (subLang) items = items.filter(ep => (ep.cached_subtitle_langs || []).includes(subLang));
+  grid.innerHTML = items.length
+    ? items.map(ep => buildEpisodeCard(ep, showId, showTitle, seasonNum)).join("")
+    : '<div style="color:var(--muted);font-size:14px;padding:20px 0">Inga avsnitt hittades med det språket</div>';
+}
+
 function filterCollectionBySubLang() {
   const grid = document.getElementById("collection-movies-grid");
   if (!grid) return;
@@ -830,7 +862,7 @@ function filterLibraryView() {
   const subLang = document.getElementById("lib-filter-sublang")?.value || "";
   let items = JSON.parse(sec.dataset.items || "[]");
   if (q) items = items.filter(m => (m.title||"").toLowerCase().includes(q) || String(m.year||"").includes(q));
-  if (subLang) items = items.filter(m => (m.cached_subtitle_langs || []).includes(subLang));
+  if (subLang) items = items.filter(m => ((m.cached_subtitle_langs && m.cached_subtitle_langs.length ? m.cached_subtitle_langs : m.episode_subtitle_langs) || []).includes(subLang));
   if (sort === "title") items.sort((a,b) => (a.title||"").localeCompare(b.title||""));
   else if (sort === "year") items.sort((a,b) => (b.year||0)-(a.year||0));
   else if (sort === "rating") items.sort((a,b) => (b.rating||0)-(a.rating||0));
@@ -921,7 +953,7 @@ async function loadMediaSection(sectionType) {
             <span class="row-title">📁 ${esc(lib.name)}</span>
             <span class="row-count">${data.items.length} ${sectionType === "movies" ? "titlar" : "serier"}</span>
           </div>
-          <div class="media-grid lib-grid-${lib.id}" data-items='${esc(JSON.stringify(data.items.map(i => ({ id: i.id, title: i.title, year: i.year, rating: i.rating, poster_url: i.poster_url, type: i.type, added_at: i.added_at, cached_subtitle_langs: i.cached_subtitle_langs || [] }))))}'>
+          <div class="media-grid lib-grid-${lib.id}" data-items='${esc(JSON.stringify(data.items.map(i => ({ id: i.id, title: i.title, year: i.year, rating: i.rating, poster_url: i.poster_url, type: i.type, added_at: i.added_at, cached_subtitle_langs: (i.cached_subtitle_langs && i.cached_subtitle_langs.length ? i.cached_subtitle_langs : i.episode_subtitle_langs) || [] }))))}'>
             ${data.items.map(i => buildCard(i)).join("")}
           </div>
         </div>`;
@@ -969,7 +1001,7 @@ function filterMediaSection(sectionType) {
     if (!grid) return;
     let items = JSON.parse(grid.getAttribute("data-items") || "[]");
     if (q) items = items.filter(i => (i.title || "").toLowerCase().includes(q));
-    if (subLang) items = items.filter(i => (i.cached_subtitle_langs || []).includes(subLang));
+    if (subLang) items = items.filter(i => ((i.cached_subtitle_langs && i.cached_subtitle_langs.length ? i.cached_subtitle_langs : i.episode_subtitle_langs) || []).includes(subLang));
     if (sort === "title") items.sort((a, b) => a.title.localeCompare(b.title));
     else if (sort === "year") items.sort((a, b) => (b.year || 0) - (a.year || 0));
     else if (sort === "rating") items.sort((a, b) => (b.rating || 0) - (a.rating || 0));
@@ -1368,21 +1400,15 @@ async function openSeason(showId, seasonNum) {
         <h3 class="detail-section-title">Skådespelare</h3>
         ${buildCastScroll(cast, "cast-season-${showId}-${seasonNum}")}
       </div>` : "";
-    const episodesHtml = `<div class="media-grid">${episodes.map(ep => {
-      const label = `S${String(seasonNum).padStart(2,"0")} E${String(ep.episode||0).padStart(2,"0")}`;
-      return `<div class="mcard" onclick='playEpisode("${ep.id}","${esc(show.title)}","${showId}",${seasonNum},${ep.episode||0})'>
-        <div style="position:relative">
-          ${ep.still_url
-            ? `<img class="mcard-poster" src="${ep.still_url}" alt="" loading="lazy" style="aspect-ratio:16/9;object-fit:cover">`
-            : `<div class="mcard-poster-ph" style="aspect-ratio:16/9"><span>📺</span><span>${esc(label)}</span></div>`}
-          <div class="mcard-overlay"><span class="mcard-play">▶</span></div>
-        </div>
-        <div class="mcard-info">
-          <div class="mcard-title">${esc(ep.title||"Avsnitt "+ep.episode)}</div>
-          <div class="mcard-meta">Avsnitt ${ep.episode||""}${ep.runtime ? " · "+ep.runtime+" min" : ""}</div>
-        </div>
-      </div>`;
-    }).join("")}</div>`;
+    const episodesHtml = `
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:4px">
+        <h3 class="detail-section-title" style="margin:0">Avsnitt</h3>
+        <select class="filter-select" id="season-filter-sublang" onchange="filterSeasonBySubLang()" title="Visa bara avsnitt med undertext på valt språk" style="font-size:12px">
+          <option value="">🔤 Alla undertextspråk</option>
+          ${Object.keys(SUBTITLE_LANG_ADJ).filter(l => l !== "und").map(l => `<option value="${l}">${esc(SUBTITLE_LANG_ADJ[l])}</option>`).join("")}
+        </select>
+      </div>
+      <div class="media-grid" id="season-episodes-grid" data-items='${esc(JSON.stringify(episodes.map(ep => ({ id: ep.id, title: ep.title, episode: ep.episode, runtime: ep.runtime, still_url: ep.still_url, cached_subtitle_langs: ep.cached_subtitle_langs || [] }))))}' data-show-id="${showId}" data-show-title="${esc(show.title)}" data-season="${seasonNum}">${episodes.map(ep => buildEpisodeCard(ep, showId, show.title, seasonNum)).join("")}</div>`;
     sec.innerHTML = `
       <div class="detail-page">
         <div class="show-hero" ${show.backdrop_url ? `style="background-image:url('${show.backdrop_url}')"` : ""}>
@@ -1408,7 +1434,6 @@ async function openSeason(showId, seasonNum) {
         <div class="detail-content">
           ${castHtml}
           <div class="detail-section">
-            <h3 class="detail-section-title">Avsnitt</h3>
             ${episodesHtml || '<p style="color:var(--muted)">Inga avsnitt hittades</p>'}
           </div>
         </div>
@@ -1518,7 +1543,9 @@ async function openDetail(id) {
       API.get("/media/" + id + "/details").catch(() => ({}))
     ]);
     const pct = progress?.duration ? Math.round((progress.position / progress.duration) * 100) : 0;
-    const playLabel = pct > 5 && pct < 95 ? `▶ Fortsätt (${pct}%)` : "▶ Spela";
+    const watchedMin = Math.floor((progress?.position || 0) / 60);
+    const watchedLabel = watchedMin >= 60 ? `${Math.floor(watchedMin/60)}h ${watchedMin%60}m` : `${watchedMin}m`;
+    const playLabel = pct > 5 && pct < 95 ? `▶ Fortsätt (${watchedLabel})` : "▶ Spela";
     const runtime = details.runtime ? `${Math.floor(details.runtime/60)}h ${details.runtime%60}m` : "";
     const genresHtml = (details.genres||[]).map(g => `<span class="detail-genre">${esc(g)}</span>`).join("");
     const directors = (details.crew||[]).filter(c => c.job === "Director").map(c => esc(c.name)).join(", ");
@@ -1915,6 +1942,30 @@ function loadHlsJs() {
   });
 }
 
+// Shows a modal asking whether to continue from the saved position or start over, and
+// resolves with the chosen start second (0 for "start over"). Used by playItem() whenever
+// there's a meaningful saved position to resume from.
+function askResumeChoice(savedSec) {
+  return new Promise((resolve) => {
+    const min = Math.floor(savedSec / 60);
+    const label = min >= 60 ? `${Math.floor(min/60)}h ${min%60}m` : `${min}m`;
+    const overlay = document.createElement("div");
+    overlay.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:10000;display:flex;align-items:center;justify-content:center";
+    overlay.innerHTML = `
+      <div style="background:var(--card2);border:1px solid var(--border);border-radius:12px;padding:24px;max-width:340px;width:90%;text-align:center">
+        <div style="font-size:15px;margin-bottom:20px">Du har sett ${label} av den här. Vill du fortsätta där du slutade, eller börja om?</div>
+        <div style="display:flex;flex-direction:column;gap:8px">
+          <button id="resume-continue-btn" class="s-btn primary">▶ Fortsätt (${label})</button>
+          <button id="resume-restart-btn" class="s-btn">↻ Börja om från början</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    function cleanup(sec) { overlay.remove(); resolve(sec); }
+    overlay.querySelector("#resume-continue-btn").onclick = () => cleanup(savedSec);
+    overlay.querySelector("#resume-restart-btn").onclick = () => cleanup(0);
+  });
+}
+
 async function playItem(id, title) {
   const bar = document.getElementById("player-bar");
   const video = document.getElementById("main-video");
@@ -1940,23 +1991,24 @@ async function playItem(id, title) {
   bar.style.overflow = "hidden"; // so a fill-screen zoom crops visually instead of overflowing
   currentItemId = id;
 
+  // Check for a meaningful saved position BEFORE fetching playback info / starting anything,
+  // so we can ask the user what they want instead of silently always resuming.
+  let progress;
+  try { progress = await API.get("/media/" + id + "/progress"); } catch { progress = { position: 0 }; }
+  const hasDur = progress?.duration > 0;
+  const notDone = !hasDur || (progress.position / progress.duration) < 0.95;
+  const savedResumeSec = (progress?.position > 10 && notDone) ? Math.floor(progress.position) : 0;
+  const resumeSec = savedResumeSec > 0 ? await askResumeChoice(savedResumeSec) : 0;
+
   try {
-    // Ask server: direct play or HLS? Also fetch saved progress
-    const [info, progress] = await Promise.all([
-      API.get("/playback/" + id + "?token=" + encodeURIComponent(token)),
-      API.get("/media/" + id + "/progress").catch(() => ({ position: 0 }))
-    ]);
+    // Ask server: direct play or HLS?
+    const info = await API.get("/playback/" + id + "?token=" + encodeURIComponent(token));
     document.getElementById("pb-sub").textContent = "";
     // From the server's already-cached probe — used by fill-screen instead of the <video>
     // element's own videoWidth/videoHeight, which aren't populated until the browser has
     // loaded enough of the stream to read metadata (a race if fill-screen is clicked early).
     window._currentVideoDims = { width: info.videoWidth || 0, height: info.videoHeight || 0 };
 
-    // Resume from saved position
-    // Accept if position > 10s AND (no duration stored OR position < 95% of duration)
-    const hasDur = progress?.duration > 0;
-    const notDone = !hasDur || (progress.position / progress.duration) < 0.95;
-    const resumeSec = (progress?.position > 10 && notDone) ? Math.floor(progress.position) : 0;
     console.log("[RESUME] position:", progress?.position, "duration:", progress?.duration, "resumeSec:", resumeSec);
     // NOTE: subtitles are NOT auto-loaded here anymore. Loading them before we know whether
     // playback will be direct or DASH caused a race: DASH resets the video's local clock to
@@ -2522,6 +2574,30 @@ function ensureFillScreenButton() {
   var fsBtn = controls.querySelector("[onclick*='toggleFullscreen']");
   if (fsBtn) controls.insertBefore(btn, fsBtn); else controls.appendChild(btn);
   setFillScreenBtnState("idle");
+
+  // Separate, much simpler alternative: stretch the whole picture (including any black
+  // bars) to fill the screen, distorting the aspect ratio — same as the "Stretch"/"Panorama"
+  // mode on most TVs. No analysis needed, purely cosmetic, entirely the viewer's own call
+  // (unlike the smart zoom button, this one WILL warp people/objects if used on genuine
+  // widescreen content — that trade-off is exactly the point of offering it as a separate,
+  // explicit option instead of folding it into the "smart" button).
+  var stretchBtn = document.createElement("button");
+  stretchBtn.className = "ctrl-btn";
+  stretchBtn.id = "stretch-btn";
+  stretchBtn.title = "Sträck ut bilden för att fylla skärmen (förvränger proportionerna — inte smart, bara sträcker rakt av)";
+  stretchBtn.textContent = "↔️";
+  stretchBtn.onclick = toggleStretch;
+  if (fsBtn) controls.insertBefore(stretchBtn, fsBtn); else controls.appendChild(stretchBtn);
+}
+
+var _stretchActive = false;
+function toggleStretch() {
+  var video = document.getElementById("main-video");
+  if (!video) return;
+  _stretchActive = !_stretchActive;
+  video.style.objectFit = _stretchActive ? "fill" : "";
+  var btn = document.getElementById("stretch-btn");
+  if (btn) btn.classList.toggle("active", _stretchActive);
 }
 
 // Single source of truth for both the button's icon AND its hover tooltip, so you can always
@@ -2551,6 +2627,10 @@ function resetFillScreen() {
   var video = document.getElementById("main-video");
   if (video) { video.style.transform = ""; video.style.transformOrigin = ""; }
   setFillScreenBtnState("idle");
+  _stretchActive = false;
+  if (video) video.style.objectFit = "";
+  var stretchBtn = document.getElementById("stretch-btn");
+  if (stretchBtn) stretchBtn.classList.remove("active");
 }
 
 async function toggleFillScreen() {

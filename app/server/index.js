@@ -831,19 +831,24 @@ app.get("/api/updates/check", requireAuth, async (req, res) => {
     // an older release would be invisible once a newer, APK-less release comes along.
     let apkDownloadUrl = null, apkVersion = null, apkNotesAsset = null;
     for (const rel of eligible.slice(0, 10)) {
-      const apkAsset = (rel.assets || []).find(a => a.name && a.name.endsWith(".apk"));
-      if (!apkAsset) continue;
-      const m = apkAsset.name.match(/(\d+\.\d+(?:\.\d+)?)/);
-      const v = m ? m[1] : null;
-      if (v && (!apkVersion || compareVersions(v, apkVersion) > 0)) {
-        apkVersion = v;
-        apkDownloadUrl = apkAsset.browser_download_url;
-        // Android gets its own release notes, never the server/Windows text (data.body) —
-        // that's written for the Windows server audience and would be confusing/irrelevant
-        // in the app. Looked for as a sibling asset in the SAME release, matching the APK's
-        // name with a "-notes.txt" suffix (e.g. "streamvault-android-v1.0.1-notes.txt").
-        const baseName = apkAsset.name.replace(/\.apk$/i, "");
-        apkNotesAsset = (rel.assets || []).find(a => a.name === `${baseName}-notes.txt` || a.name === `${baseName}.notes.txt`) || null;
+      // Was .find() (first match only) — if a single release had multiple APK assets (e.g.
+      // v1.0.25 and v1.0.26 both attached), the server could get stuck on whichever happened
+      // to be listed first by GitHub, meaning a device already on 1.0.25 would never see
+      // 1.0.26 as available. Now checks every APK asset in the release, not just the first.
+      const apkAssets = (rel.assets || []).filter(a => a.name && a.name.endsWith(".apk"));
+      for (const apkAsset of apkAssets) {
+        const m = apkAsset.name.match(/(\d+\.\d+(?:\.\d+)?)/);
+        const v = m ? m[1] : null;
+        if (v && (!apkVersion || compareVersions(v, apkVersion) > 0)) {
+          apkVersion = v;
+          apkDownloadUrl = apkAsset.browser_download_url;
+          // Android gets its own release notes, never the server/Windows text (data.body) —
+          // that's written for the Windows server audience and would be confusing/irrelevant
+          // in the app. Looked for as a sibling asset in the SAME release, matching the APK's
+          // name with a "-notes.txt" suffix (e.g. "streamvault-android-v1.0.1-notes.txt").
+          const baseName = apkAsset.name.replace(/\.apk$/i, "");
+          apkNotesAsset = (rel.assets || []).find(a => a.name === `${baseName}-notes.txt` || a.name === `${baseName}.notes.txt`) || null;
+        }
       }
     }
     const requestedVersionName = req.query.versionName || null;
@@ -1591,6 +1596,22 @@ async function preCacheSubtitles(item, opts) {
       const merged = Array.from(new Set([...(fresh?.cached_subtitle_langs || []), ...langList]));
       return dbUpdate(db.media, { _id: item._id }, { $set: { cached_subtitle_langs: merged, cached_subtitle_lang: merged[0] } });
     })
+      .then(async () => {
+        // Also roll this up onto the parent SHOW, so "which shows have Norwegian subtitles
+        // somewhere" can be answered with a simple, fast filter at the show-list level,
+        // instead of having to open every show/season to check episode-by-episode.
+        // Recomputed fresh from ALL of the show's episodes each time (not just merged
+        // incrementally) so it can never drift out of sync with what's actually cached.
+        if (item.type === "episode" && item.parent_id) {
+          try {
+            const allEpisodes = await dbFind(db.media, { type: "episode", parent_id: item.parent_id });
+            const showLangs = Array.from(new Set(allEpisodes.flatMap(e => e.cached_subtitle_langs || [])));
+            await dbUpdate(db.media, { _id: item.parent_id }, { $set: { episode_subtitle_langs: showLangs } });
+          } catch(e) {
+            logSubtitle("warn", item, "Kunde inte uppdatera seriens sammanställda språklista", { error: e.message });
+          }
+        }
+      })
       .then(() => logSubtitle("info", item, `Klar – ${langList.length} språk cachade nu (${langList.map(subtitleLangLabel).join(", ")}) på totalt ${totalSecs}s`))
       .catch(e => logSubtitle("error", item, "Kunde inte spara cachade språk i databasen", { error: e.message }));
   } else if (onlyLang) {
@@ -1941,6 +1962,27 @@ app.delete("/api/favorites/:id", requireAuth, async (req, res) => {
 
 
 // ── STREAMING & HLS TRANSCODING ───────────────────────────────────────────────
+// One-time backfill (runs once at startup, cheap after that) — populates episode_subtitle_langs
+// for shows that already had subtitles cached before this feature existed, so the show-level
+// language filter works immediately for the existing library, not just future caching runs.
+async function backfillShowSubtitleLanguages() {
+  try {
+    const shows = await dbFind(db.media, { type: "tvshow" });
+    let updated = 0;
+    for (const show of shows) {
+      if (Array.isArray(show.episode_subtitle_langs)) continue; // already computed, incremental updates keep it fresh
+      const episodes = await dbFind(db.media, { type: "episode", parent_id: show._id });
+      const langs = Array.from(new Set(episodes.flatMap(e => e.cached_subtitle_langs || [])));
+      await dbUpdate(db.media, { _id: show._id }, { $set: { episode_subtitle_langs: langs } });
+      updated++;
+    }
+    if (updated > 0) console.log(`[STARTUP] Sammanställde undertextspråk för ${updated} serier`);
+  } catch(e) {
+    console.log("[STARTUP] Kunde inte sammanställa seriers undertextspråk:", e.message);
+  }
+}
+setTimeout(backfillShowSubtitleLanguages, 3000);
+
 const HLS_CACHE = path.join(DATA_DIR, "hls");
 const DASH_CACHE = path.join(DATA_DIR, "dash");
 fs.mkdirSync(HLS_CACHE, { recursive: true });
