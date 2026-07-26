@@ -816,7 +816,7 @@ async function loadLibraryView(libId, libName, libType) {
 // the subtitle-language filter's re-render use identical markup.
 function buildEpisodeCard(ep, showId, showTitle, seasonNum) {
   const label = `S${String(seasonNum).padStart(2,"0")} E${String(ep.episode||0).padStart(2,"0")}`;
-  return `<div class="mcard" onclick='playEpisode("${ep.id}","${esc(showTitle)}","${showId}",${seasonNum},${ep.episode||0})'>
+  return `<div class="mcard" onclick='openEpisodeDetail("${ep.id}")'>
     <div style="position:relative">
       ${ep.still_url
         ? `<img class="mcard-poster" src="${ep.still_url}" alt="" loading="lazy" style="aspect-ratio:16/9;object-fit:cover">`
@@ -842,6 +842,74 @@ function filterSeasonBySubLang() {
   grid.innerHTML = items.length
     ? items.map(ep => buildEpisodeCard(ep, showId, showTitle, seasonNum)).join("")
     : '<div style="color:var(--muted);font-size:14px;padding:20px 0">Inga avsnitt hittades med det språket</div>';
+}
+
+// Plex-style episode detail page — shown when clicking an episode instead of playing
+// immediately, so file info/watched-state/subtitles can be checked or changed first, same
+// set of actions the movie detail page already has. Looks up the episode from the season
+// page's already-fetched data (no redundant round-trip) when available, falling back to a
+// fresh fetch if opened some other way.
+async function openEpisodeDetail(episodeId) {
+  document.querySelectorAll(".section").forEach(s => s.classList.remove("active"));
+  const sec = document.getElementById("sec-detail");
+  sec.classList.add("active");
+  sec.innerHTML = `<div class="spinner-wrap" style="height:60vh"><div class="spinner"></div></div>`;
+  try {
+    let ep = (window._currentSeasonEpisodes || []).find(e => e.id === episodeId);
+    const showId = window._currentSeasonShowId;
+    const showTitle = window._currentSeasonShowTitle || "";
+    const seasonNum = ep?.season || window._currentSeasonNum;
+    if (!ep) {
+      // Opened directly (e.g. a bookmark/refresh) rather than from the season page — fetch fresh.
+      ep = await API.get("/media/" + episodeId);
+    }
+    const progress = await API.get("/media/" + episodeId + "/progress").catch(() => ({}));
+    const label = `S${String(seasonNum||0).padStart(2,"0")} E${String(ep.episode||0).padStart(2,"0")}`;
+    const pct = progress?.duration ? Math.round((progress.position / progress.duration) * 100) : 0;
+    const watchedMin = Math.floor((progress?.position || 0) / 60);
+    const watchedLabel = watchedMin >= 60 ? `${Math.floor(watchedMin/60)}h ${watchedMin%60}m` : `${watchedMin}m`;
+    const playLabel = pct > 5 && pct < 95 ? `▶ Fortsätt (${watchedLabel})` : "▶ Spela";
+
+    sec.innerHTML = `
+      <div class="detail-page">
+        <div class="person-hero">
+          <button class="detail-back" onclick="openSeason('${showId}', ${seasonNum})">← ${esc(showTitle)}</button>
+          <div class="person-info">
+            ${ep.still_url
+              ? `<img class="person-photo" src="${ep.still_url}" alt="" style="width:220px;aspect-ratio:16/9;border-radius:8px;object-fit:cover">`
+              : `<div class="person-photo-ph" style="width:220px;aspect-ratio:16/9">📺</div>`}
+            <div>
+              <div class="detail-meta-row" style="margin-bottom:4px">
+                <span class="detail-meta-item">${esc(label)}</span>
+              </div>
+              <h1 class="detail-page-title">${esc(ep.title || "Avsnitt " + ep.episode)}</h1>
+              <div class="detail-meta-row">
+                ${ep.air_date ? `<span class="detail-meta-item">${esc(ep.air_date)}</span>` : ""}
+                ${ep.runtime ? `<span class="detail-meta-item">${ep.runtime} min</span>` : ""}
+                ${ep.rating ? `<span class="detail-meta-item">⭐ ${ep.rating.toFixed(1)}</span>` : ""}
+              </div>
+              ${ep.overview ? `<p class="person-bio" style="max-width:600px">${esc(ep.overview)}</p>` : ""}
+              <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px">
+                <button class="btn-play" onclick='playEpisode("${ep.id}","${esc(showTitle)}","${showId}",${seasonNum},${ep.episode||0})'>${playLabel}</button>
+                <button class="btn-fav" onclick='openSubtitles("${ep.id}","${esc(showTitle)} · ${esc(label)}")'>🔤 Undertexter</button>
+                ${currentUser?.role === "admin" ? `<button class="btn-fav" onclick='openMediaInfo("${ep.id}")'>ℹ Filinfo</button>` : ""}
+                ${progress?.completed
+                  ? `<button class="btn-fav" id="watched-btn-${ep.id}" onclick="markUnwatched('${ep.id}')">↺ Osedd</button>`
+                  : `<button class="btn-fav" id="watched-btn-${ep.id}" onclick="markWatched('${ep.id}', ${Math.floor(progress?.duration||0)})">✓ Sedd</button>`}
+              </div>
+            </div>
+          </div>
+        </div>
+        ${(window._currentSeasonCast || []).length ? `<div class="detail-content">
+          <div class="detail-section">
+            <h3 class="detail-section-title">Skådespelare</h3>
+            ${buildCastScroll(window._currentSeasonCast, `cast-ep-${ep.id}`)}
+          </div>
+        </div>` : ""}
+      </div>`;
+  } catch(e) {
+    sec.innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><h3>${e.message}</h3></div>`;
+  }
 }
 
 function filterCollectionBySubLang() {
@@ -1394,7 +1462,14 @@ async function openSeason(showId, seasonNum) {
       API.get("/tvshow/" + showId + "/season/" + seasonNum)
     ]);
     const episodes = seasonData.episodes || [];
+    // Stored so openEpisodeDetail() can look up an episode's already-fetched data (title,
+    // overview, still, runtime, air_date) instead of a redundant round-trip.
+    window._currentSeasonEpisodes = episodes;
+    window._currentSeasonShowId = showId;
+    window._currentSeasonShowTitle = show.title;
+    window._currentSeasonNum = seasonNum;
     const cast = seasonData.cast || [];
+    window._currentSeasonCast = cast;
     const castHtml = cast.length ? `
       <div class="detail-section">
         <h3 class="detail-section-title">Skådespelare</h3>

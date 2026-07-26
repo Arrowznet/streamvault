@@ -1150,6 +1150,54 @@ let _scanProgress = { library: null, found: 0, processed: 0 };
 // Scans a single library entry (movies/tvshows/music) and returns how many new items were
 // added. Extracted out of scanLibraries() so both a full server-wide scan and a scan scoped
 // to just one library can share the exact same logic.
+// Removes database entries whose underlying file (movie) or folder (TV show) no longer
+// exists on disk — the regular scan only ever finds NEW files, it never checked whether
+// previously-known ones had been deleted. Also prunes individual episodes whose file
+// disappeared even if the show folder itself is still there, and cleans up watch
+// history/favorites for anything removed, same as the per-library "clear and rescan" does.
+async function pruneMissingMedia(lib) {
+  let removed = 0;
+  const shows = await dbFind(db.media, { library_id: lib.id, type: "tvshow" });
+  for (const show of shows) {
+    if (fs.existsSync(show.file_path)) continue;
+    const eps = await dbFind(db.media, { parent_id: show._id, type: "episode" });
+    const epIds = eps.map(e => e._id);
+    if (epIds.length) {
+      await dbRemove(db.media, { parent_id: show._id, type: "episode" }, { multi: true });
+      await dbRemove(db.history, { media_id: { $in: epIds } }, { multi: true });
+      await dbRemove(db.favorites, { media_id: { $in: epIds } }, { multi: true }).catch(() => {});
+    }
+    await dbRemove(db.media, { _id: show._id });
+    await dbRemove(db.history, { media_id: show._id }, { multi: true }).catch(() => {});
+    console.log(`[SCAN] Removed missing show: "${show.title}" (folder no longer exists)`);
+    removed++;
+  }
+
+  const movies = await dbFind(db.media, { library_id: lib.id, type: "movie" });
+  for (const m of movies) {
+    if (fs.existsSync(m.file_path)) continue;
+    await dbRemove(db.media, { _id: m._id });
+    await dbRemove(db.history, { media_id: m._id }, { multi: true });
+    await dbRemove(db.favorites, { media_id: m._id }, { multi: true }).catch(() => {});
+    console.log(`[SCAN] Removed missing movie: "${m.title}" (file no longer exists)`);
+    removed++;
+  }
+
+  // Episodes belonging to a show whose folder is still present, but where this specific
+  // episode's own file was individually deleted.
+  const episodes = await dbFind(db.media, { library_id: lib.id, type: "episode" });
+  for (const ep of episodes) {
+    if (fs.existsSync(ep.file_path)) continue;
+    await dbRemove(db.media, { _id: ep._id });
+    await dbRemove(db.history, { media_id: ep._id }, { multi: true });
+    console.log(`[SCAN] Removed missing episode: "${ep.title}" (file no longer exists)`);
+    removed++;
+  }
+
+  if (removed > 0) console.log(`[SCAN] Library "${lib.name}": pruned ${removed} missing item(s) no longer on disk`);
+  return removed;
+}
+
 async function scanOneLibrary(lib) {
   let added = 0;
   if (!fs.existsSync(lib.path)) return added;
@@ -1202,6 +1250,7 @@ async function scanOneLibrary(lib) {
     console.log(`[SCAN] TV library "${lib.name}": done`);
   }
   if (lib.type === "music") await scanMusic(lib.path,lib.id);
+  if (lib.type === "movies" || lib.type === "tvshows") await pruneMissingMedia(lib);
   return added;
 }
 
@@ -1746,9 +1795,14 @@ async function scanEpisodes(showPath,showId,libId,depth=0) {
                entry.name.match(/[Ss](\d+)[xX](\d+)/) ||              // S01x01
                entry.name.match(/(?<![\d])(\d+)[xX](\d+)(?![\d])/) || // 1x01, 2x01
                entry.name.match(/\.([1-9])(\d{2})\.|[-_\s]([1-9])(\d{2})[-_\s.]/); // .301. or -301-
-    if (!em) console.log(`[SCAN] Warning: could not detect season/episode from "${entry.name}"`);
-    const emSeason = em ? parseInt(em[1] || em[3]) : 0;
-    const emEpisode = em ? parseInt(em[2] || em[4]) : 0;
+    // Last resort: a bare leading episode number with NO season marker at all — common for
+    // older/classic shows (e.g. some anime) released as one continuous run rather than
+    // separate seasons, e.g. "13.Candy Candy episode title.mkv". Defaults to season 1, since
+    // that's the only sensible assumption when the source material itself has no seasons.
+    const flatEm = !em ? entry.name.match(/^(\d{1,3})[.\s_-]/) : null;
+    if (!em && !flatEm) console.log(`[SCAN] Warning: could not detect season/episode from "${entry.name}"`);
+    const emSeason = em ? parseInt(em[1] || em[3]) : (flatEm ? 1 : 0);
+    const emEpisode = em ? parseInt(em[2] || em[4]) : (flatEm ? parseInt(flatEm[1]) : 0);
     const newEp = {_id:id,library_id:libId,type:"episode",title:path.parse(entry.name).name,file_path:fullPath,file_size:fs.statSync(fullPath).size,parent_id:showId,season:emSeason,episode:emEpisode,added_at:new Date().toISOString()};
     await dbInsert(db.media, newEp);
     queueEpisodeEnrich(newEp); // fetch episode title from TMDB in background
