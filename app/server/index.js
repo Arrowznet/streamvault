@@ -1932,6 +1932,21 @@ app.post("/api/media/:id/progress", requireAuth, async (req, res) => {
   if (existing) await dbUpdate(db.history,{_id:existing._id},{$set:{position,duration,completed:completed?1:0,watched_at:new Date().toISOString()}});
   else await dbInsert(db.history,{_id:uuidv4(),user_id:req.user._id,media_id:req.params.id,position:position||0,duration:duration||0,completed:completed?1:0,watched_at:new Date().toISOString()});
 
+  // Once genuine watch progress is seen (60+ seconds in — long enough to rule out someone
+  // just pressing play to test something and immediately backing out), mark the most recent
+  // matching playback-log entry as "confirmed". The analytics dashboard can then distinguish
+  // "play was pressed" from "this was actually watched", without needing a full session-id
+  // system tying an exact play action to its later heartbeats.
+  if ((position || 0) > 60) {
+    dbFind(db.playbackLog, { user_id: req.user._id, media_id: req.params.id, confirmed: { $ne: true } })
+      .then(entries => {
+        if (!entries.length) return;
+        const mostRecent = entries.sort((a, b) => new Date(b.at) - new Date(a.at))[0];
+        return dbUpdate(db.playbackLog, { _id: mostRecent._id }, { $set: { confirmed: true } });
+      })
+      .catch(() => {}); // best-effort — never let this affect the actual resume-position save
+  }
+
   // Live activity: refresh (or create) this session's heartbeat entry, unless playback
   // just completed — a finished item shouldn't linger in the "currently watching" list.
   const sessionKey = `${req.user._id}:${req.params.id}`;
@@ -4307,9 +4322,11 @@ app.get("/api/admin/playback-stats", requireAdmin, async (req, res) => {
       .sort((a, b) => b.total - a.total)
       .slice(0, 15);
 
-    // Most-played titles
+    // Most-played titles — only counts CONFIRMED plays (genuine watch progress seen, not
+    // just play being pressed), so testing/quickly backing out doesn't inflate this list.
+    const confirmedEntries = entries.filter(e => e.confirmed);
     const titleMap = new Map();
-    for (const e of entries) {
+    for (const e of confirmedEntries) {
       if (!titleMap.has(e.media_id)) titleMap.set(e.media_id, { title: e.title, type: e.type, plays: 0 });
       titleMap.get(e.media_id).plays++;
     }
@@ -4337,10 +4354,22 @@ app.get("/api/admin/playback-stats", requireAdmin, async (req, res) => {
     const byUser = [...userMap.values()].sort((a, b) => b.plays - a.plays);
 
     res.json({
-      days, totalPlays, directCount, transcodeCount,
+      days, totalPlays, directCount, transcodeCount, confirmedPlays: confirmedEntries.length,
       directPct: totalPlays ? Math.round((directCount / totalPlays) * 100) : 0,
       byContainerCodec, mostWatched, dailyStats, byUser
     });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Clears all playback analytics history — meant for wiping out test/development data before
+// starting to track real usage, not something needed in normal operation.
+app.post("/api/admin/playback-stats/reset", requireAdmin, async (req, res) => {
+  try {
+    const result = await new Promise((resolve, reject) => {
+      db.playbackLog.remove({}, { multi: true }, (err, n) => err ? reject(err) : resolve(n));
+    });
+    console.log(`[STATS] Uppspelningsstatistik nollställd av admin – ${result} poster borttagna`);
+    res.json({ ok: true, removed: result });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -4434,7 +4463,7 @@ app.get("/api/public-config", requireAuth, (req, res) => {
   if (!codes.size) codes.add("sv"), codes.add("en");
   const subtitleSearchLanguages = [...codes].map(code => ({ code, label: OPENSUBS_LANG_LABEL[code] || code }));
 
-  res.json({ server_name: config.server_name || null, subtitleSearchLanguages });
+  res.json({ server_name: config.server_name || null, subtitleSearchLanguages, defaultLanguage: config.language || null });
 });
 
 app.get("/api/config", requireAdmin, (req, res) => {

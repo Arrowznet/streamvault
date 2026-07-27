@@ -20,7 +20,7 @@ window.addEventListener("DOMContentLoaded", async () => {
     const user = JSON.parse(localStorage.getItem("sv_user") || "null");
     if (user) {
       currentUser = user; showApp();
-      API.get("/public-config").then(c => { window._serverName = c.server_name || "StreamVault"; window._subtitleSearchLanguages = c.subtitleSearchLanguages || []; }).catch(()=>{});
+      API.get("/public-config").then(c => { window._serverName = c.server_name || "StreamVault"; window._subtitleSearchLanguages = c.subtitleSearchLanguages || []; window._serverDefaultLanguage = c.defaultLanguage || null; }).catch(()=>{});
       // The localStorage copy can go stale (e.g. after changing language/password on another
       // tab, or if a previous save didn't update it) — refresh from the server in the
       // background so a reload never silently reverts a setting back to an old value.
@@ -55,6 +55,31 @@ async function login() {
     API.setTokens(data.accessToken, data.refreshToken);
     currentUser = data.user;
     localStorage.setItem("sv_user", JSON.stringify(data.user));
+    // The login response only returns a minimal user object (id/username/role) — unlike
+    // restoring an existing session (DOMContentLoaded above), a fresh login never fetched
+    // the full profile (language, subtitleLanguages, etc). AWAITED here (not fire-and-forget)
+    // — a background refresh could be outraced by someone logging in and immediately
+    // pressing play, leaving currentUser.language undefined right when autoLoadSubtitles
+    // needs it. This is exactly what caused subtitle auto-select to silently fall back to
+    // English after a fresh login. The extra wait is a single lightweight request, not
+    // noticeable, and showApp() still isn't blocked on anything else.
+    try {
+      const fresh = await API.get("/me");
+      if (fresh && fresh._id) {
+        currentUser = Object.assign({}, currentUser, fresh, { id: fresh._id });
+        localStorage.setItem("sv_user", JSON.stringify(currentUser));
+        console.log("[LOGIN] Full profile refreshed — language:", currentUser.language, "subtitleLanguages:", currentUser.subtitleLanguages);
+      } else {
+        console.log("[LOGIN] /me returned no usable data:", fresh);
+      }
+    } catch(e) { console.log("[LOGIN] Could not refresh full profile:", e.message); }
+    try {
+      const cfg = await API.get("/public-config");
+      window._serverName = cfg.server_name || "StreamVault";
+      window._subtitleSearchLanguages = cfg.subtitleSearchLanguages || [];
+      window._serverDefaultLanguage = cfg.defaultLanguage || null;
+      console.log("[LOGIN] Server default language:", window._serverDefaultLanguage);
+    } catch(e) { console.log("[LOGIN] Could not fetch public config:", e.message); }
     showApp();
   } catch (e) { errEl.textContent = e.message || "Inloggning misslyckades."; }
 }
@@ -3517,7 +3542,15 @@ async function autoLoadSubtitles(mediaId, offsetSec) {
     var subs = data.subtitles || [];
     // Map the user's UI language (e.g. "sv-SE") to the 3-letter subtitle code used by the server
     var USER_LANG_TO_SUB_LANG = { "sv-SE":"swe","en-US":"eng","no-NO":"nor","da-DK":"dan","de-DE":"deu","fr-FR":"fra","es-ES":"spa","nl-NL":"nld","fi-FI":"fin","ja-JP":"jpn" };
-    var userSubLang = USER_LANG_TO_SUB_LANG[currentUser?.language] || null;
+    // If the user's account has no explicit language of its own ("🌐 Använd serverns
+    // inställning" in their profile), fall back to the server's own configured default
+    // language instead of treating it as "no preference at all". This was the actual root
+    // cause of subtitle auto-select silently landing on English: an account relying on the
+    // server default LOOKS like it's "in Swedish" everywhere else in the UI (since that
+    // happens to be the server's own default), but currentUser.language itself is genuinely
+    // empty, and the subtitle-matching code never used to know to fall back any further.
+    var effectiveLanguage = currentUser?.language || window._serverDefaultLanguage || null;
+    var userSubLang = USER_LANG_TO_SUB_LANG[effectiveLanguage] || null;
     function matchesLang(s, code) {
       if (!code) return false;
       var l = (s.lang || "").toLowerCase();
@@ -3532,6 +3565,7 @@ async function autoLoadSubtitles(mediaId, offsetSec) {
     var priorityList = (currentUser?.subtitleLanguages && currentUser.subtitleLanguages.length)
       ? currentUser.subtitleLanguages
       : [userSubLang].filter(Boolean);
+    console.log("[SUBTITLES] Auto-select debug — currentUser.language:", currentUser?.language, "serverDefault:", window._serverDefaultLanguage, "effectiveLanguage:", effectiveLanguage, "subtitleLanguages:", currentUser?.subtitleLanguages, "→ priorityList used:", priorityList);
     var userSub = null;
     for (var pi = 0; pi < priorityList.length; pi++) {
       userSub = subs.find(function(s) { return matchesLang(s, priorityList[pi]); });
@@ -3878,6 +3912,17 @@ var _liveActivityInterval = null;
 // Historical playback analytics (Tautulli-style) — direct-play vs transcode rates over time,
 // which container/codec combos transcode most, and most-watched titles. Loaded async after
 // the initial Settings render, same pattern as Live Activity/watch-providers.
+async function resetPlaybackStats() {
+  if (!confirm("Detta raderar all uppspelningsstatistik permanent (t.ex. all testdata från utveckling). Går inte att ångra. Fortsätt?")) return;
+  try {
+    const data = await API.post("/admin/playback-stats/reset", {});
+    toast(`✓ ${data.removed} poster raderade`, "success");
+    loadPlaybackStats();
+  } catch(e) {
+    toast("Fel: " + e.message, "error");
+  }
+}
+
 async function loadPlaybackStats() {
   const el = document.getElementById("playback-stats-section");
   if (!el) return;
@@ -3890,11 +3935,14 @@ async function loadPlaybackStats() {
     }
     const maxDaily = Math.max(1, ...s.dailyStats.map(d => d.direct + d.transcode));
     el.innerHTML = `
-      <div class="settings-section-title">Uppspelningsstatistik (senaste ${s.days} dagarna)</div>
-      <div style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+        <div class="settings-section-title" style="margin:0">Uppspelningsstatistik (senaste ${s.days} dagarna)</div>
+        <button class="btn-fav" style="font-size:11px;color:var(--muted)" onclick="resetPlaybackStats()" title="Rensar all uppspelningshistorik permanent">🗑 Nollställ statistik</button>
+      </div>
+      <div style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap;margin-top:10px">
         <div style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:14px 20px;text-align:center;flex:1;min-width:120px">
           <div style="font-size:22px;font-weight:600">${s.totalPlays}</div>
-          <div style="font-size:12px;color:var(--muted)">Uppspelningar</div>
+          <div style="font-size:12px;color:var(--muted)">Uppspelningar${s.confirmedPlays !== undefined ? ` (${s.confirmedPlays} bekräftat sedda)` : ""}</div>
         </div>
         <div style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:14px 20px;text-align:center;flex:1;min-width:120px">
           <div style="font-size:22px;font-weight:600;color:#2ecc71">${s.directPct}%</div>
