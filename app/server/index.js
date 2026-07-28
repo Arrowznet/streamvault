@@ -70,7 +70,10 @@ function logSubtitle(level, item, message, extra) {
 // Maps whatever ffprobe/filename gives us (2-letter, 3-letter, or full name) to a
 // stable 3-letter code used consistently in cache filenames and the DB.
 const SUBTITLE_LANG_ALIASES = {
-  sv:"swe", swe:"swe", svenska:"swe", swedish:"swe",
+  // "se" is Sweden's country code, not its language code (that's "sv") — but it's a common
+  // real-world mixup in subtitle filenames from whoever originally named them, so it's worth
+  // recognizing explicitly rather than showing the raw, unrecognized code.
+  sv:"swe", swe:"swe", svenska:"swe", swedish:"swe", se:"swe",
   en:"eng", eng:"eng", english:"eng",
   no:"nor", nor:"nor", nb:"nor", nn:"nor", norsk:"nor", norwegian:"nor",
   da:"dan", dan:"dan", dansk:"dan", danish:"dan",
@@ -1198,6 +1201,30 @@ async function pruneMissingMedia(lib) {
   return removed;
 }
 
+// Generates a URL-friendly slug from a title (e.g. "Bad Boys: Ride or Die" → "bad-boys-ride-or-die").
+function slugify(title) {
+  return (title || "")
+    .toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // strip accents: é→e, å→a, etc.
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80) || "titel";
+}
+
+// Generates a slug guaranteed unique among existing movies/shows of the same type — appends
+// the year, then a counter, if the plain title-based slug collides (e.g. two different films
+// both titled "Dune").
+async function generateUniqueSlug(title, year, type) {
+  const base = slugify(title);
+  const candidates = [base, year ? `${base}-${year}` : null].filter(Boolean);
+  for (const candidate of candidates) {
+    if (!(await dbFindOne(db.media, { type, slug: candidate }))) return candidate;
+  }
+  let i = 2;
+  while (await dbFindOne(db.media, { type, slug: `${base}-${i}` })) i++;
+  return `${base}-${i}`;
+}
+
 async function scanOneLibrary(lib) {
   let added = 0;
   if (!fs.existsSync(lib.path)) return added;
@@ -1222,7 +1249,10 @@ async function scanOneLibrary(lib) {
       const {cleanName,year} = cleanTitle(entry.isDirectory()?entry.name:path.basename(filePath));
       const meta = await getMovieMeta(cleanName,year);
       const stat = fs.statSync(filePath);
-      const newItem = {_id:id,library_id:lib.id,type:"movie",title:meta?.title_en || cleanName,year:meta?.year||year,file_path:filePath,file_size:stat.size,tmdb_id:meta?.tmdb_id||null,poster_url:meta?.poster_url||null,backdrop_url:meta?.backdrop_url||null,overview:meta?.overview||null,rating:meta?.rating||null,collection_id:meta?.collection_id||null,collection_name:meta?.collection_name||null,collection_poster:meta?.collection_poster||null,collection_backdrop:meta?.collection_backdrop||null,added_at:new Date().toISOString()};
+      const movieTitle = meta?.title_en || cleanName;
+      const movieYear = meta?.year || year;
+      const slug = await generateUniqueSlug(movieTitle, movieYear, "movie");
+      const newItem = {_id:id,library_id:lib.id,type:"movie",title:movieTitle,year:movieYear,slug,file_path:filePath,file_size:stat.size,tmdb_id:meta?.tmdb_id||null,poster_url:meta?.poster_url||null,backdrop_url:meta?.backdrop_url||null,overview:meta?.overview||null,rating:meta?.rating||null,collection_id:meta?.collection_id||null,collection_name:meta?.collection_name||null,collection_poster:meta?.collection_poster||null,collection_backdrop:meta?.collection_backdrop||null,added_at:new Date().toISOString()};
       await dbInsert(db.media, newItem);
       queueSubtitleCache(newItem); // queue Swedish subtitle pre-cache (sequential)
       added++;
@@ -1241,7 +1271,8 @@ async function scanOneLibrary(lib) {
         const meta=await getTVMeta(cleanName);
         if (!meta) console.log(`[SCAN] No TMDB match for TV show: "${cleanName}"`);
         else console.log(`[SCAN] Matched TV show: "${cleanName}" → "${meta.title || cleanName}" (TMDB ${meta.tmdb_id})`);
-        await dbInsert(db.media,{_id:showId,library_id:lib.id,type:"tvshow",title:cleanName,file_path:showPath,tmdb_id:meta?.tmdb_id||null,poster_url:meta?.poster_url||null,backdrop_url:meta?.backdrop_url||null,overview:meta?.overview||null,rating:meta?.rating||null,status:meta?.status||null,added_at:new Date().toISOString()});
+        const showSlug = await generateUniqueSlug(meta?.title || cleanName, null, "tvshow");
+        await dbInsert(db.media,{_id:showId,library_id:lib.id,type:"tvshow",title:cleanName,slug:showSlug,file_path:showPath,tmdb_id:meta?.tmdb_id||null,poster_url:meta?.poster_url||null,backdrop_url:meta?.backdrop_url||null,overview:meta?.overview||null,rating:meta?.rating||null,status:meta?.status||null,added_at:new Date().toISOString()});
         added++;
       }
       await scanEpisodes(showPath,showId,lib.id);
@@ -2051,6 +2082,25 @@ async function backfillShowSubtitleLanguages() {
   }
 }
 setTimeout(backfillShowSubtitleLanguages, 3000);
+
+// One-time backfill — gives already-scanned movies/shows a slug too, so shareable URLs work
+// immediately for the existing library, not just titles scanned in after this update.
+async function backfillSlugs() {
+  try {
+    const items = await dbFind(db.media, { type: { $in: ["movie", "tvshow"] } });
+    let updated = 0;
+    for (const item of items) {
+      if (item.slug) continue;
+      const slug = await generateUniqueSlug(item.title, item.year, item.type);
+      await dbUpdate(db.media, { _id: item._id }, { $set: { slug } });
+      updated++;
+    }
+    if (updated > 0) console.log(`[STARTUP] Genererade webbadresser (slugs) för ${updated} titlar`);
+  } catch(e) {
+    console.log("[STARTUP] Kunde inte generera slugs:", e.message);
+  }
+}
+setTimeout(backfillSlugs, 4000);
 
 const HLS_CACHE = path.join(DATA_DIR, "hls");
 const DASH_CACHE = path.join(DATA_DIR, "dash");
@@ -3345,6 +3395,18 @@ app.get("/api/media/:id/video-layout", requireMediaAccess, async (req, res) => {
   } catch(e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// Resolves a shareable URL's slug back to the actual media item — used by the frontend
+// router when a movie/show page is loaded directly (shared link, bookmark, refresh) rather
+// than navigated to from within the app.
+app.get("/api/media/slug/:slug", requireAuth, async (req, res) => {
+  try {
+    const item = await dbFindOne(db.media, { slug: req.params.slug, type: { $in: ["movie", "tvshow"] } });
+    if (!item) return res.status(404).json({ error: "Hittades inte" });
+    if (item.library_id && !userHasLibraryAccess(req.user, item.library_id)) return res.status(403).json({ error: "Ej tillåtet" });
+    res.json({ id: item._id, type: item.type });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get("/api/media/:id/related", requireAuth, async (req, res) => {

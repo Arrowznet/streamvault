@@ -95,13 +95,97 @@ function logout() {
   closePlayer();
 }
 
+// ── URL ROUTER ──────────────────────────────────────────────────────────────
+// Gives movie/show pages and admin settings real, shareable browser URLs (e.g.
+// /filmer/bad-boys-ride-or-die, /admin/settings) instead of the whole app living behind one
+// unchanging address. First pass covers the highest-value pages (movie/show details, admin
+// settings) — more page types (seasons, episodes, collections, people) can follow the same
+// pattern later.
+function navigateToPath(path, title) {
+  if (window.location.pathname === path) return; // avoid piling up duplicate history entries
+  history.pushState({ path }, "", path);
+  if (title) document.title = title;
+}
+
+async function resolveAndRenderPath(path) {
+  const parts = path.split("/").filter(Boolean);
+  if ((parts[0] === "filmer" || parts[0] === "serier") && parts[1] && parts[2] !== "sasong") {
+    try {
+      const r = await API.get("/media/slug/" + encodeURIComponent(parts[1]));
+      if (r.id) return r.type === "tvshow" ? openShowDetail(r.id, true) : openDetail(r.id, true);
+    } catch(e) {}
+    return switchSection("home", true);
+  }
+  if (parts[0] === "serier" && parts[1] && parts[2] === "sasong" && parts[3]) {
+    try {
+      const r = await API.get("/media/slug/" + encodeURIComponent(parts[1]));
+      if (!r.id) return switchSection("home", true);
+      const seasonNum = parseInt(parts[3]);
+      if (parts[4] === "avsnitt" && parts[5]) {
+        // Episode URL — resolve the season first to find this specific episode's actual ID,
+        // then set up the same season-level context openEpisodeDetail expects, exactly as if
+        // the person had clicked through from the season page themselves.
+        const [show, seasonData] = await Promise.all([API.get("/media/" + r.id), API.get("/tvshow/" + r.id + "/season/" + seasonNum)]);
+        const episodes = seasonData.episodes || [];
+        window._currentSeasonEpisodes = episodes;
+        window._currentSeasonShowId = r.id;
+        window._currentSeasonShowTitle = show.title;
+        window._currentSeasonShowSlug = show.slug;
+        window._currentSeasonNum = seasonNum;
+        window._currentSeasonCast = seasonData.cast || [];
+        const ep = episodes.find(e => String(e.episode) === parts[5]);
+        if (ep) return openEpisodeDetail(ep.id, true);
+        return switchSection("home", true);
+      }
+      return openSeason(r.id, seasonNum, true);
+    } catch(e) {}
+    return switchSection("home", true);
+  }
+  if (parts[0] === "personer" && parts[1]) {
+    const tmdbId = parts[1].slice(parts[1].lastIndexOf("-") + 1);
+    if (tmdbId) return openPersonDetail(tmdbId, true);
+    return switchSection("home", true);
+  }
+  if (parts[0] === "samlingar" && parts[1]) {
+    // Format is "{slug}-{collectionId}" — the collection ID is TMDB's own numeric ID, so it
+    // never contains a hyphen itself, making it safe to just take everything after the last one.
+    const collectionId = parts[1].slice(parts[1].lastIndexOf("-") + 1);
+    if (collectionId) return openCollection(collectionId, true);
+    return switchSection("collections", true);
+  }
+  // Reserved names (main sidebar sections) always win — a library that happens to share one
+  // of these exact names just won't get its own short URL, and stays reachable via the
+  // sidebar as usual. Checked before the library lookup below for exactly that reason.
+  const sectionsByPath = { filmer: "movies", serier: "tvshows", samlingar: "collections", sok: "search", musik: "music" };
+  if (sectionsByPath[parts[0]] && !parts[1]) {
+    return switchSection(sectionsByPath[parts[0]], true);
+  }
+  if (parts[0] === "admin" && parts[1] === "settings") {
+    return switchSection("settings", true);
+  }
+  if (parts[0] && !parts[1] && parts[0] !== "admin") {
+    const lib = (allLibraries || []).find(l => clientSlugify(l.name) === parts[0]);
+    if (lib) return switchToLibrary(lib.id, lib.name, lib.type, true);
+  }
+  return switchSection("home", true);
+}
+
+window.addEventListener("popstate", () => {
+  resolveAndRenderPath(window.location.pathname);
+});
+
 async function showApp() {
   document.getElementById("login-screen").style.display = "none";
   document.getElementById("main-app").style.display = "flex";
   document.getElementById("userAvatar").textContent = (currentUser.username || "?")[0].toUpperCase();
   document.getElementById("userName").textContent = currentUser.username;
-  loadSidebarLibraries();
-  loadHome();
+  await loadSidebarLibraries();
+  const path = window.location.pathname;
+  if (path && path !== "/" && path !== "/index.html") {
+    resolveAndRenderPath(path);
+  } else {
+    loadHome();
+  }
   if (currentUser.role === "admin") {
     checkForUpdates();
     checkPendingOcrRequests();
@@ -202,12 +286,16 @@ function exitSettingsSidebarMode() {
   switchSection("home");
 }
 
-function switchSection(name) {
+function switchSection(name, fromRouter) {
   document.querySelectorAll(".section").forEach(s => s.classList.remove("active"));
   document.querySelectorAll(".sb-item").forEach(b => b.classList.remove("active"));
   if (name !== "settings" && _liveActivityInterval) { clearInterval(_liveActivityInterval); _liveActivityInterval = null; }
   if (name !== "settings" && _scanProgressInterval) { clearInterval(_scanProgressInterval); _scanProgressInterval = null; }
   if (name !== "settings" && _inSettingsSidebarMode) { _inSettingsSidebarMode = false; loadSidebarLibraries(); }
+  if (!fromRouter) {
+    const paths = { home: "/", settings: "/admin/settings", movies: "/filmer", tvshows: "/serier", collections: "/samlingar", search: "/sok", music: "/musik" };
+    if (paths[name]) navigateToPath(paths[name], name === "home" ? "StreamVault" : undefined);
+  }
   const sec = document.getElementById("sec-" + name);
   if (sec) sec.classList.add("active");
   const sbEl = document.getElementById("sb-" + name);
@@ -223,7 +311,12 @@ function switchSection(name) {
   if (userMenu) userMenu.style.display = "none";
 }
 
-function switchToLibrary(libId, libName, libType) {
+function clientSlugify(s) {
+  return (s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "bibliotek";
+}
+
+function switchToLibrary(libId, libName, libType, fromRouter) {
   document.querySelectorAll(".section").forEach(s => s.classList.remove("active"));
   document.querySelectorAll(".sb-item").forEach(b => b.classList.remove("active"));
   const sec = document.getElementById("sec-library");
@@ -231,6 +324,7 @@ function switchToLibrary(libId, libName, libType) {
   const sbEl = document.getElementById("sb-lib-" + libId);
   if (sbEl) sbEl.classList.add("active");
   loadLibraryView(libId, libName, libType);
+  if (!fromRouter) navigateToPath(`/${clientSlugify(libName)}`, libName + " - StreamVault");
   const userMenu = document.getElementById("userMenu");
   if (userMenu) userMenu.style.display = "none";
 }
@@ -417,6 +511,15 @@ function scrollToLetter(letter) {
       return;
     }
   }
+}
+
+// Data-only fetch (no DOM rendering) — used as a fallback by openCollection() when opened
+// directly via a bookmarked/shared link, since the Samlingar list page's own fetch (which
+// normally populates this) never ran in that case.
+async function loadCollectionsData() {
+  const collections = await API.get("/collections");
+  window._collectionsData = collections;
+  return collections;
 }
 
 async function loadCollections() {
@@ -704,9 +807,15 @@ async function saveCollectionEdit(collectionId) {
   }
 }
 
-async function openCollection(collectionId) {
+async function openCollection(collectionId, fromRouter) {
+  if (!window._collectionsData) {
+    // Opened directly (bookmark/shared link) rather than via the Samlingar list page —
+    // that list's data was never fetched, so fetch it now before looking up this collection.
+    try { await loadCollectionsData(); } catch {}
+  }
   const collection = window._collectionsData?.find(c => String(c.id) === String(collectionId));
   if (!collection) return;
+  if (!fromRouter) navigateToPath(`/samlingar/${clientSlugify(collection.name)}-${collectionId}`, collection.name + " - StreamVault");
   const sec = document.getElementById("sec-detail") || (() => {
     const s = document.createElement("section");
     s.id = "sec-detail"; s.className = "section";
@@ -874,19 +983,33 @@ function filterSeasonBySubLang() {
 // set of actions the movie detail page already has. Looks up the episode from the season
 // page's already-fetched data (no redundant round-trip) when available, falling back to a
 // fresh fetch if opened some other way.
-async function openEpisodeDetail(episodeId) {
+async function openEpisodeDetail(episodeId, fromRouter) {
   document.querySelectorAll(".section").forEach(s => s.classList.remove("active"));
   const sec = document.getElementById("sec-detail");
   sec.classList.add("active");
   sec.innerHTML = `<div class="spinner-wrap" style="height:60vh"><div class="spinner"></div></div>`;
   try {
     let ep = (window._currentSeasonEpisodes || []).find(e => e.id === episodeId);
-    const showId = window._currentSeasonShowId;
-    const showTitle = window._currentSeasonShowTitle || "";
-    const seasonNum = ep?.season || window._currentSeasonNum;
+    let showId = window._currentSeasonShowId;
+    let showTitle = window._currentSeasonShowTitle || "";
+    let showSlug = null;
     if (!ep) {
-      // Opened directly (e.g. a bookmark/refresh) rather than from the season page — fetch fresh.
+      // Opened directly (e.g. a bookmark/refresh) rather than from the season page — fetch
+      // fresh, including the parent show's info (needed for both the title shown here and
+      // the URL, since none of the season page's data was ever loaded in this case).
       ep = await API.get("/media/" + episodeId);
+      showId = ep.parent_id;
+      if (showId) {
+        try {
+          const show = await API.get("/media/" + showId);
+          showTitle = show.title; showSlug = show.slug;
+        } catch {}
+      }
+    }
+    const seasonNum = ep?.season || window._currentSeasonNum;
+    if (!fromRouter) {
+      const slugForUrl = showSlug || (window._currentSeasonShowSlug);
+      if (slugForUrl) navigateToPath(`/serier/${slugForUrl}/sasong/${seasonNum}/avsnitt/${ep.episode||0}`, `${showTitle} - ${ep.title||"Avsnitt "+ep.episode}`);
     }
     const progress = await API.get("/media/" + episodeId + "/progress").catch(() => ({}));
     const label = `S${String(seasonNum||0).padStart(2,"0")} E${String(ep.episode||0).padStart(2,"0")}`;
@@ -1400,7 +1523,7 @@ function buildCard(item, wide = false) {
 }
 
 // ── DETAIL ────────────────────────────────────────────────────────────────────
-async function openShowDetail(id) {
+async function openShowDetail(id, fromRouter) {
   document.querySelectorAll(".section").forEach(s => s.classList.remove("active"));
   const sec = document.getElementById("sec-detail") || (() => {
     const s = document.createElement("section");
@@ -1417,6 +1540,9 @@ async function openShowDetail(id) {
       API.get("/media/" + id + "/details").catch(() => ({})),
       API.get("/tvshow/" + id + "/seasons").catch(() => ({ seasons: [] }))
     ]);
+    if (!fromRouter && item.slug) {
+      navigateToPath(`/serier/${item.slug}`, item.title);
+    }
     const seasons = seasonsData.seasons || [];
     const genresHtml = (details.genres||[]).map(g => `<span class="detail-genre">${esc(g)}</span>`).join("");
     const directors = (details.crew||[]).filter(c => ["Creator","Director"].includes(c.job)).map(c => esc(c.name)).join(", ");
@@ -1478,7 +1604,7 @@ async function openShowDetail(id) {
   }
 }
 
-async function openSeason(showId, seasonNum) {
+async function openSeason(showId, seasonNum, fromRouter) {
   const sec = document.getElementById("sec-detail");
   sec.innerHTML = `<div class="spinner-wrap" style="height:60vh"><div class="spinner"></div></div>`;
   try {
@@ -1486,12 +1612,16 @@ async function openSeason(showId, seasonNum) {
       API.get("/media/" + showId),
       API.get("/tvshow/" + showId + "/season/" + seasonNum)
     ]);
+    if (!fromRouter && show.slug) {
+      navigateToPath(`/serier/${show.slug}/sasong/${seasonNum}`, `${show.title} - Säsong ${seasonNum}`);
+    }
     const episodes = seasonData.episodes || [];
     // Stored so openEpisodeDetail() can look up an episode's already-fetched data (title,
     // overview, still, runtime, air_date) instead of a redundant round-trip.
     window._currentSeasonEpisodes = episodes;
     window._currentSeasonShowId = showId;
     window._currentSeasonShowTitle = show.title;
+    window._currentSeasonShowSlug = show.slug;
     window._currentSeasonNum = seasonNum;
     const cast = seasonData.cast || [];
     window._currentSeasonCast = cast;
@@ -1625,7 +1755,7 @@ async function openDetailByTmdb(tmdbId) {
   } catch(e) { console.error("openDetailByTmdb:", e); }
 }
 
-async function openDetail(id) {
+async function openDetail(id, fromRouter) {
   document.querySelectorAll(".section").forEach(s => s.classList.remove("active"));
   const sec = document.getElementById("sec-detail") || (() => {
     const s = document.createElement("section");
@@ -1642,6 +1772,9 @@ async function openDetail(id) {
       API.get("/media/" + id + "/progress"),
       API.get("/media/" + id + "/details").catch(() => ({}))
     ]);
+    if (!fromRouter && item.slug) {
+      navigateToPath(`/${item.type === "tvshow" ? "serier" : "filmer"}/${item.slug}`, item.title);
+    }
     const pct = progress?.duration ? Math.round((progress.position / progress.duration) * 100) : 0;
     const watchedMin = Math.floor((progress?.position || 0) / 60);
     const watchedLabel = watchedMin >= 60 ? `${Math.floor(watchedMin/60)}h ${watchedMin%60}m` : `${watchedMin}m`;
@@ -1761,16 +1894,18 @@ function closeDetail() {
   // Return to previous section - home as default
   document.getElementById("sec-home")?.classList.add("active");
   document.querySelectorAll(".sb-item").forEach(b => b.classList.remove("active"));
+  navigateToPath("/", "StreamVault");
 }
 
 
 
-async function openPersonDetail(tmdbPersonId) {
+async function openPersonDetail(tmdbPersonId, fromRouter) {
   document.querySelectorAll(".section").forEach(s => s.classList.remove("active"));
   const sec = document.getElementById("sec-detail");
   if (sec) { sec.classList.add("active"); sec.innerHTML = `<div class="spinner-wrap" style="height:60vh"><div class="spinner"></div></div>`; }
   try {
     const data = await API.get("/person/" + tmdbPersonId);
+    if (!fromRouter) navigateToPath(`/personer/${clientSlugify(data.name)}-${tmdbPersonId}`, data.name + " - StreamVault");
     const inLib = data.credits.filter(c => c.in_library);
     const notLib = data.credits.filter(c => !c.in_library);
     sec.innerHTML = `
