@@ -101,6 +101,18 @@ function logout() {
 // unchanging address. First pass covers the highest-value pages (movie/show details, admin
 // settings) — more page types (seasons, episodes, collections, people) can follow the same
 // pattern later.
+// Season/episode URL words follow the server's own default language (window._serverDefaultLanguage,
+// already fetched via /api/public-config) — an English-language server gets /season/2/episode/5
+// instead of the Swedish /sasong/2/avsnitt/5. The router recognizes BOTH sets of words when
+// reading an incoming URL (not just whichever matches the CURRENT language), so old links
+// keep working even if the server's default language is changed later.
+function seasonEpisodeWords() {
+  const lang = window._serverDefaultLanguage || "sv-SE";
+  return lang === "en-US" ? { season: "season", episode: "episode" } : { season: "sasong", episode: "avsnitt" };
+}
+const SEASON_WORDS = ["sasong", "season"];
+const EPISODE_WORDS = ["avsnitt", "episode"];
+
 function navigateToPath(path, title) {
   if (window.location.pathname === path) return; // avoid piling up duplicate history entries
   history.pushState({ path }, "", path);
@@ -109,19 +121,19 @@ function navigateToPath(path, title) {
 
 async function resolveAndRenderPath(path) {
   const parts = path.split("/").filter(Boolean);
-  if ((parts[0] === "filmer" || parts[0] === "serier") && parts[1] && parts[2] !== "sasong") {
+  if ((parts[0] === "filmer" || parts[0] === "serier") && parts[1] && !SEASON_WORDS.includes(parts[2])) {
     try {
       const r = await API.get("/media/slug/" + encodeURIComponent(parts[1]));
       if (r.id) return r.type === "tvshow" ? openShowDetail(r.id, true) : openDetail(r.id, true);
     } catch(e) {}
     return switchSection("home", true);
   }
-  if (parts[0] === "serier" && parts[1] && parts[2] === "sasong" && parts[3]) {
+  if (parts[0] === "serier" && parts[1] && SEASON_WORDS.includes(parts[2]) && parts[3]) {
     try {
       const r = await API.get("/media/slug/" + encodeURIComponent(parts[1]));
       if (!r.id) return switchSection("home", true);
       const seasonNum = parseInt(parts[3]);
-      if (parts[4] === "avsnitt" && parts[5]) {
+      if (EPISODE_WORDS.includes(parts[4]) && parts[5]) {
         // Episode URL — resolve the season first to find this specific episode's actual ID,
         // then set up the same season-level context openEpisodeDetail expects, exactly as if
         // the person had clicked through from the season page themselves.
@@ -1009,7 +1021,7 @@ async function openEpisodeDetail(episodeId, fromRouter) {
     const seasonNum = ep?.season || window._currentSeasonNum;
     if (!fromRouter) {
       const slugForUrl = showSlug || (window._currentSeasonShowSlug);
-      if (slugForUrl) navigateToPath(`/serier/${slugForUrl}/sasong/${seasonNum}/avsnitt/${ep.episode||0}`, `${showTitle} - ${ep.title||"Avsnitt "+ep.episode}`);
+      if (slugForUrl) { const w = seasonEpisodeWords(); navigateToPath(`/serier/${slugForUrl}/${w.season}/${seasonNum}/${w.episode}/${ep.episode||0}`, `${showTitle} - ${ep.title||"Avsnitt "+ep.episode}`); }
     }
     const progress = await API.get("/media/" + episodeId + "/progress").catch(() => ({}));
     const label = `S${String(seasonNum||0).padStart(2,"0")} E${String(ep.episode||0).padStart(2,"0")}`;
@@ -1588,6 +1600,7 @@ async function openShowDetail(id, fromRouter) {
               ${genresHtml ? `<div class="detail-genres">${genresHtml}</div>` : ""}
               ${item.overview ? `<p class="detail-page-overview">${esc(item.overview)}</p>` : ""}
               <div class="detail-actions">
+                <button class="btn-fav" id="trailer-btn-${item.id}" onclick='toggleTrailer("${item.id}")'>▶ Se trailer</button>
                 ${currentUser?.role === "admin" ? `<button class="btn-fav" onclick='openFixMeta("${item.id}","${esc(item.title)}","tv")'>🔍 Fixa info</button>` : ""}
                 ${currentUser?.role === "admin" ? `<button class="btn-fav" onclick='openEditMedia("${item.id}")'>✏ Redigera</button>` : ""}
               </div>
@@ -1613,7 +1626,7 @@ async function openSeason(showId, seasonNum, fromRouter) {
       API.get("/tvshow/" + showId + "/season/" + seasonNum)
     ]);
     if (!fromRouter && show.slug) {
-      navigateToPath(`/serier/${show.slug}/sasong/${seasonNum}`, `${show.title} - Säsong ${seasonNum}`);
+      navigateToPath(`/serier/${show.slug}/${seasonEpisodeWords().season}/${seasonNum}`, `${show.title} - Säsong ${seasonNum}`);
     }
     const episodes = seasonData.episodes || [];
     // Stored so openEpisodeDetail() can look up an episode's already-fetched data (title,
@@ -1825,6 +1838,7 @@ async function openDetail(id, fromRouter) {
                 ${currentUser?.role === "admin" ? `<button class="btn-fav" onclick='openFixMeta("${item.id}","${esc(item.title)}","${item.type==="tvshow"?"tv":"movie"}")'>🔍 Fixa info</button>` : ""}
                 ${currentUser?.role === "admin" ? `<button class="btn-fav" onclick='openEditMedia("${item.id}")'>✏ Redigera</button>` : ""}
                 <button class="btn-fav" onclick='openSubtitles("${item.id}","${esc(item.title)}")'>🔤 Undertexter</button>
+                <button class="btn-fav" id="trailer-btn-${item.id}" onclick='toggleTrailer("${item.id}")'>▶ Se trailer</button>
                 ${currentUser?.role === "admin" ? `<button class="btn-fav" onclick='openMediaInfo("${item.id}")'>ℹ Filinfo</button>` : ""}
                 ${progress?.completed
                   ? `<button class="btn-fav" id="watched-btn-${item.id}" onclick="markUnwatched('${item.id}')">↺ Osedd</button>`
@@ -2059,6 +2073,57 @@ async function saveEditMedia(id) {
     toast("Sparad ✓", "success");
     openDetail(id);
   } catch(e) { toast("Kunde inte spara: " + e.message, "error"); }
+}
+
+// Opens a centered, focused trailer modal (TMDB-style) — same YouTube embed as before, just
+// presented as an overlay instead of inline in the page. Click outside, press Escape, or hit
+// the ✕ to close.
+async function toggleTrailer(id) {
+  const btn = document.getElementById("trailer-btn-" + id);
+  if (!btn) return;
+  const original = btn.textContent;
+  btn.textContent = "⏳ Laddar...";
+  try {
+    const data = await API.get("/media/" + id + "/trailer");
+    if (!data.key) {
+      toast("Ingen trailer hittades för den här titeln", "info");
+      btn.textContent = original;
+      return;
+    }
+    openTrailerModal(data.key, data.name);
+    btn.textContent = original;
+  } catch(e) {
+    toast("Kunde inte hämta trailer: " + e.message, "error");
+    btn.textContent = original;
+  }
+}
+
+function openTrailerModal(youtubeKey, name) {
+  const overlay = document.createElement("div");
+  overlay.id = "trailer-modal-overlay";
+  overlay.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:10000;display:flex;align-items:center;justify-content:center;padding:24px";
+  overlay.innerHTML = `
+    <div style="width:100%;max-width:900px;position:relative">
+      <button onclick="closeTrailerModal()" style="position:absolute;top:-42px;right:0;background:none;border:none;color:#fff;font-size:28px;cursor:pointer;line-height:1;padding:4px 8px" title="Stäng (Esc)">✕</button>
+      <div style="position:relative;padding-top:56.25%;border-radius:10px;overflow:hidden;background:#000;box-shadow:0 20px 60px rgba(0,0,0,0.6)">
+        <iframe src="https://www.youtube.com/embed/${youtubeKey}?autoplay=1" title="${esc(name||"Trailer")}"
+          style="position:absolute;top:0;left:0;width:100%;height:100%;border:0"
+          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>
+      </div>
+    </div>`;
+  overlay.addEventListener("click", (e) => { if (e.target === overlay) closeTrailerModal(); });
+  document.body.appendChild(overlay);
+  document.addEventListener("keydown", _trailerModalEscHandler);
+}
+
+function _trailerModalEscHandler(e) {
+  if (e.key === "Escape") closeTrailerModal();
+}
+
+function closeTrailerModal() {
+  const overlay = document.getElementById("trailer-modal-overlay");
+  if (overlay) overlay.remove();
+  document.removeEventListener("keydown", _trailerModalEscHandler);
 }
 
 async function openMediaInfo(id) {

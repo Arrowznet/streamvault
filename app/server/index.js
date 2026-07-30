@@ -3409,6 +3409,32 @@ app.get("/api/media/slug/:slug", requireAuth, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Fetches the official trailer (YouTube) for a movie/show already in the library, via its
+// stored tmdb_id. Falls back to "Teaser" if no proper Trailer exists, since some titles
+// (especially older or less mainstream ones) only have a teaser listed on TMDB.
+app.get("/api/media/:id/trailer", requireAuth, async (req, res) => {
+  try {
+    const item = await dbFindOne(db.media, { _id: req.params.id });
+    if (!item || !item.tmdb_id) return res.json({ key: null });
+    const kind = item.type === "tvshow" ? "tv" : "movie";
+    let data = await tmdbFetch(`/${kind}/${item.tmdb_id}/videos`);
+    let videos = data?.results || [];
+    // TMDB's video listings are very often only tagged in English regardless of what
+    // language we ask in — a non-English query can come back completely empty even though
+    // the trailer genuinely exists (same issue we've hit before with posters/biographies).
+    if (!videos.length) {
+      data = await tmdbFetch(`/${kind}/${item.tmdb_id}/videos`, "en-US");
+      videos = data?.results || [];
+    }
+    const trailer = videos.find(v => v.site === "YouTube" && v.type === "Trailer")
+      || videos.find(v => v.site === "YouTube" && v.type === "Teaser")
+      || null;
+    res.json({ key: trailer?.key || null, name: trailer?.name || null, type: trailer?.type || null });
+  } catch(e) {
+    res.json({ key: null }); // never let a broken trailer lookup break the detail page
+  }
+});
+
 app.get("/api/media/:id/related", requireAuth, async (req, res) => {
   try {
     const item = await dbFindOne(db.media, { _id: req.params.id });
