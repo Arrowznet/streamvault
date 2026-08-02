@@ -3409,6 +3409,24 @@ app.get("/api/media/slug/:slug", requireAuth, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Shared trailer lookup — used both for already-owned titles (looked up via our own media
+// ID) and for titles found via search that aren't owned at all (looked up via a raw TMDB ID).
+async function fetchTmdbTrailer(tmdbId, kind) {
+  let data = await tmdbFetch(`/${kind}/${tmdbId}/videos`);
+  let videos = data?.results || [];
+  // TMDB's video listings are very often only tagged in English regardless of what language
+  // we ask in — a non-English query can come back completely empty even though the trailer
+  // genuinely exists (same issue we've hit before with posters/biographies).
+  if (!videos.length) {
+    data = await tmdbFetch(`/${kind}/${tmdbId}/videos`, "en-US");
+    videos = data?.results || [];
+  }
+  const trailer = videos.find(v => v.site === "YouTube" && v.type === "Trailer")
+    || videos.find(v => v.site === "YouTube" && v.type === "Teaser")
+    || null;
+  return { key: trailer?.key || null, name: trailer?.name || null, type: trailer?.type || null };
+}
+
 // Fetches the official trailer (YouTube) for a movie/show already in the library, via its
 // stored tmdb_id. Falls back to "Teaser" if no proper Trailer exists, since some titles
 // (especially older or less mainstream ones) only have a teaser listed on TMDB.
@@ -3417,21 +3435,87 @@ app.get("/api/media/:id/trailer", requireAuth, async (req, res) => {
     const item = await dbFindOne(db.media, { _id: req.params.id });
     if (!item || !item.tmdb_id) return res.json({ key: null });
     const kind = item.type === "tvshow" ? "tv" : "movie";
-    let data = await tmdbFetch(`/${kind}/${item.tmdb_id}/videos`);
-    let videos = data?.results || [];
-    // TMDB's video listings are very often only tagged in English regardless of what
-    // language we ask in — a non-English query can come back completely empty even though
-    // the trailer genuinely exists (same issue we've hit before with posters/biographies).
-    if (!videos.length) {
-      data = await tmdbFetch(`/${kind}/${item.tmdb_id}/videos`, "en-US");
-      videos = data?.results || [];
-    }
-    const trailer = videos.find(v => v.site === "YouTube" && v.type === "Trailer")
-      || videos.find(v => v.site === "YouTube" && v.type === "Teaser")
-      || null;
-    res.json({ key: trailer?.key || null, name: trailer?.name || null, type: trailer?.type || null });
+    res.json(await fetchTmdbTrailer(item.tmdb_id, kind));
   } catch(e) {
     res.json({ key: null }); // never let a broken trailer lookup break the detail page
+  }
+});
+
+// Same trailer lookup, but for a title found via search that isn't owned at all — no media
+// DB entry to look up a tmdb_id from, so it's passed directly instead.
+app.get("/api/tmdb/trailer/:kind/:tmdb_id", requireAuth, async (req, res) => {
+  try {
+    const kind = req.params.kind === "tv" ? "tv" : "movie";
+    res.json(await fetchTmdbTrailer(req.params.tmdb_id, kind));
+  } catch(e) {
+    res.json({ key: null });
+  }
+});
+
+// Resolves a YouTube video ID to a direct, playable stream URL via third-party Piped
+// instances — NOT YouTube's official API, and outside their terms of service. Deliberately
+// gated behind an admin toggle (default OFF) rather than always available: this exists
+// specifically for private, personal-use setups where embedding YouTube's own iframe player
+// isn't practical (e.g. some Android TV WebViews refuse to play it at all), not as a
+// general-purpose feature meant for wide distribution. Off by default so a server shared
+// more broadly doesn't carry this by accident.
+const PIPED_INSTANCES = [
+  "https://pipedapi.kavin.rocks",
+  "https://pipedapi.adminforge.de",
+  "https://api.piped.yt"
+];
+
+function httpsGetJson(url, timeoutMs = 15000) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, {
+      timeout: timeoutMs,
+      headers: { "User-Agent": "StreamVault/" + STREAMVAULT_VERSION }
+    }, (res) => {
+      if (res.statusCode >= 400) { res.resume(); return reject(new Error(`HTTP ${res.statusCode}`)); }
+      let body = "";
+      res.on("data", c => body += c);
+      res.on("end", () => {
+        try { resolve(JSON.parse(body)); } catch(e) { reject(e); }
+      });
+    });
+    req.on("timeout", () => { req.destroy(); reject(new Error("Timeout")); });
+    req.on("error", reject);
+  });
+}
+
+async function resolveYoutubeStreamUrl(youtubeKey) {
+  for (const base of PIPED_INSTANCES) {
+    try {
+      const data = await httpsGetJson(`${base}/streams/${youtubeKey}`);
+      if (data.hls) return data.hls;
+      const streams = (data.videoStreams || []).filter(s => !s.videoOnly);
+      if (streams.length) return streams[0].url;
+    } catch(e) {
+      console.log(`[TRAILER-STREAM] Piped instance ${base} failed for ${youtubeKey}: ${e.message}`);
+      // try next instance
+    }
+  }
+  return null;
+}
+
+app.get("/api/media/:id/trailer-stream", requireAuth, async (req, res) => {
+  if (!config.trailer_stream_enabled) {
+    return res.status(403).json({ url: null, error: "Funktionen är avstängd i Inställningar" });
+  }
+  try {
+    const item = await dbFindOne(db.media, { _id: req.params.id });
+    if (!item) return res.status(404).json({ error: "Hittades inte" });
+    if (item.library_id && !userHasLibraryAccess(req.user, item.library_id)) {
+      return res.status(403).json({ error: "Ej tillåtet" });
+    }
+    if (!item.tmdb_id) return res.json({ url: null });
+    const kind = item.type === "tvshow" ? "tv" : "movie";
+    const trailer = await fetchTmdbTrailer(item.tmdb_id, kind);
+    if (!trailer.key) return res.json({ url: null });
+    const url = await resolveYoutubeStreamUrl(trailer.key);
+    res.json(url ? { url } : { url: null, error: "Kunde inte lösa stream" });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
   }
 });
 
@@ -4551,7 +4635,7 @@ app.get("/api/public-config", requireAuth, (req, res) => {
   if (!codes.size) codes.add("sv"), codes.add("en");
   const subtitleSearchLanguages = [...codes].map(code => ({ code, label: OPENSUBS_LANG_LABEL[code] || code }));
 
-  res.json({ server_name: config.server_name || null, subtitleSearchLanguages, defaultLanguage: config.language || null });
+  res.json({ server_name: config.server_name || null, subtitleSearchLanguages, defaultLanguage: config.language || null, trailerStreamEnabled: !!config.trailer_stream_enabled });
 });
 
 app.get("/api/config", requireAdmin, (req, res) => {
@@ -4559,7 +4643,7 @@ app.get("/api/config", requireAdmin, (req, res) => {
 });
 
 app.patch("/api/config", requireAdmin, (req, res) => {
-  ["tmdb_api_key","opensubtitles_api_key","lastfm_api_key","spotify_client_id","spotify_client_secret","port","language","update_channel","server_name"].forEach(k=>{if(req.body[k]!==undefined)config[k]=req.body[k];});
+  ["tmdb_api_key","opensubtitles_api_key","lastfm_api_key","spotify_client_id","spotify_client_secret","port","language","update_channel","server_name","trailer_stream_enabled"].forEach(k=>{if(req.body[k]!==undefined)config[k]=req.body[k];});
   fs.writeFileSync(CONFIG_PATH,JSON.stringify(config,null,2));
   res.json({ok:true});
 });

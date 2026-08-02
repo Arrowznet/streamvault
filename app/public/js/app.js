@@ -1734,6 +1734,9 @@ async function openTmdbDetail(tmdbId) {
               </div>
               ${genresHtml ? `<div class="detail-genres">${genresHtml}</div>` : ""}
               ${item.overview ? `<p class="detail-page-overview">${esc(item.overview)}</p>` : ""}
+              <div class="detail-actions">
+                <button class="btn-fav" id="trailer-btn-tmdb-${tmdbId}" onclick='toggleTrailerByTmdb(${tmdbId}, "movie")'>▶ Se trailer</button>
+              </div>
               <div class="wtw-section">
                 <div class="wtw-title">Var kan du se den?</div>
                 <div class="wtw-providers" id="wtw-tmdb-${tmdbId}"><span style="font-size:13px;color:var(--muted)">Hämtar...</span></div>
@@ -2078,6 +2081,28 @@ async function saveEditMedia(id) {
 // Opens a centered, focused trailer modal (TMDB-style) — same YouTube embed as before, just
 // presented as an overlay instead of inline in the page. Click outside, press Escape, or hit
 // the ✕ to close.
+// Same as toggleTrailer, but for a title found via search that isn't owned — looked up by
+// raw TMDB ID instead of our own media ID.
+async function toggleTrailerByTmdb(tmdbId, kind) {
+  const btn = document.getElementById("trailer-btn-tmdb-" + tmdbId);
+  if (!btn) return;
+  const original = btn.textContent;
+  btn.textContent = "⏳ Laddar...";
+  try {
+    const data = await API.get(`/tmdb/trailer/${kind}/${tmdbId}`);
+    if (!data.key) {
+      toast("Ingen trailer hittades för den här titeln", "info");
+      btn.textContent = original;
+      return;
+    }
+    openTrailerModal(data.key, data.name);
+    btn.textContent = original;
+  } catch(e) {
+    toast("Kunde inte hämta trailer: " + e.message, "error");
+    btn.textContent = original;
+  }
+}
+
 async function toggleTrailer(id) {
   const btn = document.getElementById("trailer-btn-" + id);
   if (!btn) return;
@@ -3694,6 +3719,17 @@ async function saveChannelSetting(channel) {
   }
 }
 
+async function saveTrailerStreamToggle(enabled) {
+  try {
+    await API.patch("/config", { trailer_stream_enabled: enabled });
+    toast(enabled ? "✓ Trailer-strömning aktiverad" : "Trailer-strömning avstängd", "success");
+  } catch(e) {
+    toast("Fel: " + e.message, "error");
+    const el = document.getElementById("trailer-stream-toggle");
+    if (el) el.checked = !enabled; // revert the checkbox if the save failed
+  }
+}
+
 async function installPgsToSrt() {
   const btn = document.getElementById("pgstosrt-install-btn");
   const progressDiv = document.getElementById("pgstosrt-progress");
@@ -4677,6 +4713,18 @@ async function loadSettings() {
           <input class="s-input" type="password" id="s-spotify-secret" value="${esc(cfg.spotify_client_secret || '')}" placeholder="Ej angiven" autocomplete="off"/>
         </div>
         <div style="margin-top:12px"><button class="s-btn primary" onclick="saveApiKeys()">Spara nycklar</button></div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-section-title">Trailer-uppspelning på Android TV</div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:10px;line-height:1.5">
+          Löser trailer-uppspelning på Android TV-enheter där YouTubes inbäddade spelare inte fungerar (svart skärm). Använder tredjepartstjänster för att hämta en direkt videoström, utanför YouTubes officiella API och användarvillkor.
+          <br><br><strong>Av som standard.</strong> Tänkt för privat, eget bruk — inte något att ha på om servern delas brett med andra utanför din familj. Om avstängd faller Android-appen tillbaka på att öppna YouTube-appen istället.
+        </div>
+        <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:14px">
+          <input type="checkbox" id="trailer-stream-toggle" ${cfg.trailer_stream_enabled ? "checked" : ""} onchange="saveTrailerStreamToggle(this.checked)">
+          <span>Aktivera trailer-strömning via tredjepartstjänst</span>
+        </label>
       </div>
 
       <div class="settings-section">
