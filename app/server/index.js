@@ -275,6 +275,86 @@ const DATA_DIR = process.env.STREAMVAULT_DATA
 const CONFIG_PATH = path.join(DATA_DIR, "config.json");
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
+// ── SERVER-WIDE LOGGING ───────────────────────────────────────────────────────
+// Captures EVERYTHING — every console.log/warn/error/info call across the whole server,
+// plus every HTTP request — into a daily-rotated log file, viewable/downloadable from
+// Settings without needing terminal/console access. Complements the existing subtitle-
+// specific log (which stays focused on just subtitle events); this one is the "what is the
+// app actually trying to do" firehose for general debugging (e.g. Android app requests).
+const LOG_DIR = path.join(DATA_DIR, "logs");
+fs.mkdirSync(LOG_DIR, { recursive: true });
+const SERVER_LOG_MAX_LINES = 5000; // in-memory buffer for the fast admin viewer
+const SERVER_LOG_RETENTION_DAYS = 3; // how many days of log FILES to keep on disk
+let _serverLogBuffer = [];
+let _serverLogStream = null;
+let _serverLogDate = null;
+
+function _serverLogFilePath(date) {
+  return path.join(LOG_DIR, `server-${date}.log`);
+}
+
+let _serverLogWritable = true; // flips to false permanently if the stream can't be written to at all
+
+function _ensureServerLogStream() {
+  const today = new Date().toISOString().slice(0, 10);
+  if (_serverLogStream && _serverLogDate === today) return;
+  if (_serverLogStream) _serverLogStream.end();
+  _serverLogDate = today;
+  try {
+    _serverLogStream = fs.createWriteStream(_serverLogFilePath(today), { flags: "a" });
+    // CRITICAL: an EventEmitter's 'error' event with no listener crashes the entire Node
+    // process — without this handler, a permissions issue writing the log file takes down
+    // the whole server, which defeats the entire purpose of a logging system. The in-memory
+    // buffer (used by the admin log viewer) keeps working regardless of whether the file
+    // itself can be written.
+    _serverLogStream.on("error", (e) => {
+      if (_serverLogWritable) {
+        _origConsole.error(`[LOG] Could not write to server log file (logging to memory buffer only from now on): ${e.message}`);
+      }
+      _serverLogWritable = false;
+    });
+    _cleanupOldServerLogs();
+  } catch(e) {
+    _serverLogWritable = false;
+    _origConsole.error(`[LOG] Could not create server log file: ${e.message}`);
+  }
+}
+
+function _cleanupOldServerLogs() {
+  try {
+    const cutoff = Date.now() - SERVER_LOG_RETENTION_DAYS * 86400000;
+    for (const f of fs.readdirSync(LOG_DIR)) {
+      if (!f.startsWith("server-") || !f.endsWith(".log")) continue;
+      const full = path.join(LOG_DIR, f);
+      if (fs.statSync(full).mtimeMs < cutoff) fs.unlink(full, () => {});
+    }
+  } catch(e) { /* non-fatal — just means old logs pile up a bit longer */ }
+}
+
+function writeServerLog(level, args) {
+  const line = `[${new Date().toISOString()}] [${level}] ${args.map(a => {
+    if (typeof a === "string") return a;
+    try { return JSON.stringify(a); } catch { return String(a); }
+  }).join(" ")}`;
+  _serverLogBuffer.push(line);
+  if (_serverLogBuffer.length > SERVER_LOG_MAX_LINES) _serverLogBuffer.shift();
+  if (!_serverLogWritable) return; // already known broken — admin viewer still works via the buffer above
+  try {
+    _ensureServerLogStream();
+    if (_serverLogWritable) _serverLogStream.write(line + "\n");
+  } catch(e) { _serverLogWritable = false; /* never let logging itself crash the server */ }
+}
+
+// Wrap console methods so EVERY existing console.log/warn/error/info call throughout the
+// whole codebase (all the [SCAN]/[DASH]/[SUBTITLES]/[CROPDETECT]/etc lines already
+// scattered everywhere) gets captured automatically, with zero changes needed at each call
+// site. Still prints to the real terminal exactly as before — this only adds capturing.
+const _origConsole = { log: console.log, warn: console.warn, error: console.error, info: console.info };
+console.log = (...args) => { _origConsole.log(...args); writeServerLog("LOG", args); };
+console.warn = (...args) => { _origConsole.warn(...args); writeServerLog("WARN", args); };
+console.error = (...args) => { _origConsole.error(...args); writeServerLog("ERROR", args); };
+console.info = (...args) => { _origConsole.info(...args); writeServerLog("INFO", args); };
+
 // Tools directory for PgsToSrt and Tesseract
 const TOOLS_DIR = path.join(DATA_DIR, "tools");
 const PGSTOSRT_DIR = path.join(TOOLS_DIR, "PgsToSrt");
@@ -394,6 +474,17 @@ const app = express();
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: "10mb" }));
 app.use((req, res, next) => { res.setHeader("X-Content-Type-Options","nosniff"); res.setHeader("X-Frame-Options","SAMEORIGIN"); next(); });
+// Logs every API request (method, path, status, timing, client) into the server-wide log —
+// skips static asset requests (images/js/css) since those are just noise for "what is the
+// app actually trying to do" debugging, which is what this is actually for.
+app.use((req, res, next) => {
+  if (!req.path.startsWith("/api/")) return next();
+  const t0 = Date.now();
+  res.on("finish", () => {
+    writeServerLog("HTTP", [`${req.method} ${req.originalUrl} → ${res.statusCode} (${Date.now() - t0}ms) ua=${(req.headers["user-agent"] || "").slice(0, 60)}`]);
+  });
+  next();
+});
 app.use("/api/auth", rateLimit({ windowMs: 15*60*1000, max: 20 }));
 app.use("/api", rateLimit({ windowMs: 60*1000, max: 300 }));
 
@@ -1019,6 +1110,120 @@ app.get("/api/admin/verbose-subtitle-logging", requireAdmin, (req, res) => {
   res.json({ enabled: _verboseSubtitleLogging });
 });
 
+// Fast viewer — serves straight from the in-memory ring buffer (last ~5000 lines), no disk
+// read needed. Optional ?q= filters to lines containing that text (case-insensitive), handy
+// for e.g. just looking at [HTTP] lines or a specific endpoint while debugging the app.
+app.get("/api/admin/server-log", requireAdmin, (req, res) => {
+  let lines = _serverLogBuffer;
+  if (req.query.q) {
+    const q = req.query.q.toLowerCase();
+    lines = lines.filter(l => l.toLowerCase().includes(q));
+  }
+  const limit = Math.min(parseInt(req.query.limit) || 1000, SERVER_LOG_MAX_LINES);
+  res.json({ lines: lines.slice(-limit), totalBuffered: _serverLogBuffer.length });
+});
+
+// Full file download for a given date (defaults to today) — for digging deeper than the
+// in-memory buffer covers, or attaching the whole thing somewhere.
+app.get("/api/admin/server-log/download", requireAdmin, (req, res) => {
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(req.query.date || "") ? req.query.date : new Date().toISOString().slice(0, 10);
+  const filePath = _serverLogFilePath(date);
+  if (!fs.existsSync(filePath)) return res.status(404).json({ error: "Ingen logg för det datumet" });
+  res.download(filePath, `streamvault-log-${date}.txt`);
+});
+
+app.get("/api/admin/server-log/dates", requireAdmin, (req, res) => {
+  try {
+    const dates = fs.readdirSync(LOG_DIR)
+      .filter(f => f.startsWith("server-") && f.endsWith(".log"))
+      .map(f => f.slice(7, -4))
+      .sort().reverse();
+    res.json({ dates });
+  } catch(e) { res.json({ dates: [] }); }
+});
+
+// ── DEPENDENCY UPDATES ────────────────────────────────────────────────────────
+// Checks npm packages via `npm outdated`, and separately checks whether a newer Node.js LTS
+// release exists (informational only — Node.js itself is never auto-updated, since the
+// server would need to stop the very runtime it's currently executing on to do that, and it
+// usually needs different permissions than the app runs with anyway. That one stays a manual,
+// occasional task with a short how-to shown in the UI).
+const PROJECT_ROOT = path.join(__dirname, "..");
+
+function runNpmCommand(args, timeoutMs = 60000) {
+  return new Promise((resolve) => {
+    require("child_process").execFile(
+      process.platform === "win32" ? "npm.cmd" : "npm",
+      args,
+      // shell:true is required on Windows — npm.cmd is a batch file, not a real executable,
+      // and spawning it directly without a shell throws "spawn EINVAL" on Windows/Node
+      // combinations. No effect on Linux/Mac, where npm is invoked directly either way.
+      { cwd: PROJECT_ROOT, timeout: timeoutMs, windowsHide: true, maxBuffer: 10 * 1024 * 1024, shell: process.platform === "win32" },
+      (err, stdout, stderr) => {
+        // `npm outdated` deliberately exits with code 1 when outdated packages exist — that's
+        // normal, not a failure, so we always resolve with whatever stdout we got rather than
+        // treating a non-zero exit as an error.
+        resolve({ stdout: stdout || "", stderr: stderr || "", err });
+      }
+    );
+  });
+}
+
+app.get("/api/admin/dependency-check", requireAdmin, async (req, res) => {
+  try {
+    const { stdout } = await runNpmCommand(["outdated", "--json"]);
+    let outdated = {};
+    try { outdated = stdout.trim() ? JSON.parse(stdout) : {}; } catch(e) { /* empty/malformed output = nothing outdated */ }
+    const packages = Object.entries(outdated).map(([name, info]) => {
+      const currentMajor = parseInt((info.current || "0").split(".")[0]);
+      const latestMajor = parseInt((info.latest || "0").split(".")[0]);
+      return {
+        name, current: info.current, wanted: info.wanted, latest: info.latest,
+        // A major-version jump is far more likely to include breaking changes than a
+        // minor/patch bump — flagged so the UI can visually distinguish "probably safe" from
+        // "read the changelog first".
+        majorUpdate: latestMajor > currentMajor
+      };
+    });
+
+    let nodeUpdate = null;
+    try {
+      const releases = await httpsGetJson("https://nodejs.org/dist/index.json", 8000);
+      const latestLts = releases.find(r => r.lts); // list is newest-first
+      const currentVersion = process.version.replace(/^v/, "");
+      if (latestLts && latestLts.version.replace(/^v/, "") !== currentVersion) {
+        nodeUpdate = { current: currentVersion, latest: latestLts.version.replace(/^v/, ""), ltsName: latestLts.lts };
+      }
+    } catch(e) {
+      console.log("[DEPS] Could not check Node.js version:", e.message);
+    }
+
+    res.json({ packages, nodeUpdate, checkedAt: new Date().toISOString() });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Installs specific packages the admin chose (never "everything" blindly) at their latest
+// version. The server does NOT restart itself afterward — Node has already loaded the old
+// code into memory, so a manual/scripted restart is still required for the update to
+// actually take effect, same as any other file change to index.js/app.js.
+app.post("/api/admin/dependency-install", requireAdmin, async (req, res) => {
+  try {
+    const names = Array.isArray(req.body.packages) ? req.body.packages.filter(n => /^[a-zA-Z0-9@/_.-]+$/.test(n)) : [];
+    if (!names.length) return res.status(400).json({ error: "Inga paket valda" });
+    const results = [];
+    for (const name of names) {
+      console.log(`[DEPS] Installerar ${name}@latest...`);
+      const { err, stderr } = await runNpmCommand(["install", `${name}@latest`], 120000);
+      results.push({ name, ok: !err, error: err ? stderr.slice(0, 300) : null });
+    }
+    res.json({ results });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 
 function tmdbFetch(endpoint, userLanguage) {
   return new Promise(resolve => {
@@ -1118,6 +1323,16 @@ async function getMovieMeta(title, year) {
   } catch(e) {
     // Keep whatever poster_url was already set above — not worth failing the whole scan over.
   }
+  // Same reasoning as the poster fix above — TMDB frequently has no translated overview for
+  // less mainstream/older movies even though the search itself succeeds.
+  if (!meta.overview) {
+    try {
+      const enData = await tmdbFetch(`/movie/${m.id}`, "en-US");
+      if (enData?.overview) meta.overview = enData.overview;
+    } catch(e) {
+      // Keep the empty overview — not worth failing the whole scan over.
+    }
+  }
   metaCache.set(key, meta);
   return meta;
 }
@@ -1139,6 +1354,17 @@ async function getTVMeta(title) {
     if (englishPoster?.file_path) meta.poster_url = `https://image.tmdb.org/t/p/w500${englishPoster.file_path}`;
   } catch(e) {
     // Keep whatever poster_url was already set above.
+  }
+  // TMDB frequently has no translated overview for less mainstream/older shows even though
+  // the search itself succeeds — without this, meta.overview stays genuinely empty and the
+  // show page shows no description at all, rather than falling back to English.
+  if (!meta.overview) {
+    try {
+      const enData = await tmdbFetch(`/tv/${m.id}`, "en-US");
+      if (enData?.overview) meta.overview = enData.overview;
+    } catch(e) {
+      // Keep the empty overview — not worth failing the whole scan over.
+    }
   }
   metaCache.set(key, meta);
   return meta;
@@ -3270,7 +3496,8 @@ app.post("/api/hls/:id/stop", requireAuth, (req, res) => {
 
 app.get("/api/watch-providers/:tmdb_id", requireAuth, async (req, res) => {
   if (!config.tmdb_api_key) return res.json({});
-  const data = await tmdbFetch(`/movie/${req.params.tmdb_id}/watch/providers?watch_region=SE`);
+  const kind = req.query.kind === "tv" ? "tv" : "movie";
+  const data = await tmdbFetch(`/${kind}/${req.params.tmdb_id}/watch/providers?watch_region=SE`);
   res.json(data?.results?.SE || {});
 });
 
@@ -3443,6 +3670,79 @@ app.get("/api/media/:id/trailer", requireAuth, async (req, res) => {
 
 // Same trailer lookup, but for a title found via search that isn't owned at all — no media
 // DB entry to look up a tmdb_id from, so it's passed directly instead.
+// ── EXPLORE ───────────────────────────────────────────────────────────────────
+// Lets someone browse movies they DON'T own too (popular/top-rated/now-playing/upcoming,
+// optionally filtered by genre and/or year) — same underlying data source as search's
+// "Var kan du se den?" results, just as its own dedicated browsing page instead of only
+// showing up after a search. Cross-references against the library so results the person
+// already owns link straight to the real detail page instead of the TMDB preview.
+
+app.get("/api/genres/movie", requireAuth, async (req, res) => {
+  try {
+    const data = await tmdbFetch("/genre/movie/list", "en-US");
+    res.json({ genres: data?.genres || [] });
+  } catch(e) {
+    res.json({ genres: [] });
+  }
+});
+
+const EXPLORE_CATEGORIES = {
+  popular: { endpoint: "/movie/popular", discoverSort: "popularity.desc" },
+  top_rated: { endpoint: "/movie/top_rated", discoverSort: "vote_average.desc" },
+  now_playing: { endpoint: "/movie/now_playing", discoverSort: "popularity.desc" },
+  upcoming: { endpoint: "/movie/upcoming", discoverSort: "primary_release_date.asc" }
+};
+
+app.get("/api/explore/movies", requireAuth, async (req, res) => {
+  try {
+    const category = EXPLORE_CATEGORIES[req.query.category] ? req.query.category : "popular";
+    const genre = req.query.genre ? parseInt(req.query.genre) : null;
+    const year = req.query.year ? parseInt(req.query.year) : null;
+    const page = Math.min(parseInt(req.query.page) || 1, 500);
+    const cat = EXPLORE_CATEGORIES[category];
+
+    let endpoint;
+    if (genre || year) {
+      // Genre/year filtering only works via TMDB's /discover endpoint, not the dedicated
+      // popular/top_rated/etc endpoints — so filters route through discover instead,
+      // approximating the chosen category via sort order (and, for "upcoming"/"now
+      // playing", a release-date constraint discover itself doesn't otherwise apply).
+      const params = new URLSearchParams({ sort_by: cat.discoverSort, page: String(page), "vote_count.gte": category === "top_rated" ? "200" : "0" });
+      if (genre) params.set("with_genres", String(genre));
+      if (year) params.set("primary_release_year", String(year));
+      const today = new Date().toISOString().slice(0, 10);
+      if (category === "upcoming") params.set("primary_release_date.gte", today);
+      if (category === "now_playing") { params.set("primary_release_date.lte", today); params.set("primary_release_date.gte", new Date(Date.now() - 60*86400000).toISOString().slice(0,10)); }
+      endpoint = `/discover/movie?${params.toString()}`;
+    } else {
+      endpoint = `${cat.endpoint}?page=${page}`;
+    }
+
+    const data = await tmdbFetch(endpoint, "en-US");
+    const results = data?.results || [];
+    const tmdbIds = results.map(r => r.id).filter(Boolean);
+    const owned = tmdbIds.length ? await dbFind(db.media, { type: "movie", tmdb_id: { $in: tmdbIds } }) : [];
+    const ownedByTmdbId = new Map(owned.map(o => [o.tmdb_id, o]));
+
+    const items = results.map(r => {
+      const localItem = ownedByTmdbId.get(r.id);
+      return {
+        tmdb_id: r.id,
+        title: r.title,
+        year: r.release_date ? r.release_date.slice(0, 4) : null,
+        rating: r.vote_average || null,
+        poster_url: r.poster_path ? `https://image.tmdb.org/t/p/w500${r.poster_path}` : null,
+        owned: !!localItem,
+        id: localItem ? localItem._id : null
+      };
+    });
+
+    res.json({ items, page, totalPages: data?.total_pages || 1 });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get("/api/tmdb/trailer/:kind/:tmdb_id", requireAuth, async (req, res) => {
   try {
     const kind = req.params.kind === "tv" ? "tv" : "movie";
@@ -3459,10 +3759,28 @@ app.get("/api/tmdb/trailer/:kind/:tmdb_id", requireAuth, async (req, res) => {
 // isn't practical (e.g. some Android TV WebViews refuse to play it at all), not as a
 // general-purpose feature meant for wide distribution. Off by default so a server shared
 // more broadly doesn't carry this by accident.
+// Community-run, unofficial instances — individually unreliable (go down, get blocked, change
+// domains without notice), which is exactly why several are tried in sequence rather than
+// just one or two. List sourced from Piped's own public documentation; worth refreshing
+// occasionally from https://github.com/TeamPiped/documentation (public-instances page) or
+// checking live status at https://status.piped.video/ if trailer streaming stops working
+// again — this is a symptom of the instances themselves, not a StreamVault bug.
 const PIPED_INSTANCES = [
   "https://pipedapi.kavin.rocks",
+  "https://pipedapi-libre.kavin.rocks",
+  "https://pipedapi.leptons.xyz",
+  "https://pipedapi.nosebs.ru",
+  "https://piped-api.privacy.com.de",
   "https://pipedapi.adminforge.de",
-  "https://api.piped.yt"
+  "https://api.piped.yt",
+  "https://pipedapi.drgns.space",
+  "https://pipedapi.owo.si",
+  "https://pipedapi.ducks.party",
+  "https://piped-api.codespace.cz",
+  "https://pipedapi.reallyaweso.me",
+  "https://api.piped.private.coffee",
+  "https://pipedapi.darkness.services",
+  "https://pipedapi.orangenet.cc"
 ];
 
 function httpsGetJson(url, timeoutMs = 15000) {
@@ -3483,19 +3801,94 @@ function httpsGetJson(url, timeoutMs = 15000) {
   });
 }
 
+// Invidious instances are fetched LIVE from their own official instances API instead of
+// hardcoded, since (as we just saw with Piped) a hardcoded list inevitably goes stale as
+// instances die or get blocked. Cached for a few hours so we're not hitting that API on
+// every single trailer request.
+let _invidiousInstancesCache = null;
+let _invidiousInstancesCacheTime = 0;
+async function getInvidiousInstances() {
+  const now = Date.now();
+  if (_invidiousInstancesCache && (now - _invidiousInstancesCacheTime) < 6 * 3600 * 1000) {
+    return _invidiousInstancesCache;
+  }
+  try {
+    const data = await httpsGetJson("https://api.invidious.io/instances.json?sort_by=type,users", 8000);
+    const instances = (data || [])
+      .filter(([, details]) => details && details.type === "https" && details.api !== false)
+      .map(([, details]) => details.uri)
+      .slice(0, 10); // cap how many we bother trying per request
+    if (instances.length) { _invidiousInstancesCache = instances; _invidiousInstancesCacheTime = now; }
+    return _invidiousInstancesCache || [];
+  } catch(e) {
+    console.log("[TRAILER-STREAM] Could not fetch current Invidious instance list:", e.message);
+    return _invidiousInstancesCache || [];
+  }
+}
+
+// Last-resort fallback if every Piped/Invidious instance failed — only used if yt-dlp is
+// actually installed and on PATH (never installed automatically). Generally the most
+// reliable single option of the three, since it's a dedicated, actively-maintained tool
+// built specifically to track YouTube's changes, but tried last since it's slower to spawn
+// than a simple HTTP request to an already-running instance.
+function tryYtDlp(youtubeKey, timeoutMs = 20000) {
+  return new Promise((resolve, reject) => {
+    require("child_process").execFile(
+      "yt-dlp",
+      ["-g", "-f", "best[ext=mp4]/best", `https://www.youtube.com/watch?v=${youtubeKey}`],
+      { timeout: timeoutMs, windowsHide: true },
+      (err, stdout) => {
+        if (err) return reject(err);
+        const url = (stdout || "").trim().split("\n")[0];
+        if (url) resolve(url); else reject(new Error("yt-dlp returned no usable URL"));
+      }
+    );
+  });
+}
+
 async function resolveYoutubeStreamUrl(youtubeKey) {
-  for (const base of PIPED_INSTANCES) {
-    try {
-      const data = await httpsGetJson(`${base}/streams/${youtubeKey}`);
+  // Piped, Invidious, AND yt-dlp are all raced together from the start — not yt-dlp only
+  // as a last resort after everything else has already failed. Right now Piped/Invidious are
+  // largely down, which meant waiting through a long chain of timeouts/DNS failures before
+  // ever reaching yt-dlp, even though yt-dlp usually ends up winning anyway. Racing them
+  // together means the total wait is however long the FASTEST working option takes, not the
+  // sum of every failed attempt plus yt-dlp on top. If Piped/Invidious recover at some point,
+  // they can still win the race on their own merits (e.g. if yt-dlp is ever slow to spawn).
+  const invidiousInstances = await getInvidiousInstances();
+  const pipedAttempts = PIPED_INSTANCES.map(base =>
+    httpsGetJson(`${base}/streams/${youtubeKey}`, 6000).then(data => {
       if (data.hls) return data.hls;
       const streams = (data.videoStreams || []).filter(s => !s.videoOnly);
       if (streams.length) return streams[0].url;
-    } catch(e) {
+      throw new Error("No usable stream in response");
+    }).catch(e => {
       console.log(`[TRAILER-STREAM] Piped instance ${base} failed for ${youtubeKey}: ${e.message}`);
-      // try next instance
-    }
+      throw e;
+    })
+  );
+  const invidiousAttempts = invidiousInstances.map(base =>
+    httpsGetJson(`${base}/api/v1/videos/${youtubeKey}`, 6000).then(data => {
+      const streams = (data.formatStreams || []).filter(s => s.url);
+      if (streams.length) return streams[0].url;
+      throw new Error("No usable stream in response");
+    }).catch(e => {
+      console.log(`[TRAILER-STREAM] Invidious instance ${base} failed for ${youtubeKey}: ${e.message}`);
+      throw e;
+    })
+  );
+  const ytDlpAttempt = tryYtDlp(youtubeKey).catch(e => {
+    console.log(`[TRAILER-STREAM] yt-dlp failed/not installed for ${youtubeKey}: ${e.message}`);
+    throw e;
+  });
+
+  try {
+    const url = await Promise.any([...pipedAttempts, ...invidiousAttempts, ytDlpAttempt]);
+    console.log(`[TRAILER-STREAM] Resolved stream for ${youtubeKey}`);
+    return url;
+  } catch(e) {
+    console.log(`[TRAILER-STREAM] Every option (Piped/Invidious/yt-dlp) failed for ${youtubeKey}`);
+    return null;
   }
-  return null;
 }
 
 app.get("/api/media/:id/trailer-stream", requireAuth, async (req, res) => {
@@ -4785,8 +5178,22 @@ app.post("/api/media/:id/fix-meta", requireAdmin, async (req, res) => {
       // Keep whatever poster_url was sent — not worth failing the whole save over.
     }
 
+    // Same reasoning applies to the overview text — TMDB frequently has no translated
+    // overview for less mainstream titles (older shows especially), even though the search
+    // itself succeeded. Without this, a genuinely empty Swedish overview from the search
+    // preview just got saved as empty text, showing no description at all.
+    let finalOverview = overview;
+    if (!finalOverview) {
+      try {
+        const enData = await tmdbFetch(`/${kind}/${tmdb_id}`, "en-US");
+        if (enData?.overview) finalOverview = enData.overview;
+      } catch(e) {
+        // Keep whatever (empty) overview was sent — not worth failing the whole save over.
+      }
+    }
+
     await dbUpdate(db.media, { _id: req.params.id }, {
-      $set: { tmdb_id, title, year: year ? parseInt(year) : undefined, overview, poster_url: finalPosterUrl, backdrop_url, rating }
+      $set: { tmdb_id, title, year: year ? parseInt(year) : undefined, overview: finalOverview, poster_url: finalPosterUrl, backdrop_url, rating }
     });
     res.json({ ok: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -5486,6 +5893,95 @@ app.get("/api/person/:tmdb_id", requireAuth, async (req, res) => {
 });
 
 // ── TMDB DIRECT LOOKUP (for online search results) ───────────────────────────
+app.get("/api/genres/tv", requireAuth, async (req, res) => {
+  try {
+    const data = await tmdbFetch("/genre/tv/list", "en-US");
+    res.json({ genres: data?.genres || [] });
+  } catch(e) {
+    res.json({ genres: [] });
+  }
+});
+
+const EXPLORE_TV_CATEGORIES = {
+  popular: { endpoint: "/tv/popular", discoverSort: "popularity.desc" },
+  top_rated: { endpoint: "/tv/top_rated", discoverSort: "vote_average.desc" },
+  on_the_air: { endpoint: "/tv/on_the_air", discoverSort: "popularity.desc" },
+  airing_today: { endpoint: "/tv/airing_today", discoverSort: "popularity.desc" }
+};
+
+app.get("/api/explore/tvshows", requireAuth, async (req, res) => {
+  try {
+    const category = EXPLORE_TV_CATEGORIES[req.query.category] ? req.query.category : "popular";
+    const genre = req.query.genre ? parseInt(req.query.genre) : null;
+    const year = req.query.year ? parseInt(req.query.year) : null;
+    const page = Math.min(parseInt(req.query.page) || 1, 500);
+    const cat = EXPLORE_TV_CATEGORIES[category];
+
+    let endpoint;
+    if (genre || year) {
+      const params = new URLSearchParams({ sort_by: cat.discoverSort, page: String(page), "vote_count.gte": category === "top_rated" ? "200" : "0" });
+      if (genre) params.set("with_genres", String(genre));
+      if (year) params.set("first_air_date_year", String(year));
+      if (category === "on_the_air" || category === "airing_today") params.set("with_status", "0|2|3"); // returning, in production, planned — a rough approximation via discover
+      endpoint = `/discover/tv?${params.toString()}`;
+    } else {
+      endpoint = `${cat.endpoint}?page=${page}`;
+    }
+
+    const data = await tmdbFetch(endpoint, "en-US");
+    const results = data?.results || [];
+    const tmdbIds = results.map(r => r.id).filter(Boolean);
+    const owned = tmdbIds.length ? await dbFind(db.media, { type: "tvshow", tmdb_id: { $in: tmdbIds } }) : [];
+    const ownedByTmdbId = new Map(owned.map(o => [o.tmdb_id, o]));
+
+    const items = results.map(r => {
+      const localItem = ownedByTmdbId.get(r.id);
+      return {
+        tmdb_id: r.id,
+        title: r.name,
+        year: r.first_air_date ? r.first_air_date.slice(0, 4) : null,
+        rating: r.vote_average || null,
+        poster_url: r.poster_path ? `https://image.tmdb.org/t/p/w500${r.poster_path}` : null,
+        owned: !!localItem,
+        id: localItem ? localItem._id : null
+      };
+    });
+
+    res.json({ items, page, totalPages: data?.total_pages || 1 });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/api/tmdb/tv/:tmdb_id", requireAuth, async (req, res) => {
+  if (!config.tmdb_api_key) return res.status(503).json({ error: "Ingen TMDB-nyckel" });
+  try {
+    const userLang = req.user?.language || null;
+    const data = await tmdbFetch(`/tv/${req.params.tmdb_id}?append_to_response=credits,videos`, userLang);
+    if (!data) return res.status(404).json({ error: "Hittades inte" });
+    const enData = (userLang && userLang !== "en-US")
+      ? await tmdbFetch(`/tv/${req.params.tmdb_id}`, "en-US")
+      : null;
+    res.json({
+      tmdb_id: data.id,
+      title: enData?.name || data.name,
+      year: data.first_air_date ? parseInt(data.first_air_date) : null,
+      overview: data.overview,
+      poster_url: (enData?.poster_path || data.poster_path) ? `https://image.tmdb.org/t/p/w500${enData?.poster_path || data.poster_path}` : null,
+      backdrop_url: data.backdrop_path ? `https://image.tmdb.org/t/p/w1280${data.backdrop_path}` : null,
+      rating: data.vote_average || null,
+      runtime: (data.episode_run_time && data.episode_run_time[0]) || null,
+      genres: (data.genres||[]).map(g => g.name),
+      cast: (data.credits?.cast||[]).slice(0,20).map(p => ({
+        id: p.id, name: p.name, character: p.character,
+        profile_url: p.profile_path ? `https://image.tmdb.org/t/p/w185${p.profile_path}` : null
+      })),
+      // TV shows use "created_by" instead of a director crew credit
+      crew: (data.created_by||[]).slice(0,3).map(p => ({ id: p.id, name: p.name, job: "Skapare" }))
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get("/api/tmdb/movie/:tmdb_id", requireAuth, async (req, res) => {
   if (!config.tmdb_api_key) return res.status(503).json({ error: "Ingen TMDB-nyckel" });
   try {

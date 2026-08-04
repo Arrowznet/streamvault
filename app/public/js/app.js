@@ -113,6 +113,25 @@ function seasonEpisodeWords() {
 const SEASON_WORDS = ["sasong", "season"];
 const EPISODE_WORDS = ["avsnitt", "episode"];
 
+// Remembers where the person had scrolled to on each page (keyed by URL path) so pressing
+// back restores them to that exact spot instead of always landing at the top. Tracked
+// continuously via a debounced scroll listener (not just "at the moment of navigating away")
+// since history.back() — used by our own back buttons — never goes through navigateToPath,
+// so there'd be no single reliable moment to capture it otherwise.
+// IMPORTANT: this app scrolls #appMain internally, not the window/document — window.scrollY
+// is always 0 in this layout, so tracking has to target the actual scrolling element.
+const _scrollPositions = {};
+let _scrollSaveTimer = null;
+function _getScrollContainer() {
+  return document.getElementById("appMain") || document.scrollingElement || document.documentElement;
+}
+document.addEventListener("scroll", () => {
+  clearTimeout(_scrollSaveTimer);
+  _scrollSaveTimer = setTimeout(() => {
+    _scrollPositions[window.location.pathname] = _getScrollContainer().scrollTop;
+  }, 150);
+}, { passive: true, capture: true }); // capture:true so this catches scroll events on #appMain too, which don't bubble to document
+
 function navigateToPath(path, title) {
   if (window.location.pathname === path) return; // avoid piling up duplicate history entries
   history.pushState({ path }, "", path);
@@ -165,6 +184,8 @@ async function resolveAndRenderPath(path) {
     if (collectionId) return openCollection(collectionId, true);
     return switchSection("collections", true);
   }
+  if (parts[0] === "utforska-filmer") return openExploreMovies(true);
+  if (parts[0] === "utforska-serier") return openExploreTV(true);
   // Reserved names (main sidebar sections) always win — a library that happens to share one
   // of these exact names just won't get its own short URL, and stays reachable via the
   // sidebar as usual. Checked before the library lookup below for exactly that reason.
@@ -183,7 +204,16 @@ async function resolveAndRenderPath(path) {
 }
 
 window.addEventListener("popstate", () => {
-  resolveAndRenderPath(window.location.pathname);
+  const path = window.location.pathname;
+  resolveAndRenderPath(path).then(() => {
+    // Small delay so the newly-rendered content (images, cast rows, etc.) has settled into
+    // its final height before we scroll — otherwise a still-loading page can be shorter than
+    // the saved position, and the scroll silently clamps to the bottom instead.
+    const saved = _scrollPositions[path];
+    setTimeout(() => {
+      _getScrollContainer().scrollTop = typeof saved === "number" ? saved : 0;
+    }, 80);
+  });
 });
 
 async function showApp() {
@@ -250,15 +280,22 @@ async function loadSidebarLibraries() {
       <div class="sb-item" id="sb-collections" onclick="switchSection('collections')">
         <span class="sb-icon">🎬</span>
         <span>Samlingar</span>
-      </div>` +
-    (musicLibs.length ? `
+      </div>
       <div class="sb-sep">ÖVRIGT</div>
-      <div style="height:1px;background:var(--border);margin:0 18px 4px"></div>` +
-      musicLibs.map(lib => `
+      <div style="height:1px;background:var(--border);margin:0 18px 4px"></div>
+      <div class="sb-item" id="sb-explore-movie" onclick="openExploreMovies()">
+        <span class="sb-icon">🎬</span>
+        <span>Utforska Filmtrailers</span>
+      </div>
+      <div class="sb-item" id="sb-explore-tv" onclick="openExploreTV()">
+        <span class="sb-icon">📺</span>
+        <span>Utforska Serietrailers</span>
+      </div>` +
+    musicLibs.map(lib => `
       <div class="sb-item" id="sb-lib-${lib.id}" onclick="switchToLibrary('${lib.id}', '${lib.name.replace(/'/g, "\'")}', '${lib.type}')">
         <span class="sb-icon">🎵</span>
         <span>${esc(lib.name)}</span>
-      </div>`).join("") : "");
+      </div>`).join("");
   } catch {}
 }
 
@@ -308,6 +345,13 @@ function switchSection(name, fromRouter) {
     const paths = { home: "/", settings: "/admin/settings", movies: "/filmer", tvshows: "/serier", collections: "/samlingar", search: "/sok", music: "/musik" };
     if (paths[name]) navigateToPath(paths[name], name === "home" ? "StreamVault" : undefined);
   }
+  // "explore" doesn't exist in the static HTML (added after the fact) — create it once,
+  // same self-creating pattern already used for sec-detail/sec-library.
+  if (name === "explore" && !document.getElementById("sec-explore")) {
+    const s = document.createElement("section");
+    s.id = "sec-explore"; s.className = "section";
+    document.getElementById("appMain")?.appendChild(s);
+  }
   const sec = document.getElementById("sec-" + name);
   if (sec) sec.classList.add("active");
   const sbEl = document.getElementById("sb-" + name);
@@ -319,8 +363,158 @@ function switchSection(name, fromRouter) {
   else if (name === "search") loadSearchPage();
   else if (name === "settings") { if (!_inSettingsSidebarMode) enterSettingsSidebarMode(); loadSettings(); }
   else if (name === "collections") loadCollections();
+  else if (name === "explore") loadExplore();
   const userMenu = document.getElementById("userMenu");
   if (userMenu) userMenu.style.display = "none";
+}
+
+// ── EXPLORE ───────────────────────────────────────────────────────────────────
+let _exploreState = { mediaType: "movie", category: "popular", genre: "", year: "", page: 1 };
+let _movieGenres = null;
+let _tvGenres = null;
+const EXPLORE_MOVIE_CATEGORIES = [["popular","Populära"],["top_rated","Topplistan"],["now_playing","Nu på bio"],["upcoming","Kommande"]];
+const EXPLORE_TV_CATEGORIES = [["popular","Populära"],["top_rated","Topplistan"],["on_the_air","Sänds nu"],["airing_today","Sänds idag"]];
+
+async function loadExplore() {
+  const sec = document.getElementById("sec-explore");
+  if (!sec) return;
+  await ensureExploreGenres();
+  renderExploreShell(sec);
+  loadExploreResults();
+}
+
+// Two dedicated sidebar entries (Filmtrailers / Serietrailers) instead of one combined page
+// with just a toggle — same underlying page either way, just pre-set to the right type and
+// given its own URL so each is directly linkable/bookmarkable on its own.
+function openExploreMovies(fromRouter) {
+  _exploreState.mediaType = "movie";
+  _exploreState.category = "popular";
+  _exploreState.genre = ""; _exploreState.year = ""; _exploreState.page = 1;
+  switchSection("explore", true);
+  if (!fromRouter) navigateToPath("/utforska-filmer", "Utforska Filmtrailers - StreamVault");
+  document.querySelectorAll(".sb-item").forEach(b => b.classList.remove("active"));
+  document.getElementById("sb-explore-movie")?.classList.add("active");
+}
+function openExploreTV(fromRouter) {
+  _exploreState.mediaType = "tv";
+  _exploreState.category = "popular";
+  _exploreState.genre = ""; _exploreState.year = ""; _exploreState.page = 1;
+  switchSection("explore", true);
+  if (!fromRouter) navigateToPath("/utforska-serier", "Utforska Serietrailers - StreamVault");
+  document.querySelectorAll(".sb-item").forEach(b => b.classList.remove("active"));
+  document.getElementById("sb-explore-tv")?.classList.add("active");
+}
+
+async function ensureExploreGenres() {
+  if (_exploreState.mediaType === "movie" && !_movieGenres) {
+    try { _movieGenres = (await API.get("/genres/movie")).genres || []; } catch(e) { _movieGenres = []; }
+  } else if (_exploreState.mediaType === "tv" && !_tvGenres) {
+    try { _tvGenres = (await API.get("/genres/tv")).genres || []; } catch(e) { _tvGenres = []; }
+  }
+}
+
+function renderExploreShell(sec) {
+  const currentYear = new Date().getFullYear();
+  const categories = _exploreState.mediaType === "tv" ? EXPLORE_TV_CATEGORIES : EXPLORE_MOVIE_CATEGORIES;
+  const genres = _exploreState.mediaType === "tv" ? (_tvGenres||[]) : (_movieGenres||[]);
+  sec.innerHTML = `
+    <div class="grid-wrap">
+      <h2 style="margin-bottom:14px">🧭 Utforska trailers</h2>
+      <div style="display:flex;gap:6px;margin-bottom:12px">
+        <button class="btn-fav" id="explore-type-movie" onclick="setExploreMediaType('movie')" style="${_exploreState.mediaType==='movie'?"background:var(--accent);color:#fff":""}">🎬 Filmer</button>
+        <button class="btn-fav" id="explore-type-tv" onclick="setExploreMediaType('tv')" style="${_exploreState.mediaType==='tv'?"background:var(--accent);color:#fff":""}">📺 Serier</button>
+      </div>
+      <div class="filter-bar" style="flex-wrap:wrap;gap:8px">
+        <div style="display:flex;gap:6px;flex-wrap:wrap" id="explore-category-tabs">
+          ${categories.map(([key,label]) => `
+            <button class="btn-fav explore-cat-btn" data-cat="${key}" onclick="setExploreCategory('${key}')" style="${_exploreState.category===key?"background:var(--accent);color:#fff":""}">${label}</button>
+          `).join("")}
+        </div>
+        <select class="filter-select" id="explore-genre" onchange="setExploreGenre(this.value)">
+          <option value="">Alla genrer</option>
+          ${genres.map(g => `<option value="${g.id}" ${String(_exploreState.genre)===String(g.id)?"selected":""}>${esc(g.name)}</option>`).join("")}
+        </select>
+        <select class="filter-select" id="explore-year" onchange="setExploreYear(this.value)">
+          <option value="">Alla år</option>
+          ${Array.from({length: currentYear-1919}, (_,i) => currentYear-i).map(y => `<option value="${y}" ${String(_exploreState.year)===String(y)?"selected":""}>${y}</option>`).join("")}
+        </select>
+      </div>
+      <div class="media-grid" id="explore-grid">
+        <div class="spinner-wrap"><div class="spinner"></div></div>
+      </div>
+      <div style="text-align:center;margin-top:20px;display:flex;align-items:center;justify-content:center;gap:8px" id="explore-pagination"></div>
+    </div>`;
+}
+
+async function setExploreMediaType(type) {
+  if (_exploreState.mediaType === type) return;
+  _exploreState.mediaType = type;
+  _exploreState.category = "popular";
+  _exploreState.genre = "";
+  _exploreState.year = "";
+  _exploreState.page = 1;
+  const sec = document.getElementById("sec-explore");
+  await ensureExploreGenres();
+  renderExploreShell(sec);
+  loadExploreResults();
+}
+
+function setExploreCategory(cat) {
+  _exploreState.category = cat;
+  _exploreState.page = 1;
+  document.querySelectorAll(".explore-cat-btn").forEach(b => {
+    b.style.background = b.getAttribute("data-cat") === cat ? "var(--accent)" : "";
+    b.style.color = b.getAttribute("data-cat") === cat ? "#fff" : "";
+  });
+  loadExploreResults();
+}
+function setExploreGenre(genre) { _exploreState.genre = genre; _exploreState.page = 1; loadExploreResults(); }
+function setExploreYear(year) { _exploreState.year = year; _exploreState.page = 1; loadExploreResults(); }
+function setExplorePage(page) { if (page < 1) return; _exploreState.page = page; loadExploreResults(); document.getElementById("sec-explore")?.scrollIntoView({block:"start"}); }
+
+async function loadExploreResults() {
+  const grid = document.getElementById("explore-grid");
+  const pagination = document.getElementById("explore-pagination");
+  if (!grid) return;
+  grid.innerHTML = `<div class="spinner-wrap"><div class="spinner"></div></div>`;
+  try {
+    const endpoint = _exploreState.mediaType === "tv" ? "/explore/tvshows" : "/explore/movies";
+    const params = new URLSearchParams({ category: _exploreState.category, page: _exploreState.page });
+    if (_exploreState.genre) params.set("genre", _exploreState.genre);
+    if (_exploreState.year) params.set("year", _exploreState.year);
+    const data = await API.get(endpoint + "?" + params.toString());
+    grid.innerHTML = data.items.length
+      ? data.items.map(item => buildExploreCard(item, _exploreState.mediaType)).join("")
+      : `<p style="color:var(--muted)">Inga träffar med det här filtret</p>`;
+    if (pagination) {
+      const totalPages = Math.min(data.totalPages || 1, 500); // TMDB itself caps at 500 pages
+      pagination.innerHTML = `
+        <button class="btn-fav" ${_exploreState.page<=1?"disabled":""} onclick="setExplorePage(${_exploreState.page-1})">‹ Föregående</button>
+        <span style="color:var(--muted);font-size:13px">Sida ${data.page} av ${totalPages}</span>
+        <button class="btn-fav" ${_exploreState.page>=totalPages?"disabled":""} onclick="setExplorePage(${_exploreState.page+1})">Nästa ›</button>`;
+    }
+  } catch(e) {
+    grid.innerHTML = `<p style="color:var(--danger)">Fel: ${esc(e.message)}</p>`;
+  }
+}
+
+function buildExploreCard(item, mediaType) {
+  const clickFn = item.owned
+    ? (mediaType === "tv" ? `openShowDetail('${item.id}')` : `openDetail('${item.id}')`)
+    : `openTmdbDetail(${item.tmdb_id}, "${mediaType}")`;
+  return `<div class="mcard" onclick='${clickFn}'>
+    <div style="position:relative">
+      ${item.poster_url
+        ? `<img class="mcard-poster" src="${item.poster_url}" alt="" loading="lazy">`
+        : `<div class="mcard-poster-ph"><span>${mediaType==="tv"?"📺":"🎬"}</span><span>${esc((item.title||"").slice(0,14))}</span></div>`}
+      <div class="mcard-overlay"><span class="mcard-play">▶</span></div>
+      ${item.owned ? `<div style="position:absolute;top:6px;right:6px;background:#2ecc71;color:#fff;font-size:10px;padding:2px 6px;border-radius:4px;font-weight:600">I biblioteket</div>` : ""}
+    </div>
+    <div class="mcard-info">
+      <div class="mcard-title">${esc(item.title||"")}</div>
+      <div class="mcard-meta">${item.rating ? "⭐ "+item.rating.toFixed(1)+" · " : ""}${item.year||""}</div>
+    </div>
+  </div>`;
 }
 
 function clientSlugify(s) {
@@ -897,7 +1091,7 @@ async function openCollection(collectionId, fromRouter) {
     <div class="detail-page">
       <div class="show-hero" ${collection.backdrop_url ? `style="background-image:url('${collection.backdrop_url}')"` : ""}>
         <div class="show-hero-overlay"></div>
-        <button class="detail-back" onclick="switchSection('collections')">← Samlingar</button>
+        <button class="detail-back" onclick="history.back()">← Tillbaka</button>
         <div class="show-hero-content">
           <div class="detail-poster-col">
             ${collection.poster_url ? `<img class="detail-poster" src="${collection.poster_url}" alt="">` : `<div class="detail-poster-ph">🎬</div>`}
@@ -1032,8 +1226,8 @@ async function openEpisodeDetail(episodeId, fromRouter) {
 
     sec.innerHTML = `
       <div class="detail-page">
-        <div class="person-hero">
-          <button class="detail-back" onclick="openSeason('${showId}', ${seasonNum})">← ${esc(showTitle)}</button>
+        <div class="person-hero" style="padding-top:20px">
+          <button onclick="history.back()" style="background:var(--card2, #1a1a28);color:var(--text, #fff);border:1px solid var(--border, #333);padding:8px 16px;border-radius:8px;cursor:pointer;font-size:14px;display:inline-block;margin-bottom:20px">← Tillbaka</button>
           <div class="person-info">
             ${ep.still_url
               ? `<img class="person-photo" src="${ep.still_url}" alt="" style="width:220px;aspect-ratio:16/9;border-radius:8px;object-fit:cover">`
@@ -1493,7 +1687,7 @@ function buildHero(item) {
     <div class="hero-bg" ${bg}></div>
     <div class="hero-content">
       <div class="hero-badge">${navigator.language.startsWith("sv") ? "StreamVault rekommenderar" : navigator.language.startsWith("no") ? "StreamVault anbefaler" : navigator.language.startsWith("da") ? "StreamVault anbefaler" : navigator.language.startsWith("fi") ? "StreamVault suosittelee" : navigator.language.startsWith("de") ? "StreamVault empfiehlt" : "StreamVault recommends"}</div>
-      <div class="hero-title">${esc(item.title)}</div>
+      <div class="hero-title" style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;text-overflow:ellipsis">${esc(item.title)}</div>
       <div class="hero-meta">
         ${item.rating ? `<span class="hero-rating">⭐ ${parseFloat(item.rating).toFixed(1)}</span>` : ""}
         ${item.year ? `<span>${item.year}</span>` : ""}
@@ -1656,7 +1850,7 @@ async function openSeason(showId, seasonNum, fromRouter) {
       <div class="detail-page">
         <div class="show-hero" ${show.backdrop_url ? `style="background-image:url('${show.backdrop_url}')"` : ""}>
           <div class="show-hero-overlay"></div>
-          <button class="detail-back" onclick="openShowDetail('${showId}')">← ${esc(show.title)}</button>
+          <button class="detail-back" onclick="history.back()">← Tillbaka</button>
           <div class="show-hero-content">
             <div class="detail-poster-col">
               ${seasonData.poster_url ? `<img class="detail-poster" src="${seasonData.poster_url}" alt="">` : `<div class="detail-poster-ph">📺</div>`}
@@ -1686,7 +1880,8 @@ async function openSeason(showId, seasonNum, fromRouter) {
   }
 }
 
-async function openTmdbDetail(tmdbId) {
+async function openTmdbDetail(tmdbId, kind) {
+  kind = kind === "tv" ? "tv" : "movie";
   document.querySelectorAll(".section").forEach(s => s.classList.remove("active"));
   const sec = document.getElementById("sec-detail") || (() => {
     const s = document.createElement("section");
@@ -1697,10 +1892,11 @@ async function openTmdbDetail(tmdbId) {
   sec.classList.add("active");
   sec.innerHTML = `<div class="spinner-wrap" style="height:60vh"><div class="spinner"></div></div>`;
   try {
-    const item = await API.get("/tmdb/movie/" + tmdbId);
+    const item = await API.get(`/tmdb/${kind}/${tmdbId}`);
     const runtime = item.runtime ? `${Math.floor(item.runtime/60)}h ${item.runtime%60}m` : "";
     const genresHtml = (item.genres||[]).map(g => `<span class="detail-genre">${esc(g)}</span>`).join("");
-    const directors = (item.crew||[]).filter(c => c.job === "Director").map(c => esc(c.name)).join(", ");
+    const directors = (item.crew||[]).map(c => esc(c.name)).join(", ");
+    const directorLabel = kind === "tv" ? "Skapad av" : "🎬";
     const castHtml = (item.cast||[]).length ? `
       <div class="detail-section">
         <h3 class="detail-section-title">Skådespelare</h3>
@@ -1722,7 +1918,7 @@ async function openTmdbDetail(tmdbId) {
         <div class="detail-content">
           <div class="detail-main">
             <div class="detail-poster-col">
-              ${item.poster_url ? `<img class="detail-poster" src="${item.poster_url}" alt="">` : `<div class="detail-poster-ph">🎬</div>`}
+              ${item.poster_url ? `<img class="detail-poster" src="${item.poster_url}" alt="">` : `<div class="detail-poster-ph">${kind === "tv" ? "📺" : "🎬"}</div>`}
             </div>
             <div class="detail-info-col">
               <h1 class="detail-page-title">${esc(item.title)}</h1>
@@ -1730,12 +1926,12 @@ async function openTmdbDetail(tmdbId) {
                 ${item.rating ? `<span class="detail-rating">⭐ ${parseFloat(item.rating).toFixed(1)}</span>` : ""}
                 ${item.year ? `<span class="detail-meta-item">${item.year}</span>` : ""}
                 ${runtime ? `<span class="detail-meta-item">${runtime}</span>` : ""}
-                ${directors ? `<span class="detail-meta-item">🎬 ${directors}</span>` : ""}
+                ${directors ? `<span class="detail-meta-item">${directorLabel} ${directors}</span>` : ""}
               </div>
               ${genresHtml ? `<div class="detail-genres">${genresHtml}</div>` : ""}
               ${item.overview ? `<p class="detail-page-overview">${esc(item.overview)}</p>` : ""}
               <div class="detail-actions">
-                <button class="btn-fav" id="trailer-btn-tmdb-${tmdbId}" onclick='toggleTrailerByTmdb(${tmdbId}, "movie")'>▶ Se trailer</button>
+                <button class="btn-fav" id="trailer-btn-tmdb-${tmdbId}" onclick='toggleTrailerByTmdb(${tmdbId}, "${kind}")'>▶ Se trailer</button>
               </div>
               <div class="wtw-section">
                 <div class="wtw-title">Var kan du se den?</div>
@@ -1746,7 +1942,7 @@ async function openTmdbDetail(tmdbId) {
           ${castHtml}
         </div>
       </div>`;
-    API.get("/watch-providers/" + tmdbId).then(data => {
+    API.get(`/watch-providers/${tmdbId}?kind=${kind}`).then(data => {
       const el = document.getElementById("wtw-tmdb-" + tmdbId);
       if (!el) return;
       const flat = new Set((data.flatrate||[]).map(p => p.provider_name));
@@ -1906,12 +2102,11 @@ async function openDetail(id, fromRouter) {
 }
 
 function closeDetail() {
-  const sec = document.getElementById("sec-detail");
-  if (sec) sec.classList.remove("active");
-  // Return to previous section - home as default
-  document.getElementById("sec-home")?.classList.add("active");
-  document.querySelectorAll(".sb-item").forEach(b => b.classList.remove("active"));
-  navigateToPath("/", "StreamVault");
+  // Goes back one REAL step in the browsing history (whatever library/search/collection the
+  // person actually came from) instead of always landing on home regardless of where they
+  // started. Works because every "open X" action already pushes a proper history entry —
+  // this just uses the same mechanism the browser's own back button already uses correctly.
+  history.back();
 }
 
 
@@ -1927,8 +2122,8 @@ async function openPersonDetail(tmdbPersonId, fromRouter) {
     const notLib = data.credits.filter(c => !c.in_library);
     sec.innerHTML = `
       <div class="detail-page">
-        <div class="person-hero">
-          <button class="detail-back" onclick="closeDetail()">← Tillbaka</button>
+        <div class="person-hero" style="padding-top:20px">
+          <button onclick="history.back()" style="background:var(--card2, #1a1a28);color:var(--text, #fff);border:1px solid var(--border, #333);padding:8px 16px;border-radius:8px;cursor:pointer;font-size:14px;display:inline-block;margin-bottom:20px">← Tillbaka</button>
           <div class="person-info">
             ${data.profile_url ? `<img class="person-photo" src="${data.profile_url}" alt="">` : `<div class="person-photo-ph">👤</div>`}
             <div>
@@ -3196,6 +3391,160 @@ async function openSubtitles(mediaId, title) {
 
 // Admin-only: shows recent subtitle-cache log entries (successes, warnings, failures)
 // so it's easy to see what went wrong, for which file, and when.
+// Server-wide log viewer — everything (all console output + every API request), unlike the
+// subtitle-specific log above which stays focused on just subtitle events. Filters via ?q=
+// server-side so filtering a large buffer doesn't have to happen in the browser.
+async function checkDependencyUpdates() {
+  const el = document.getElementById("dependency-results");
+  if (!el) return;
+  el.innerHTML = "<div style='color:var(--muted);font-size:13px'>⏳ Söker efter uppdateringar (kan ta en stund)...</div>";
+  try {
+    const data = await API.get("/admin/dependency-check");
+    window._lastDependencyCheck = data;
+    let html = "";
+
+    if (data.nodeUpdate) {
+      html += `
+        <div style="background:var(--card2);border:1px solid #e0a030;border-radius:8px;padding:12px 14px;margin-bottom:14px">
+          <div style="font-weight:600;margin-bottom:4px">⚠️ Ny Node.js-version tillgänglig</div>
+          <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Du kör v${esc(data.nodeUpdate.current)} — senaste LTS är v${esc(data.nodeUpdate.latest)} (${esc(data.nodeUpdate.ltsName)}). Installeras aldrig automatiskt.</div>
+          <div style="font-size:12px;line-height:1.6">
+            <b>Så uppdaterar du manuellt:</b><br>
+            1. Stoppa StreamVault-tjänsten (<code>nssm stop StreamVault</code> eller motsvarande)<br>
+            2. Ladda ner v${esc(data.nodeUpdate.latest)} LTS från <a href="https://nodejs.org" target="_blank" style="color:var(--accent)">nodejs.org</a><br>
+            3. Installera (skriver över den gamla versionen)<br>
+            4. Starta tjänsten igen
+          </div>
+        </div>`;
+    } else {
+      html += `<div style="font-size:12px;color:var(--muted);margin-bottom:14px">✓ Node.js är redan på senaste LTS-versionen</div>`;
+    }
+
+    if (!data.packages.length) {
+      html += `<div style="font-size:13px;color:var(--muted)">✓ Alla bibliotek är redan uppdaterade.</div>`;
+    } else {
+      html += `<div style="font-size:13px;font-weight:500;margin-bottom:8px">${data.packages.length} bibliotek har nyare versioner:</div>`;
+      html += `<div style="display:flex;flex-direction:column;gap:6px;margin-bottom:12px">`;
+      html += data.packages.map(p => `
+        <label style="display:flex;align-items:center;gap:10px;background:var(--card2);border-radius:8px;padding:8px 12px;font-size:13px;cursor:pointer">
+          <input type="checkbox" class="dep-pkg-checkbox" value="${esc(p.name)}">
+          <span style="flex:1">${esc(p.name)}</span>
+          <span style="color:var(--muted)">${esc(p.current)} → ${esc(p.latest)}</span>
+          ${p.majorUpdate ? `<span style="color:#e0a030;font-size:11px" title="Huvudversion — kan innehålla brytande ändringar, kolla changelog innan du uppdaterar">⚠️ stor uppdatering</span>` : `<span style="color:#2ecc71;font-size:11px">liten uppdatering</span>`}
+        </label>`).join("");
+      html += `</div>`;
+      html += `<button class="btn-fav" onclick="installSelectedDependencies()">Installera valda</button>`;
+    }
+
+    el.innerHTML = html;
+  } catch(e) {
+    el.innerHTML = `<div style="color:var(--danger);font-size:13px">Fel: ${esc(e.message)}</div>`;
+  }
+}
+
+async function installSelectedDependencies() {
+  const checked = [...document.querySelectorAll(".dep-pkg-checkbox:checked")].map(c => c.value);
+  if (!checked.length) { toast("Välj minst ett bibliotek att installera", "info"); return; }
+  if (!confirm(`Installera senaste version av: ${checked.join(", ")}?\n\nServern måste startas om manuellt efteråt för att uppdateringen ska börja gälla.`)) return;
+  const el = document.getElementById("dependency-results");
+  el.innerHTML = "<div style='color:var(--muted);font-size:13px'>⏳ Installerar... (kan ta en minut per bibliotek)</div>";
+  try {
+    const data = await API.post("/admin/dependency-install", { packages: checked });
+    const failed = data.results.filter(r => !r.ok);
+    if (failed.length) {
+      toast(`${data.results.length - failed.length} lyckades, ${failed.length} misslyckades`, "error");
+    } else {
+      toast("✓ Installerat! Starta om servern för att uppdateringen ska gälla.", "success");
+    }
+    checkDependencyUpdates();
+  } catch(e) {
+    toast("Fel: " + e.message, "error");
+    checkDependencyUpdates();
+  }
+}
+
+async function openServerLog(query) {
+  document.getElementById("server-log-overlay")?.remove();
+  const overlay = document.createElement("div");
+  overlay.id = "server-log-overlay";
+  overlay.style.cssText = "position:fixed;inset:0;z-index:10002;background:rgba(0,0,0,0.85);display:flex;align-items:center;justify-content:center;padding:20px";
+
+  const modal = document.createElement("div");
+  modal.style.cssText = "background:var(--surface);border:1px solid var(--border);border-radius:14px;width:100%;max-width:900px;max-height:85vh;display:flex;flex-direction:column;overflow:hidden";
+
+  const header = document.createElement("div");
+  header.style.cssText = "padding:16px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;flex-wrap:wrap";
+  header.innerHTML = "<span style='font-size:18px'>🖥️</span><div style='flex:1;min-width:140px'><b style='font-size:15px'>Systemlogg</b><div id='server-log-subtitle' style='font-size:12px;color:var(--muted)'>Allt servern loggar — request, fel, händelser</div></div>";
+  const searchInput = document.createElement("input");
+  searchInput.type = "text";
+  searchInput.placeholder = "Filtrera (t.ex. HTTP, error, /trailer)";
+  searchInput.value = query || "";
+  searchInput.style.cssText = "background:var(--card2);border:1px solid var(--border);color:var(--text);font-size:12px;padding:6px 10px;border-radius:8px;width:220px";
+  searchInput.onkeydown = function(e) { if (e.key === "Enter") openServerLog(searchInput.value); };
+  header.appendChild(searchInput);
+  const refreshBtn = document.createElement("button");
+  refreshBtn.textContent = "↻";
+  refreshBtn.title = "Uppdatera";
+  refreshBtn.style.cssText = "background:var(--card2);border:1px solid var(--border);color:var(--text);font-size:14px;padding:6px 10px;border-radius:8px;cursor:pointer";
+  refreshBtn.onclick = function() { openServerLog(searchInput.value); };
+  header.appendChild(refreshBtn);
+  const downloadBtn = document.createElement("button");
+  downloadBtn.textContent = "⬇";
+  downloadBtn.title = "Ladda ner bufflad logg som textfil";
+  downloadBtn.style.cssText = "background:var(--card2);border:1px solid var(--border);color:var(--text);font-size:14px;padding:6px 10px;border-radius:8px;cursor:pointer";
+  downloadBtn.onclick = async function() {
+    try {
+      const data = await API.get("/admin/server-log?limit=5000");
+      const blob = new Blob([(data.lines || []).join("\n")], { type: "text/plain" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "streamvault-log-" + new Date().toISOString().slice(0, 10) + ".txt";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch(e) {
+      toast("Kunde inte ladda ner logg: " + e.message, "error");
+    }
+  };
+  header.appendChild(downloadBtn);
+  const closeBtn = document.createElement("button");
+  closeBtn.textContent = "✕";
+  closeBtn.style.cssText = "background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer";
+  closeBtn.onclick = function() { overlay.remove(); };
+  header.appendChild(closeBtn);
+  modal.appendChild(header);
+
+  const contentEl = document.createElement("div");
+  contentEl.style.cssText = "flex:1;overflow-y:auto;padding:12px;font-family:monospace;font-size:11px;white-space:pre-wrap;line-height:1.5";
+  contentEl.innerHTML = "<div style='text-align:center;padding:20px;color:var(--muted)'>⏳ Hämtar logg...</div>";
+  modal.appendChild(contentEl);
+
+  overlay.appendChild(modal);
+  overlay.addEventListener("click", function(e) { if (e.target === overlay) overlay.remove(); });
+  document.body.appendChild(overlay);
+
+  try {
+    var url = "/admin/server-log" + (query ? "?q=" + encodeURIComponent(query) : "");
+    var data = await API.get(url);
+    var lines = data.lines || [];
+    document.getElementById("server-log-subtitle").textContent = `${lines.length} av ${data.totalBuffered} bufflade rader` + (query ? ` — filtrerat på "${query}"` : "");
+    if (!lines.length) {
+      contentEl.innerHTML = "<div style='text-align:center;padding:20px;color:var(--muted)'>Inga loggrader matchade.</div>";
+      return;
+    }
+    contentEl.innerHTML = lines.map(function(l) {
+      var isDeprecation = l.includes("DeprecationWarning") || l.includes("[DEP0");
+      var color = isDeprecation ? "var(--muted)" : l.includes("[ERROR]") ? "var(--danger)" : l.includes("[WARN]") ? "#e0a030" : "var(--text)";
+      return `<div style="color:${color};border-bottom:1px solid var(--border);padding:3px 0">${esc(l)}</div>`;
+    }).join("");
+    contentEl.scrollTop = contentEl.scrollHeight;
+  } catch(e) {
+    contentEl.innerHTML = "<div style='text-align:center;padding:20px;color:var(--danger)'>Kunde inte hämta logg: " + esc(e.message) + "</div>";
+  }
+}
+
 async function openSubtitleLog(onlyErrors) {
   document.getElementById("subtitle-log-overlay")?.remove();
   const overlay = document.createElement("div");
@@ -4713,6 +5062,23 @@ async function loadSettings() {
           <input class="s-input" type="password" id="s-spotify-secret" value="${esc(cfg.spotify_client_secret || '')}" placeholder="Ej angiven" autocomplete="off"/>
         </div>
         <div style="margin-top:12px"><button class="s-btn primary" onclick="saveApiKeys()">Spara nycklar</button></div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-section-title">Serveruppdateringar (bibliotek)</div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:10px">
+          Söker efter nyare versioner av de bibliotek StreamVault bygger på, plus om det finns en nyare Node.js-version (installeras aldrig automatiskt — bara en påminnelse med en liten guide).
+        </div>
+        <button class="btn-fav" onclick="checkDependencyUpdates()">🔍 Sök efter uppdateringar</button>
+        <div id="dependency-results" style="margin-top:14px"></div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-section-title">Systemlogg</div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:10px">
+          Allt servern loggar — varje API-anrop (inklusive vad appen faktiskt begär), alla [SCAN]/[DASH]/[CROPDETECT]-rader, fel och varningar. Rullas om dagligen, sparas i 3 dagar.
+        </div>
+        <button class="btn-fav" onclick="openServerLog()">🖥️ Visa systemlogg</button>
       </div>
 
       <div class="settings-section">
