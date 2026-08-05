@@ -3912,6 +3912,24 @@ app.get("/api/media/:id/trailer-stream", requireAuth, async (req, res) => {
   }
 });
 
+// Same as /api/media/:id/trailer-stream, but for a title that isn't owned at all (e.g. from
+// Utforska or search) — no local media entry to look up a tmdb_id from, so kind+tmdb_id are
+// passed directly instead. Same toggle-gating and reasoning applies (see the owned version).
+app.get("/api/tmdb/trailer-stream/:kind/:tmdb_id", requireAuth, async (req, res) => {
+  if (!config.trailer_stream_enabled) {
+    return res.status(403).json({ url: null, error: "Funktionen är avstängd i Inställningar" });
+  }
+  try {
+    const kind = req.params.kind === "tv" ? "tv" : "movie";
+    const trailer = await fetchTmdbTrailer(req.params.tmdb_id, kind);
+    if (!trailer.key) return res.json({ url: null });
+    const url = await resolveYoutubeStreamUrl(trailer.key);
+    res.json(url ? { url } : { url: null, error: "Kunde inte lösa stream" });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get("/api/media/:id/related", requireAuth, async (req, res) => {
   try {
     const item = await dbFindOne(db.media, { _id: req.params.id });

@@ -500,7 +500,7 @@ async function loadExploreResults() {
 
 function buildExploreCard(item, mediaType) {
   const clickFn = item.owned
-    ? (mediaType === "tv" ? `openShowDetail('${item.id}')` : `openDetail('${item.id}')`)
+    ? (mediaType === "tv" ? `openShowDetail("${item.id}")` : `openDetail("${item.id}")`)
     : `openTmdbDetail(${item.tmdb_id}, "${mediaType}")`;
   return `<div class="mcard" onclick='${clickFn}'>
     <div style="position:relative">
