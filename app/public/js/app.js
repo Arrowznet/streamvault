@@ -19,8 +19,15 @@ window.addEventListener("DOMContentLoaded", async () => {
   if (token) {
     const user = JSON.parse(localStorage.getItem("sv_user") || "null");
     if (user) {
-      currentUser = user; showApp();
-      API.get("/public-config").then(c => { window._serverName = c.server_name || "StreamVault"; window._subtitleSearchLanguages = c.subtitleSearchLanguages || []; window._serverDefaultLanguage = c.defaultLanguage || null; }).catch(()=>{});
+      currentUser = user;
+      try {
+        const c = await API.get("/public-config");
+        window._serverName = c.server_name || "StreamVault";
+        window._subtitleSearchLanguages = c.subtitleSearchLanguages || [];
+        window._serverDefaultLanguage = c.defaultLanguage || null;
+        window._iptvEnabled = !!c.iptvEnabled;
+      } catch(e) {}
+      showApp();
       // The localStorage copy can go stale (e.g. after changing language/password on another
       // tab, or if a previous save didn't update it) — refresh from the server in the
       // background so a reload never silently reverts a setting back to an old value.
@@ -78,6 +85,7 @@ async function login() {
       window._serverName = cfg.server_name || "StreamVault";
       window._subtitleSearchLanguages = cfg.subtitleSearchLanguages || [];
       window._serverDefaultLanguage = cfg.defaultLanguage || null;
+      window._iptvEnabled = !!cfg.iptvEnabled;
       console.log("[LOGIN] Server default language:", window._serverDefaultLanguage);
     } catch(e) { console.log("[LOGIN] Could not fetch public config:", e.message); }
     showApp();
@@ -186,6 +194,19 @@ async function resolveAndRenderPath(path) {
   }
   if (parts[0] === "utforska-filmer") return openExploreMovies(true);
   if (parts[0] === "utforska-serier") return openExploreTV(true);
+  if (parts[0] === "iptv") {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("playlist")) {
+      const playlistId = params.get("playlist"), name = decodeURIComponent(params.get("name") || "");
+      if (params.get("country")) return openIptvPlaylistCountry(playlistId, decodeURIComponent(params.get("country")), params.get("isCountry") === "true", name, true);
+      return openIptvPlaylist(playlistId, name, true);
+    }
+    if (params.get("playlists")) return loadIptvPlaylists(true);
+    if (params.get("group")) return openIptvGroup(decodeURIComponent(params.get("group")), params.get("type") || "live", true);
+    if (params.get("country")) return openIptvSubgroups(decodeURIComponent(params.get("country")), params.get("type") || "live", true);
+    if (params.get("type")) return loadIptvGroups(params.get("type"), true);
+    return loadIptv(true);
+  }
   // Reserved names (main sidebar sections) always win — a library that happens to share one
   // of these exact names just won't get its own short URL, and stays reachable via the
   // sidebar as usual. Checked before the library lookup below for exactly that reason.
@@ -290,6 +311,10 @@ async function loadSidebarLibraries() {
       <div class="sb-item" id="sb-explore-tv" onclick="openExploreTV()">
         <span class="sb-icon">📺</span>
         <span>Utforska Serietrailers</span>
+      </div>
+      <div class="sb-item" id="sb-iptv" onclick="loadIptv()" style="${window._iptvEnabled && (!currentUser?.library_ids?.length || currentUser.library_ids.includes("iptv")) ? "" : "display:none"}">
+        <span class="sb-icon">📡</span>
+        <span>IPTV</span>
       </div>` +
     musicLibs.map(lib => `
       <div class="sb-item" id="sb-lib-${lib.id}" onclick="switchToLibrary('${lib.id}', '${lib.name.replace(/'/g, "\'")}', '${lib.type}')">
@@ -335,6 +360,22 @@ function exitSettingsSidebarMode() {
   switchSection("home");
 }
 
+// Lightweight housekeeping ONLY (deactivate other sections, create/activate #sec-iptv,
+// highlight the sidebar entry) — deliberately does NOT go through switchSection(), since
+// that function's own dispatch logic calls loadIptv() for name==="iptv", which would recurse
+// straight back into whichever IPTV function called this in the first place.
+function activateIptvSection() {
+  document.querySelectorAll(".section").forEach(s => s.classList.remove("active"));
+  document.querySelectorAll(".sb-item").forEach(b => b.classList.remove("active"));
+  if (!document.getElementById("sec-iptv")) {
+    const s = document.createElement("section");
+    s.id = "sec-iptv"; s.className = "section";
+    document.getElementById("appMain")?.appendChild(s);
+  }
+  document.getElementById("sec-iptv")?.classList.add("active");
+  document.getElementById("sb-iptv")?.classList.add("active");
+}
+
 function switchSection(name, fromRouter) {
   document.querySelectorAll(".section").forEach(s => s.classList.remove("active"));
   document.querySelectorAll(".sb-item").forEach(b => b.classList.remove("active"));
@@ -342,14 +383,14 @@ function switchSection(name, fromRouter) {
   if (name !== "settings" && _scanProgressInterval) { clearInterval(_scanProgressInterval); _scanProgressInterval = null; }
   if (name !== "settings" && _inSettingsSidebarMode) { _inSettingsSidebarMode = false; loadSidebarLibraries(); }
   if (!fromRouter) {
-    const paths = { home: "/", settings: "/admin/settings", movies: "/filmer", tvshows: "/serier", collections: "/samlingar", search: "/sok", music: "/musik" };
+    const paths = { home: "/", settings: "/admin/settings", movies: "/filmer", tvshows: "/serier", collections: "/samlingar", search: "/sok", music: "/musik", iptv: "/iptv" };
     if (paths[name]) navigateToPath(paths[name], name === "home" ? "StreamVault" : undefined);
   }
-  // "explore" doesn't exist in the static HTML (added after the fact) — create it once,
-  // same self-creating pattern already used for sec-detail/sec-library.
-  if (name === "explore" && !document.getElementById("sec-explore")) {
+  // "explore"/"iptv" don't exist in the static HTML (added after the fact) — create them
+  // once, same self-creating pattern already used for sec-detail/sec-library.
+  if ((name === "explore" || name === "iptv") && !document.getElementById("sec-" + name)) {
     const s = document.createElement("section");
-    s.id = "sec-explore"; s.className = "section";
+    s.id = "sec-" + name; s.className = "section";
     document.getElementById("appMain")?.appendChild(s);
   }
   const sec = document.getElementById("sec-" + name);
@@ -364,8 +405,402 @@ function switchSection(name, fromRouter) {
   else if (name === "settings") { if (!_inSettingsSidebarMode) enterSettingsSidebarMode(); loadSettings(); }
   else if (name === "collections") loadCollections();
   else if (name === "explore") loadExplore();
+  else if (name === "iptv") loadIptv();
   const userMenu = document.getElementById("userMenu");
   if (userMenu) userMenu.style.display = "none";
+}
+
+// ── IPTV ──────────────────────────────────────────────────────────────────────
+async function refreshIptvChannels() {
+  const btn = document.getElementById("iptv-refresh-btn");
+  if (btn) { btn.disabled = true; btn.textContent = "⏳ Uppdaterar..."; }
+  try {
+    const data = await API.post("/iptv/refresh", {});
+    toast(`✓ ${data.count} kanaler uppdaterade`, "success");
+    loadIptv(true);
+  } catch(e) {
+    toast("Fel: " + e.message, "error");
+    if (btn) { btn.disabled = false; btn.textContent = "🔄 Uppdatera kanallistan"; }
+  }
+}
+
+// Rough country-name → ISO 3166-1 alpha-2 code mapping for IPTV group-titles, which are
+// usually just plain country names (sometimes with " HD"/"4K" suffixes, hence the
+// fuzzy/partial matching below). Used to build a real flag IMAGE (via flagcdn.com) rather
+// than an emoji flag — emoji flags render poorly or not at all on many Windows browser/font
+// combinations, while flag images work consistently everywhere.
+const COUNTRY_CODES = {
+  "sweden": "se", "sverige": "se", "norway": "no", "norge": "no", "denmark": "dk", "danmark": "dk",
+  "finland": "fi", "iceland": "is", "uk": "gb", "united kingdom": "gb", "england": "gb", "britain": "gb",
+  "usa": "us", "us": "us", "united states": "us", "america": "us", "canada": "ca", "germany": "de",
+  "deutschland": "de", "france": "fr", "spain": "es", "espana": "es", "italy": "it", "italia": "it",
+  "netherlands": "nl", "holland": "nl", "belgium": "be", "portugal": "pt", "poland": "pl", "polska": "pl",
+  "russia": "ru", "turkey": "tr", "turkiye": "tr", "greece": "gr", "austria": "at", "switzerland": "ch",
+  "ireland": "ie", "albania": "al", "arabic": "sa", "saudi": "sa", "uae": "ae", "emirates": "ae",
+  "india": "in", "pakistan": "pk", "brazil": "br", "brasil": "br", "mexico": "mx", "australia": "au",
+  "romania": "ro", "bulgaria": "bg", "croatia": "hr", "serbia": "rs", "hungary": "hu", "czech": "cz",
+  "slovakia": "sk", "slovenia": "si", "lithuania": "lt", "latvia": "lv", "estonia": "ee", "ukraine": "ua",
+  "china": "cn", "japan": "jp", "korea": "kr", "thailand": "th", "philippines": "ph", "vietnam": "vn",
+  "indonesia": "id", "malaysia": "my", "israel": "il", "egypt": "eg", "morocco": "ma", "south africa": "za"
+};
+function flagImgForGroup(name) {
+  const clean = name.toLowerCase().replace(/\bhd\b|\b4k\b|\buhd\b|\bfhd\b/g, "").trim();
+  for (const [country, code] of Object.entries(COUNTRY_CODES)) {
+    if (clean === country || clean.includes(country)) {
+      return `<img src="https://flagcdn.com/w80/${code}.png" alt="" style="width:56px;height:auto;border-radius:3px;box-shadow:0 1px 4px rgba(0,0,0,0.4)">`;
+    }
+  }
+  return `<span style="font-size:44px">📺</span>`;
+}
+
+// Spotify-style "save to..." picker — works for either a single channel ({channelId}) or a
+// whole country/group ({country, isCountry}). Shows the person's existing playlists with
+// checkboxes (pre-checked if this channel/country is already in that list) plus a "create
+// new list" option, so adding to a brand new list works in one step without leaving the picker.
+async function openSaveToPlaylistPicker(target) {
+  document.getElementById("iptv-playlist-picker-overlay")?.remove();
+  const overlay = document.createElement("div");
+  overlay.id = "iptv-playlist-picker-overlay";
+  overlay.style.cssText = "position:fixed;inset:0;z-index:10004;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;padding:20px";
+  overlay.addEventListener("click", (e) => { if (e.target === overlay) overlay.remove(); });
+
+  const modal = document.createElement("div");
+  modal.style.cssText = "background:var(--surface);border:1px solid var(--border);border-radius:14px;width:100%;max-width:340px;max-height:70vh;display:flex;flex-direction:column;overflow:hidden";
+  modal.innerHTML = `
+    <div style="padding:14px 16px;border-bottom:1px solid var(--border);font-weight:600">Spara till spellista</div>
+    <div id="iptv-playlist-picker-list" style="flex:1;overflow-y:auto;padding:8px"><div class="spinner-wrap" style="height:80px"><div class="spinner"></div></div></div>
+    <div style="padding:10px 16px;border-top:1px solid var(--border);display:flex;gap:8px">
+      <input type="text" id="iptv-new-playlist-name" placeholder="Ny spellista..." class="s-input" style="flex:1;font-size:13px">
+      <button class="btn-fav" onclick="createIptvPlaylistFromPicker()">+ Skapa</button>
+    </div>`;
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+  window._iptvPickerTarget = target;
+
+  await reloadPlaylistPickerList();
+}
+
+async function reloadPlaylistPickerList() {
+  const listEl = document.getElementById("iptv-playlist-picker-list");
+  if (!listEl) return;
+  const target = window._iptvPickerTarget;
+  try {
+    const data = target.channelId
+      ? await API.get("/iptv/playlists/for-channel/" + target.channelId)
+      : await API.get("/iptv/playlists/for-country?country=" + encodeURIComponent(target.country) + "&isCountry=" + !!target.isCountry);
+    if (!data.playlists.length) {
+      listEl.innerHTML = `<div style="padding:16px;text-align:center;color:var(--muted);font-size:13px">Inga spellistor än — skapa en nedan.</div>`;
+      return;
+    }
+    listEl.innerHTML = data.playlists.map(p => `
+      <label style="display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:8px;cursor:pointer;font-size:14px" onmouseover="this.style.background='var(--card2)'" onmouseout="this.style.background='transparent'">
+        <input type="checkbox" ${p.contains ? "checked" : ""} onchange="onPlaylistPickerToggle('${p.id}', this.checked)" style="width:18px;height:18px;cursor:pointer">
+        <span>${esc(p.name)}</span>
+      </label>`).join("");
+  } catch(e) {
+    listEl.innerHTML = `<div style="padding:16px;color:var(--danger);font-size:13px">Fel: ${esc(e.message)}</div>`;
+  }
+}
+
+async function onPlaylistPickerToggle(playlistId, add) {
+  const target = window._iptvPickerTarget;
+  try {
+    if (target.channelId) {
+      await API.post(`/iptv/playlists/${playlistId}/toggle-channel`, { channelId: target.channelId, add });
+    } else {
+      await API.post(`/iptv/playlists/${playlistId}/toggle-country`, { country: target.country, isCountry: target.isCountry, add });
+    }
+    toast(add ? "✓ Tillagt" : "Borttaget", "success");
+  } catch(e) {
+    toast("Fel: " + e.message, "error");
+  }
+}
+
+async function createIptvPlaylistFromPicker() {
+  const input = document.getElementById("iptv-new-playlist-name");
+  const name = input?.value.trim();
+  if (!name) { toast("Ange ett namn", "info"); return; }
+  try {
+    await API.post("/iptv/playlists", { name });
+    input.value = "";
+    toast(`✓ "${name}" skapad`, "success");
+    await reloadPlaylistPickerList();
+  } catch(e) {
+    toast("Fel: " + e.message, "error");
+  }
+}
+
+async function loadIptv(fromRouter) {
+  activateIptvSection();
+  const sec = document.getElementById("sec-iptv");
+  if (!sec) return;
+  if (!fromRouter) navigateToPath("/iptv", "IPTV - StreamVault");
+  sec.innerHTML = `<div class="spinner-wrap"><div class="spinner"></div></div>`;
+  try {
+    const data = await API.get("/iptv/groups"); // default type=live, just used here to get typeCounts + check if anything's configured at all
+    const total = (data.typeCounts?.live || 0) + (data.typeCounts?.movie || 0) + (data.typeCounts?.series || 0);
+    if (!total) {
+      sec.innerHTML = `
+        <div class="grid-wrap">
+          <h2 style="margin-bottom:14px">📡 IPTV</h2>
+          <p style="color:var(--muted)">Inga kanaler tillagda än. ${currentUser?.role === "admin" ? `Gå till Inställningar → Server → IPTV och klistra in en M3U-spellista-adress.` : `Be en admin lägga till en spellista i Inställningar.`}</p>
+        </div>`;
+      return;
+    }
+    const tiles = [
+      { type: "live", icon: "📺", label: "LIVE TV", count: data.typeCounts.live },
+      { type: "movie", icon: "🎬", label: "FILMER", count: data.typeCounts.movie },
+      { type: "series", icon: "🎞️", label: "SERIER", count: data.typeCounts.series }
+    ].filter(t => t.count > 0); // don't show a tile for a type the playlist doesn't actually have
+    tiles.push({ type: "favorites", icon: "⭐", label: "FAVORITER", count: null });
+    sec.innerHTML = `
+      <div class="grid-wrap">
+        <button onclick="history.back()" style="background:var(--card2, #1a1a28);color:var(--text, #fff);border:1px solid var(--border, #333);padding:8px 16px;border-radius:8px;cursor:pointer;font-size:14px;display:inline-block;margin-bottom:14px">← Tillbaka</button>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;flex-wrap:wrap;gap:8px">
+          <h2 style="margin:0">📡 IPTV</h2>
+          ${currentUser?.role === "admin" ? `<button class="btn-fav" onclick="refreshIptvChannels()" id="iptv-refresh-btn">🔄 Uppdatera kanallistan</button>` : ""}
+        </div>
+        <div style="display:flex;gap:16px;flex-wrap:wrap">
+          ${tiles.map(t => `
+            <div onclick="${t.type === "favorites" ? "loadIptvPlaylists()" : `loadIptvGroups('${t.type}')`}" style="cursor:pointer;width:180px;height:180px;border-radius:12px;background:var(--card2);border:1px solid var(--border);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;transition:border-color .15s" onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor='var(--border)'">
+              <span style="font-size:44px">${t.icon}</span>
+              <span style="font-weight:700;letter-spacing:0.5px">${t.label}</span>
+              ${t.count !== null ? `<span style="color:var(--muted);font-size:12px">${t.count} st</span>` : ""}
+            </div>`).join("")}
+        </div>
+      </div>`;
+  } catch(e) {
+    sec.innerHTML = `<p style="color:var(--danger)">Fel: ${esc(e.message)}</p>`;
+  }
+}
+
+async function loadIptvGroups(type, fromRouter) {
+  activateIptvSection();
+  const sec = document.getElementById("sec-iptv");
+  if (!sec) return;
+  if (!fromRouter) navigateToPath("/iptv?type=" + type, "IPTV - StreamVault");
+  sec.innerHTML = `<div class="spinner-wrap"><div class="spinner"></div></div>`;
+  try {
+    const data = await API.get("/iptv/groups?type=" + type);
+    const typeLabel = { live: "Live TV", movie: "Filmer", series: "Serier" }[type];
+    sec.innerHTML = `
+      <div class="grid-wrap">
+        <button onclick="history.back()" style="background:var(--card2, #1a1a28);color:var(--text, #fff);border:1px solid var(--border, #333);padding:8px 16px;border-radius:8px;cursor:pointer;font-size:14px;display:inline-block;margin-bottom:14px">← Tillbaka</button>
+        <h2 style="margin-bottom:14px">${typeLabel}</h2>
+        <div class="media-grid">
+          ${data.groups.map(g => `
+            <div class="mcard" style="position:relative" onclick='${g.isCountry ? `openIptvSubgroups("${esc(g.name).replace(/"/g,"&quot;")}", "${type}")` : `openIptvGroup("${esc(g.name).replace(/"/g,"&quot;")}", "${type}")`}'>
+              ${type === "live" ? `<button onclick='event.stopPropagation(); openSaveToPlaylistPicker({country:"${esc(g.name).replace(/"/g,"&quot;")}", isCountry:${g.isCountry}})' title="Spara till..." style="position:absolute;top:8px;right:8px;width:32px;height:32px;border-radius:50%;background:${g.inAnyPlaylist ? "var(--accent)" : "rgba(0,0,0,0.6)"};border:none;color:#fff;font-size:16px;cursor:pointer;z-index:2;display:flex;align-items:center;justify-content:center">${g.inAnyPlaylist ? "⭐" : "💾"}</button>` : ""}
+              <div class="mcard-poster-ph" style="display:flex;align-items:center;justify-content:center">${type === "live" ? flagImgForGroup(g.name) : `<span style="font-size:44px">${type === "movie" ? "🎬" : "🎞️"}</span>`}</div>
+              <div class="mcard-info">
+                <div class="mcard-title">${esc(g.name)}</div>
+                <div class="mcard-meta">${g.count} ${type === "live" ? "kanaler" : "titlar"}</div>
+              </div>
+            </div>`).join("")}
+        </div>
+      </div>`;
+  } catch(e) {
+    sec.innerHTML = `<p style="color:var(--danger)">Fel: ${esc(e.message)}</p>`;
+  }
+}
+
+// Drills into a consolidated country card to show its original provider-specific
+// sub-categories (Documentary, Sports, LOCAL CBC, etc.) before finally listing channels.
+async function openIptvSubgroups(country, type, fromRouter) {
+  activateIptvSection();
+  const sec = document.getElementById("sec-iptv");
+  if (!sec) return;
+  if (!fromRouter) navigateToPath(`/iptv?type=${type}&country=${encodeURIComponent(country)}`, `${country} - StreamVault`);
+  sec.innerHTML = `<div class="spinner-wrap"><div class="spinner"></div></div>`;
+  try {
+    const data = await API.get("/iptv/subgroups?country=" + encodeURIComponent(country));
+    sec.innerHTML = `
+      <div class="grid-wrap">
+        <button onclick="history.back()" style="background:var(--card2, #1a1a28);color:var(--text, #fff);border:1px solid var(--border, #333);padding:8px 16px;border-radius:8px;cursor:pointer;font-size:14px;display:inline-block;margin-bottom:14px">← Tillbaka</button>
+        <h2 style="margin-bottom:14px">${esc(country)}</h2>
+        <div style="display:flex;flex-direction:column;gap:8px;max-width:500px">
+          ${data.groups.map(g => `
+            <div class="s-row" style="cursor:pointer" onclick="openIptvGroup('${esc(g.name).replace(/'/g,"\\'")}', '${type}')">
+              <span>${esc(g.name)}</span>
+              <span style="color:var(--muted);font-size:13px">${g.count} kanaler</span>
+            </div>`).join("")}
+        </div>
+      </div>`;
+  } catch(e) {
+    sec.innerHTML = `<p style="color:var(--danger)">Fel: ${esc(e.message)}</p>`;
+  }
+}
+
+async function loadIptvPlaylists(fromRouter) {
+  activateIptvSection();
+  const sec = document.getElementById("sec-iptv");
+  if (!sec) return;
+  if (!fromRouter) navigateToPath("/iptv?playlists=1", "Mina spellistor - StreamVault");
+  sec.innerHTML = `<div class="spinner-wrap"><div class="spinner"></div></div>`;
+  try {
+    const data = await API.get("/iptv/playlists");
+    sec.innerHTML = `
+      <div class="grid-wrap">
+        <button onclick="history.back()" style="background:var(--card2, #1a1a28);color:var(--text, #fff);border:1px solid var(--border, #333);padding:8px 16px;border-radius:8px;cursor:pointer;font-size:14px;display:inline-block;margin-bottom:14px">← Tillbaka</button>
+        <h2 style="margin-bottom:14px">⭐ Mina spellistor</h2>
+        ${!data.playlists.length ? `<p style="color:var(--muted)">Inga spellistor än. Tryck på 💾-ikonen på ett land eller en kanal för att skapa din första.</p>` : `
+        <div style="display:flex;flex-direction:column;gap:8px;max-width:500px">
+          ${data.playlists.map(p => `
+            <div class="s-row" style="cursor:pointer" onclick="openIptvPlaylist('${p.id}', '${esc(p.name).replace(/'/g,"\\'")}')">
+              <span>⭐ ${esc(p.name)}</span>
+              <span style="color:var(--muted);font-size:13px">${p.count} kanaler</span>
+            </div>`).join("")}
+        </div>`}
+      </div>`;
+  } catch(e) {
+    sec.innerHTML = `<p style="color:var(--danger)">Fel: ${esc(e.message)}</p>`;
+  }
+}
+
+async function openIptvPlaylist(playlistId, name, fromRouter) {
+  activateIptvSection();
+  const sec = document.getElementById("sec-iptv");
+  if (!sec) return;
+  if (!fromRouter) navigateToPath(`/iptv?playlist=${playlistId}&name=${encodeURIComponent(name)}`, `${name} - StreamVault`);
+  sec.innerHTML = `<div class="spinner-wrap"><div class="spinner"></div></div>`;
+  try {
+    const data = await API.get("/iptv/playlists/" + playlistId + "/channels");
+    const isEmpty = !data.countryEntries.length && !data.channels.length;
+    sec.innerHTML = `
+      <div class="grid-wrap">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+          <button onclick="history.back()" style="background:var(--card2, #1a1a28);color:var(--text, #fff);border:1px solid var(--border, #333);padding:8px 16px;border-radius:8px;cursor:pointer;font-size:14px;display:inline-block;margin-bottom:14px">← Tillbaka</button>
+          <button class="btn-fav" style="color:var(--danger)" onclick="deleteIptvPlaylist('${playlistId}')">🗑 Ta bort lista</button>
+        </div>
+        <h2 style="margin-bottom:14px">⭐ ${esc(name)}</h2>
+        ${isEmpty ? `<p style="color:var(--muted)">Listan är tom.</p>` : `
+        <div style="display:flex;flex-direction:column;gap:6px;max-width:500px">
+          ${data.countryEntries.map(c => `
+            <div class="s-row" style="cursor:pointer" onclick='openIptvPlaylistCountry("${playlistId}", "${esc(c.name).replace(/"/g,"&quot;")}", ${c.isCountry}, "${esc(name).replace(/"/g,"&quot;")}")'>
+              <span>🌍 ${esc(c.name)}</span>
+              <span style="color:var(--muted);font-size:13px">${c.count} kanaler</span>
+            </div>`).join("")}
+          ${data.channels.map(c => `
+            <div class="s-row" style="cursor:pointer" onclick='playIptvChannelInPlayer("${esc(c.name).replace(/"/g,"&quot;")}", "${c.url.replace(/"/g,"&quot;")}")'>
+              ${c.logo ? `<img src="${c.logo}" style="width:32px;height:32px;object-fit:contain;border-radius:4px;margin-right:10px" onerror="this.style.display='none'">` : `<span style="margin-right:10px">${c.type === "movie" ? "🎬" : c.type === "series" ? "🎞️" : "📺"}</span>`}
+              <span style="flex:1">${esc(c.name)}</span>
+              <button onclick='event.stopPropagation(); openSaveToPlaylistPicker({channelId:"${c.id}"})' title="Spara till..." style="background:none;border:none;color:var(--accent);font-size:16px;cursor:pointer">⭐</button>
+            </div>`).join("")}
+        </div>`}
+      </div>`;
+  } catch(e) {
+    sec.innerHTML = `<p style="color:var(--danger)">Fel: ${esc(e.message)}</p>`;
+  }
+}
+
+// Drills into a country entry WITHIN a playlist to see/play its channels — same idea as
+// browsing normally, just scoped to this one playlist's "back" trail.
+async function openIptvPlaylistCountry(playlistId, country, isCountry, playlistName, fromRouter) {
+  activateIptvSection();
+  const sec = document.getElementById("sec-iptv");
+  if (!sec) return;
+  if (!fromRouter) navigateToPath(`/iptv?playlist=${playlistId}&name=${encodeURIComponent(playlistName)}&country=${encodeURIComponent(country)}&isCountry=${isCountry}`, `${country} - StreamVault`);
+  sec.innerHTML = `<div class="spinner-wrap"><div class="spinner"></div></div>`;
+  try {
+    const data = await API.get(`/iptv/playlists/${playlistId}/country-channels?country=${encodeURIComponent(country)}&isCountry=${isCountry}`);
+    sec.innerHTML = `
+      <div class="grid-wrap">
+        <button onclick="history.back()" style="background:var(--card2, #1a1a28);color:var(--text, #fff);border:1px solid var(--border, #333);padding:8px 16px;border-radius:8px;cursor:pointer;font-size:14px;display:inline-block;margin-bottom:14px">← Tillbaka</button>
+        <h2 style="margin-bottom:14px">🌍 ${esc(country)}</h2>
+        <div style="display:flex;flex-direction:column;gap:6px;max-width:500px">
+          ${data.channels.map(c => `
+            <div class="s-row" style="cursor:pointer" onclick='playIptvChannelInPlayer("${esc(c.name).replace(/"/g,"&quot;")}", "${c.url.replace(/"/g,"&quot;")}")'>
+              ${c.logo ? `<img src="${c.logo}" style="width:32px;height:32px;object-fit:contain;border-radius:4px;margin-right:10px" onerror="this.style.display='none'">` : `<span style="margin-right:10px">📺</span>`}
+              <span style="flex:1">${esc(c.name)}</span>
+            </div>`).join("")}
+        </div>
+      </div>`;
+  } catch(e) {
+    sec.innerHTML = `<p style="color:var(--danger)">Fel: ${esc(e.message)}</p>`;
+  }
+}
+
+async function deleteIptvPlaylist(playlistId) {
+  if (!confirm("Ta bort den här spellistan? Går inte att ångra.")) return;
+  try {
+    await API.post("/iptv/playlists/" + playlistId + "/delete", {});
+    toast("✓ Spellista borttagen", "success");
+    loadIptvPlaylists(true);
+  } catch(e) {
+    toast("Fel: " + e.message, "error");
+  }
+}
+
+async function openIptvGroup(groupName, type, fromRouter) {
+  activateIptvSection();
+  const sec = document.getElementById("sec-iptv");
+  if (!sec) return;
+  if (!fromRouter) navigateToPath(`/iptv?type=${type || "live"}&group=${encodeURIComponent(groupName)}`, `${groupName} - StreamVault`);
+  sec.innerHTML = `<div class="spinner-wrap"><div class="spinner"></div></div>`;
+  try {
+    const data = await API.get("/iptv/channels?group=" + encodeURIComponent(groupName) + "&type=" + (type || "live"));
+    sec.innerHTML = `
+      <div class="grid-wrap">
+        <button onclick="history.back()" style="background:var(--card2, #1a1a28);color:var(--text, #fff);border:1px solid var(--border, #333);padding:8px 16px;border-radius:8px;cursor:pointer;font-size:14px;display:inline-block;margin-bottom:14px">← Tillbaka</button>
+        <h2 style="margin-bottom:14px">${esc(groupName)}</h2>
+        <div style="display:flex;flex-direction:column;gap:6px;max-width:500px">
+          ${data.channels.map(c => `
+            <div class="s-row" style="cursor:pointer" onclick='playIptvChannelInPlayer("${esc(c.name).replace(/"/g,"&quot;")}", "${c.url.replace(/"/g,"&quot;")}")'>
+              <button onclick='event.stopPropagation(); openSaveToPlaylistPicker({channelId:"${c.id}"})' title="Spara till..." style="background:none;border:none;color:${c.inAnyPlaylist ? "var(--accent)" : "var(--muted)"};font-size:16px;cursor:pointer;margin-right:10px">${c.inAnyPlaylist ? "⭐" : "💾"}</button>
+              ${c.logo ? `<img src="${c.logo}" style="width:32px;height:32px;object-fit:contain;border-radius:4px;margin-right:10px" onerror="this.style.display='none'">` : `<span style="margin-right:10px">${type === "movie" ? "🎬" : type === "series" ? "🎞️" : "📺"}</span>`}
+              <span style="flex:1">${esc(c.name)}</span>
+            </div>`).join("")}
+        </div>
+      </div>`;
+  } catch(e) {
+    sec.innerHTML = `<p style="color:var(--danger)">Fel: ${esc(e.message)}</p>`;
+  }
+}
+
+// Loads HLS.js from CDN on first use — most IPTV streams are HLS (.m3u8), which only Safari
+// plays natively; every other browser needs this library to decode the stream into
+// something a plain <video> element can actually show.
+let _hlsJsLoading = null;
+function ensureHlsJs() {
+  if (window.Hls) return Promise.resolve();
+  if (_hlsJsLoading) return _hlsJsLoading;
+  _hlsJsLoading = new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = "https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.15/hls.min.js";
+    script.onload = resolve;
+    script.onerror = () => reject(new Error("Kunde inte ladda HLS-spelaren"));
+    document.head.appendChild(script);
+  });
+  return _hlsJsLoading;
+}
+
+async function saveIptvEnabledToggle(enabled) {
+  try {
+    await API.patch("/config", { iptv_enabled: enabled });
+    window._iptvEnabled = enabled;
+    const sbEl = document.getElementById("sb-iptv");
+    if (sbEl) sbEl.style.display = enabled ? "" : "none";
+    toast(enabled ? "✓ IPTV aktiverat — syns nu i sidopanelen" : "IPTV avstängt — döljs i sidopanelen", "success");
+  } catch(e) {
+    toast("Fel: " + e.message, "error");
+    const el = document.getElementById("iptv-enabled-toggle");
+    if (el) el.checked = !enabled;
+  }
+}
+
+async function parseIptvPlaylist() {
+  const url = document.getElementById("iptv-url-input")?.value.trim();
+  const statusEl = document.getElementById("iptv-status");
+  if (!url) { toast("Ange en adress först", "info"); return; }
+  if (statusEl) statusEl.textContent = "⏳ Hämtar och tolkar (kan ta en stund för stora listor)...";
+  try {
+    const data = await API.post("/iptv/parse", { url });
+    if (statusEl) statusEl.textContent = `✓ ${data.count} kanaler hittades och sparades`;
+    toast(`✓ ${data.count} kanaler tolkade`, "success");
+  } catch(e) {
+    if (statusEl) statusEl.textContent = "";
+    toast("Fel: " + e.message, "error");
+  }
 }
 
 // ── EXPLORE ───────────────────────────────────────────────────────────────────
@@ -2448,6 +2883,60 @@ async function toggleFav(id, btn) {
 
 // ── PLAYBACK ──────────────────────────────────────────────────────────────────
 let currentHls = null;
+window._iptvPlaying = false; // lets closePlayer() know to skip movie-specific cleanup (DASH stop call, subtitle overlay) that doesn't apply to a live channel
+
+// Plays an IPTV channel in the SAME main player used for movies/shows (full-area takeover,
+// same controls bar) instead of a separate floating modal — reuses player-bar/main-video
+// directly. No resume position, no subtitles, no DASH transcode: those are VOD concepts that
+// don't apply to a live stream.
+async function playIptvChannelInPlayer(name, url) {
+  const bar = document.getElementById("player-bar");
+  const video = document.getElementById("main-video");
+  if (!bar || !video) return;
+
+  if (currentItemId || currentHls) {
+    if (currentHls) { try { currentHls.destroy(); } catch {} currentHls = null; }
+    if (window._dashPlayer) { try { window._dashPlayer.reset(); } catch {} window._dashPlayer = null; }
+    if (currentItemId && !window._iptvPlaying) API.post("/dash/" + currentItemId + "/stop").catch(() => {});
+  }
+
+  window._iptvPlaying = true;
+  currentItemId = null;
+  nowPlayingId = null;
+  bar.style.display = "flex";
+  document.getElementById("pb-title").textContent = name;
+  document.getElementById("pb-sub").textContent = "📡 Live";
+  document.body.style.paddingBottom = "320px";
+  resetFillScreen();
+  ensureFillScreenButton();
+  bar.style.overflow = "hidden";
+
+  const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+  if (isSafari) {
+    video.src = url;
+    video.play().catch(() => {});
+    return;
+  }
+  try {
+    await ensureHlsJs();
+    if (window.Hls.isSupported()) {
+      currentHls = new window.Hls();
+      currentHls.loadSource(url);
+      currentHls.attachMedia(video);
+      currentHls.on(window.Hls.Events.MANIFEST_PARSED, () => video.play().catch(() => {}));
+      currentHls.on(window.Hls.Events.ERROR, (event, data) => {
+        console.log("[IPTV] HLS.js error:", JSON.stringify({ type: data.type, details: data.details, fatal: data.fatal }));
+        if (data.fatal) document.getElementById("pb-sub").textContent = "⚠️ Kunde inte spela strömmen";
+      });
+      return;
+    }
+  } catch(e) {
+    console.log("[IPTV] Could not set up HLS.js:", e.message);
+  }
+  video.src = url; // last-resort fallback
+  video.play().catch(() => {});
+}
+
 let currentItemId = null;
 let currentEpisodeData = null; // { showId, season, episode, episodes[] }
 let _nextEpTimer = null;
@@ -4387,11 +4876,15 @@ function parseVTTTime(timeStr) {
 }
 
 function closePlayer() {
-  stopSubtitleOverlay();
+  if (!window._iptvPlaying) stopSubtitleOverlay(); // subtitle overlay is a VOD concept, not relevant to live TV
   // Destroy dash.js player first to prevent SourceBuffer errors
   if (window._dashPlayer) {
     try { window._dashPlayer.destroy(); } catch {}
     window._dashPlayer = null;
+  }
+  if (currentHls) {
+    try { currentHls.destroy(); } catch {}
+    currentHls = null;
   }
   const video = document.getElementById("main-video");
   video?.pause();
@@ -4400,7 +4893,9 @@ function closePlayer() {
   document.body.style.paddingBottom = "";
   // Tell the server to actually kill the FFmpeg transcode (if any) — otherwise it just
   // keeps running/counting on the server after the player is closed, wasting CPU forever.
-  if (currentItemId) API.post("/dash/" + currentItemId + "/stop").catch(() => {});
+  // Not applicable to a live IPTV channel — there's no server-side transcode job for it.
+  if (currentItemId && !window._iptvPlaying) API.post("/dash/" + currentItemId + "/stop").catch(() => {});
+  window._iptvPlaying = false;
   nowPlayingId = null;
   currentItemId = null;
   currentEpisodeData = null;
@@ -5082,6 +5577,25 @@ async function loadSettings() {
       </div>
 
       <div class="settings-section">
+        <div class="settings-section-title">IPTV</div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:10px">
+          🧪 Experimentell funktion, under utveckling. Syns inte i sidopanelen för någon förrän du aktivt slår på den här nedan.
+        </div>
+        <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:14px;margin-bottom:14px">
+          <input type="checkbox" id="iptv-enabled-toggle" ${cfg.iptv_enabled ? "checked" : ""} onchange="saveIptvEnabledToggle(this.checked)">
+          <span>Aktivera IPTV (visa i sidopanelen)</span>
+        </label>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:10px">
+          Klistra in en M3U-spellista-adress för att hämta och tolka kanalerna.
+        </div>
+        <div style="display:flex;gap:8px;margin-bottom:10px">
+          <input type="text" id="iptv-url-input" class="s-input" placeholder="https://exempel.se/spellista.m3u" value="${esc(cfg.iptv_m3u_url||"")}" style="flex:1">
+          <button class="btn-fav" onclick="parseIptvPlaylist()">Hämta & tolka</button>
+        </div>
+        <div id="iptv-status" style="font-size:13px;color:var(--muted)"></div>
+      </div>
+
+      <div class="settings-section">
         <div class="settings-section-title">Trailer-uppspelning på Android TV</div>
         <div style="font-size:12px;color:var(--muted);margin-bottom:10px;line-height:1.5">
           Löser trailer-uppspelning på Android TV-enheter där YouTubes inbäddade spelare inte fungerar (svart skärm). Använder tredjepartstjänster för att hämta en direkt videoström, utanför YouTubes officiella API och användarvillkor.
@@ -5331,12 +5845,17 @@ async function loadLibraryAccessUI(user) {
   const container = document.getElementById("lib-access-list");
   if (!container) return;
   const userLibIds = user.library_ids || [];
+  const noRestrictions = userLibIds.length === 0;
   container.innerHTML = (allLibs.length ? allLibs : libs).map(lib => `
     <div style="display:flex;align-items:center;gap:8px;font-size:13px">
-      <input type="checkbox" value="${lib.id}" ${userLibIds.length === 0 || userLibIds.includes(lib.id) ? "checked" : ""} style="width:16px;height:16px;cursor:pointer">
+      <input type="checkbox" value="${lib.id}" ${noRestrictions || userLibIds.includes(lib.id) ? "checked" : ""} style="width:16px;height:16px;cursor:pointer">
       <span>${esc(lib.name)}</span> <span style="color:var(--muted);font-size:11px">(${lib.type})</span>
     </div>
-  `).join("");
+  `).join("") + (window._iptvEnabled ? `
+    <div style="display:flex;align-items:center;gap:8px;font-size:13px;border-top:1px solid var(--border);padding-top:8px;margin-top:4px">
+      <input type="checkbox" value="iptv" ${noRestrictions || userLibIds.includes("iptv") ? "checked" : ""} style="width:16px;height:16px;cursor:pointer">
+      <span>📡 IPTV</span> <span style="color:var(--muted);font-size:11px">(kanaler)</span>
+    </div>` : "");
 }
 
 async function saveLibraryAccess(userId) {

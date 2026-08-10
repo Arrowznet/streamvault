@@ -455,13 +455,21 @@ const db = {
   // record of who watched what, when, from where, and whether it was direct-played or
   // transcoded. Separate from db.history (which just tracks each user's latest resume
   // position per title) — this is for analytics/monitoring, not resume state.
-  playbackLog: new Datastore({ filename: path.join(DATA_DIR, "playback_log.db"), autoload: true })
+  playbackLog: new Datastore({ filename: path.join(DATA_DIR, "playback_log.db"), autoload: true }),
+  // IPTV channels parsed from an admin-provided M3U playlist URL. Re-parsing replaces the
+  // whole set (channels come and go between playlist updates — no reason to keep stale ones).
+  iptvChannels: new Datastore({ filename: path.join(DATA_DIR, "iptv_channels.db"), autoload: true }),
+  // Named IPTV favorite lists (Spotify-style "save to playlist") — personal per user, one
+  // document per list, each holding the channel IDs currently in it.
+  iptvPlaylists: new Datastore({ filename: path.join(DATA_DIR, "iptv_playlists.db"), autoload: true })
 };
 
 db.users.ensureIndex({ fieldName: "username", unique: true });
 db.media.ensureIndex({ fieldName: "library_id" });
 db.media.ensureIndex({ fieldName: "type" });
 db.history.ensureIndex({ fieldName: "user_id" });
+db.iptvChannels.ensureIndex({ fieldName: "group" });
+db.iptvPlaylists.ensureIndex({ fieldName: "user_id" });
 
 const dbFind = (s, q) => new Promise((r, j) => s.find(q, (e, d) => e ? j(e) : r(d)));
 const dbFindOne = (s, q) => new Promise((r, j) => s.findOne(q, (e, d) => e ? j(e) : r(d)));
@@ -501,6 +509,14 @@ function userHasLibraryAccess(user, libraryId) {
   // If user has no library restrictions, they have access to all
   if (!user.library_ids || user.library_ids.length === 0) return true;
   return user.library_ids.includes(libraryId);
+}
+
+// IPTV is treated as a pseudo-library entry ("iptv") within the same library_ids list, so it
+// follows the exact same "empty list = access to everything" convention as real libraries.
+function userHasIptvAccess(user) {
+  if (user.role === "admin") return true;
+  if (!user.library_ids || user.library_ids.length === 0) return true;
+  return user.library_ids.includes("iptv");
 }
 
 function requireAuth(req, res, next) {
@@ -649,7 +665,10 @@ app.get("/api/me", requireAuth, async (req, res) => {
 
 app.get("/api/users", requireAdmin, async (req, res) => {
   const users = await dbFind(db.users, { is_active: true });
-  res.json(users.map(u => ({ id: u._id, username: u.username, role: u.role, created_at: u.created_at, last_login: u.last_login })));
+  res.json(users.map(u => ({
+    id: u._id, username: u.username, role: u.role, created_at: u.created_at, last_login: u.last_login,
+    library_ids: u.library_ids || [], language: u.language || null, subtitleLanguages: u.subtitleLanguages || []
+  })));
 });
 
 // Shared by user creation and the language-patch endpoint: checks whether a language
@@ -1140,6 +1159,323 @@ app.get("/api/admin/server-log/dates", requireAdmin, (req, res) => {
       .sort().reverse();
     res.json({ dates });
   } catch(e) { res.json({ dates: [] }); }
+});
+
+// ── IPTV ──────────────────────────────────────────────────────────────────────
+// Parses a standard M3U/M3U8 playlist (the common format IPTV providers use) into
+// individual channels. Format is simple: a "#EXTINF:" metadata line immediately followed by
+// the stream URL on the next line, repeated for each channel.
+//   #EXTINF:-1 tvg-id="..." tvg-logo="http://..." group-title="Sweden",Channel Name
+//   http://stream-url...
+// Detects which country a group-title belongs to (e.g. "CANADA – Sports", "CANADA-LOCAL CBC",
+// "Canada Kids" all belong to "Canada") — many IPTV providers split each country into several
+// separate group-titles by category, which otherwise clutters the top-level list with dozens
+// of near-duplicate entries instead of one country to drill into.
+const COUNTRY_NAMES = {
+  "sweden":"Sweden","sverige":"Sweden","norway":"Norway","norge":"Norway","denmark":"Denmark","danmark":"Denmark",
+  "finland":"Finland","iceland":"Iceland","uk":"UK","united kingdom":"UK","england":"UK","britain":"UK",
+  "usa":"USA","us":"USA","united states":"USA","america":"USA","canada":"Canada","germany":"Germany",
+  "deutschland":"Germany","france":"France","spain":"Spain","espana":"Spain","italy":"Italy","italia":"Italy",
+  "netherlands":"Netherlands","holland":"Netherlands","belgium":"Belgium","portugal":"Portugal","poland":"Poland","polska":"Poland",
+  "russia":"Russia","turkey":"Turkey","turkiye":"Turkey","greece":"Greece","austria":"Austria","switzerland":"Switzerland",
+  "ireland":"Ireland","albania":"Albania","arabic":"Saudi Arabia","saudi":"Saudi Arabia","uae":"UAE","emirates":"UAE",
+  "india":"India","pakistan":"Pakistan","brazil":"Brazil","brasil":"Brazil","mexico":"Mexico","australia":"Australia",
+  "romania":"Romania","bulgaria":"Bulgaria","croatia":"Croatia","serbia":"Serbia","hungary":"Hungary","czech":"Czech Republic",
+  "slovakia":"Slovakia","slovenia":"Slovenia","lithuania":"Lithuania","latvia":"Latvia","estonia":"Estonia","ukraine":"Ukraine",
+  "china":"China","japan":"Japan","korea":"Korea","thailand":"Thailand","philippines":"Philippines","vietnam":"Vietnam",
+  "indonesia":"Indonesia","malaysia":"Malaysia","israel":"Israel","egypt":"Egypt","morocco":"Morocco","south africa":"South Africa"
+};
+function detectCountry(groupTitle) {
+  const clean = groupTitle.toLowerCase().replace(/\bhd\b|\b4k\b|\buhd\b|\bfhd\b/g, " ").replace(/[-–_]/g, " ").trim();
+  for (const [key, country] of Object.entries(COUNTRY_NAMES)) {
+    // Word-boundary match against the FIRST word/segment specifically — avoids e.g. "usa"
+    // matching inside an unrelated longer word, since group-titles put the country first.
+    if (clean === key || clean.startsWith(key + " ") || clean.startsWith(key + "-")) return country;
+  }
+  return null; // not a recognized country — kept as its own standalone top-level entry
+}
+
+// Detects whether an entry is a live channel, a VOD movie, or a VOD series episode.
+// Xtream Codes-based providers (the most common IPTV backend, identifiable by the
+// "m3u_plus" playlist type) consistently encode this in the stream URL's path itself
+// (/live/, /movie/, /series/) regardless of which specific provider it is — far more
+// reliable than group-title text, which varies a lot between providers. Group-title
+// keywords are only used as a fallback for playlists that don't follow that convention.
+function detectContentType(url, groupTitle) {
+  if (/\/movie\//i.test(url)) return "movie";
+  if (/\/series\//i.test(url)) return "series";
+  if (/\/live\//i.test(url)) return "live";
+  const g = (groupTitle || "").toLowerCase();
+  if (/\bvod\b|\bmovies?\b|\bfilm/i.test(g)) return "movie";
+  if (/\bseries\b|\btv shows?\b/i.test(g)) return "series";
+  return "live";
+}
+
+function parseM3U(text) {
+  const lines = text.split(/\r?\n/);
+  const channels = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line.startsWith("#EXTINF:")) continue;
+    const url = (lines[i + 1] || "").trim();
+    if (!url || url.startsWith("#")) continue; // malformed entry — no URL followed, skip
+    const logoMatch = line.match(/tvg-logo="([^"]*)"/i);
+    const groupMatch = line.match(/group-title="([^"]*)"/i);
+    const name = line.split(",").pop().trim() || "Okänd kanal";
+    const group = groupMatch && groupMatch[1] ? groupMatch[1] : "Övrigt";
+    const type = detectContentType(url, group);
+    channels.push({
+      _id: uuidv4(),
+      name,
+      logo: logoMatch ? logoMatch[1] : null,
+      group,
+      country: type === "live" ? detectCountry(group) : null, // consolidation only makes sense for live TV, not movies/series
+      type,
+      url
+    });
+  }
+  return channels;
+}
+
+// Re-parses and replaces the whole channel list — channels come and go between playlist
+// updates, so keeping stale entries around from a previous version doesn't make sense.
+// Shared logic for fetching + parsing + saving a playlist — used by both the initial setup
+// (POST /parse, with a URL provided) and refresh (POST /refresh, reusing the saved URL).
+async function fetchAndSaveM3U(url) {
+  const text = await new Promise((resolve, reject) => {
+    const client = url.startsWith("http://") ? http : https;
+    client.get(url, { timeout: 20000 }, (r) => {
+      if (r.statusCode >= 400) { r.resume(); return reject(new Error(`HTTP ${r.statusCode}`)); }
+      let body = "";
+      r.on("data", c => body += c);
+      r.on("end", () => resolve(body));
+    }).on("error", reject).on("timeout", () => reject(new Error("Timeout")));
+  });
+  const channels = parseM3U(text);
+  if (!channels.length) throw new Error("Ingen kanal hittades i listan — kontrollera att adressen pekar på en giltig M3U-fil");
+  await new Promise((resolve, reject) => db.iptvChannels.remove({}, { multi: true }, (err) => err ? reject(err) : resolve()));
+  await new Promise((resolve, reject) => db.iptvChannels.insert(channels, (err) => err ? reject(err) : resolve()));
+  config.iptv_m3u_url = url;
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
+  console.log(`[IPTV] Tolkade ${channels.length} kanaler från spellistan`);
+  return channels.length;
+}
+
+// Re-fetches using the already-saved playlist URL — for refreshing the channel list without
+// needing to go into Settings and re-paste the same address. Still entirely on-demand: this
+// is never called automatically or on a schedule, only when explicitly triggered.
+app.post("/api/iptv/refresh", requireAdmin, async (req, res) => {
+  if (!config.iptv_m3u_url) return res.status(400).json({ error: "Ingen spellista sparad ännu" });
+  try {
+    const count = await fetchAndSaveM3U(config.iptv_m3u_url);
+    res.json({ ok: true, count });
+  } catch(e) {
+    res.status(500).json({ error: "Kunde inte hämta/tolka listan: " + e.message });
+  }
+});
+
+app.post("/api/iptv/parse", requireAdmin, async (req, res) => {
+  const { url } = req.body;
+  if (!url) return res.status(400).json({ error: "Ingen adress angiven" });
+  try {
+    const count = await fetchAndSaveM3U(url);
+    res.json({ ok: true, count });
+  } catch(e) {
+    res.status(500).json({ error: "Kunde inte hämta/tolka listan: " + e.message });
+  }
+});
+
+app.get("/api/iptv/groups", requireAuth, async (req, res) => {
+  if (!userHasIptvAccess(req.user)) return res.status(403).json({ error: "Ej tillåtet" });
+  try {
+    const type = ["live", "movie", "series"].includes(req.query.type) ? req.query.type : "live";
+    const allChannels = await dbFind(db.iptvChannels, {});
+    const channels = allChannels.filter(c => (c.type || "live") === type);
+    // For live TV, consolidate under detected country where possible (e.g. "CANADA – Sports"
+    // and "CANADA-LOCAL CBC" both roll up under one "Canada" entry) — for movies/series this
+    // consolidation doesn't apply (country wasn't computed for those at parse time), so it
+    // just falls through to the raw group-title, same as before.
+    const counts = {};
+    for (const c of channels) {
+      const key = (type === "live" && c.country) ? c.country : c.group;
+      counts[key] = (counts[key] || 0) + 1;
+    }
+    const userPlaylists = await dbFind(db.iptvPlaylists, { user_id: req.user._id });
+    const favoritedCountryNames = new Set(userPlaylists.flatMap(p => (p.countries || []).map(c => c.name)));
+    const groups = Object.entries(counts).map(([name, count]) => ({
+      name, count,
+      isCountry: type === "live" && Object.values(COUNTRY_NAMES).includes(name),
+      inAnyPlaylist: favoritedCountryNames.has(name)
+    })).sort((a, b) => a.name.localeCompare(b.name));
+    const typeCounts = { live: 0, movie: 0, series: 0 };
+    for (const c of allChannels) typeCounts[c.type || "live"]++;
+    res.json({ groups, total: channels.length, typeCounts, configuredUrl: config.iptv_m3u_url || null });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Drills into a consolidated country entry to show its original, provider-specific
+// sub-categories (e.g. Canada → Documentary / Sports / Kids / LOCAL CBC / ...).
+// ── IPTV PLAYLISTS (favorites) ─────────────────────────────────────────────────
+// Spotify-style: the person can create several named lists (e.g. "Barnfavoriter",
+// "Sportfavoriter") and add individual channels OR a whole country's worth of channels to
+// whichever list(s) they choose, rather than one single flat favorites list. Personal to
+// each user, not shared.
+//
+// A playlist stores TWO separate things, not just one flat channel list:
+//   - channel_ids: individually-added channels
+//   - countries: [{name, isCountry}] — whole countries/groups added as a single unit, shown
+//     collapsed as one entry ("Sweden — 42 kanaler") rather than exploding into 42 separate
+//     rows. The channel count for a country entry is always computed FRESH from the current
+//     channel list (not stored), so a later playlist refresh that adds/removes channels for
+//     that country is reflected automatically.
+
+function channelsForCountryQuery(country, isCountry) {
+  return isCountry ? { country, type: "live" } : { group: country, type: "live" };
+}
+
+app.get("/api/iptv/playlists", requireAuth, async (req, res) => {
+  if (!userHasIptvAccess(req.user)) return res.status(403).json({ error: "Ej tillåtet" });
+  try {
+    const playlists = await dbFind(db.iptvPlaylists, { user_id: req.user._id });
+    res.json({ playlists: playlists.map(p => ({ id: p._id, name: p.name, count: (p.channel_ids || []).length + (p.countries || []).length })).sort((a, b) => a.name.localeCompare(b.name)) });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post("/api/iptv/playlists", requireAuth, async (req, res) => {
+  if (!userHasIptvAccess(req.user)) return res.status(403).json({ error: "Ej tillåtet" });
+  try {
+    const name = (req.body.name || "").trim();
+    if (!name) return res.status(400).json({ error: "Inget namn angivet" });
+    const doc = { _id: uuidv4(), user_id: req.user._id, name, channel_ids: [], countries: [], created_at: new Date().toISOString() };
+    await dbInsert(db.iptvPlaylists, doc);
+    res.json({ id: doc._id, name: doc.name, count: 0 });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post("/api/iptv/playlists/:id/delete", requireAuth, async (req, res) => {
+  try {
+    const playlist = await dbFindOne(db.iptvPlaylists, { _id: req.params.id });
+    if (!playlist || playlist.user_id !== req.user._id) return res.status(404).json({ error: "Hittades inte" });
+    await new Promise((resolve, reject) => db.iptvPlaylists.remove({ _id: req.params.id }, {}, (err) => err ? reject(err) : resolve()));
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Which of the person's playlists already contain this channel — used to pre-check the
+// right boxes when opening the "save to..." picker for a single channel.
+app.get("/api/iptv/playlists/for-channel/:channelId", requireAuth, async (req, res) => {
+  try {
+    const playlists = await dbFind(db.iptvPlaylists, { user_id: req.user._id });
+    res.json({ playlists: playlists.map(p => ({ id: p._id, name: p.name, contains: (p.channel_ids || []).includes(req.params.channelId) })).sort((a, b) => a.name.localeCompare(b.name)) });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Same, but for a whole country/group — checks the "countries" list directly (was this
+// country explicitly saved as a unit), not whether every individual channel happens to be
+// present, since those are now tracked separately.
+app.get("/api/iptv/playlists/for-country", requireAuth, async (req, res) => {
+  try {
+    const { country, isCountry } = req.query;
+    if (!country) return res.status(400).json({ error: "Inget land angivet" });
+    const playlists = await dbFind(db.iptvPlaylists, { user_id: req.user._id });
+    res.json({
+      playlists: playlists.map(p => ({
+        id: p._id, name: p.name,
+        contains: (p.countries || []).some(c => c.name === country)
+      })).sort((a, b) => a.name.localeCompare(b.name))
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post("/api/iptv/playlists/:id/toggle-channel", requireAuth, async (req, res) => {
+  try {
+    const playlist = await dbFindOne(db.iptvPlaylists, { _id: req.params.id });
+    if (!playlist || playlist.user_id !== req.user._id) return res.status(404).json({ error: "Hittades inte" });
+    const { channelId, add } = req.body;
+    const current = new Set(playlist.channel_ids || []);
+    if (add) current.add(channelId); else current.delete(channelId);
+    await dbUpdate(db.iptvPlaylists, { _id: req.params.id }, { $set: { channel_ids: [...current] } });
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post("/api/iptv/playlists/:id/toggle-country", requireAuth, async (req, res) => {
+  try {
+    const playlist = await dbFindOne(db.iptvPlaylists, { _id: req.params.id });
+    if (!playlist || playlist.user_id !== req.user._id) return res.status(404).json({ error: "Hittades inte" });
+    const { country, isCountry, add } = req.body;
+    let countries = playlist.countries || [];
+    if (add) {
+      if (!countries.some(c => c.name === country)) countries = [...countries, { name: country, isCountry: !!isCountry }];
+    } else {
+      countries = countries.filter(c => c.name !== country);
+    }
+    await dbUpdate(db.iptvPlaylists, { _id: req.params.id }, { $set: { countries } });
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get("/api/iptv/playlists/:id/channels", requireAuth, async (req, res) => {
+  try {
+    const playlist = await dbFindOne(db.iptvPlaylists, { _id: req.params.id });
+    if (!playlist || playlist.user_id !== req.user._id) return res.status(404).json({ error: "Hittades inte" });
+    const countries = playlist.countries || [];
+    // Country entries stay collapsed — count is computed fresh, not stored, so it reflects
+    // the playlist's current channel count even if channels were added/removed since.
+    const countryEntries = [];
+    for (const c of countries) {
+      const count = await new Promise((resolve) => db.iptvChannels.count(channelsForCountryQuery(c.name, c.isCountry), (err, n) => resolve(err ? 0 : n)));
+      countryEntries.push({ name: c.name, isCountry: c.isCountry, count });
+    }
+    const ids = playlist.channel_ids || [];
+    const channels = ids.length ? (await dbFind(db.iptvChannels, { _id: { $in: ids } })).sort((a, b) => a.name.localeCompare(b.name)) : [];
+    res.json({
+      name: playlist.name,
+      countryEntries,
+      channels: channels.map(c => ({ id: c._id, name: c.name, logo: c.logo, group: c.group, country: c.country, type: c.type || "live", url: c.url }))
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Lists a playlist's country entry's actual channels — for drilling into "Sweden" within a
+// playlist to see/play its channels, same as browsing normally.
+app.get("/api/iptv/playlists/:id/country-channels", requireAuth, async (req, res) => {
+  try {
+    const playlist = await dbFindOne(db.iptvPlaylists, { _id: req.params.id });
+    if (!playlist || playlist.user_id !== req.user._id) return res.status(404).json({ error: "Hittades inte" });
+    const { country, isCountry } = req.query;
+    const channels = (await dbFind(db.iptvChannels, channelsForCountryQuery(country, isCountry === "true"))).sort((a, b) => a.name.localeCompare(b.name));
+    res.json({ channels: channels.map(c => ({ id: c._id, name: c.name, logo: c.logo, group: c.group, type: c.type || "live", url: c.url })) });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get("/api/iptv/subgroups", requireAuth, async (req, res) => {
+  if (!userHasIptvAccess(req.user)) return res.status(403).json({ error: "Ej tillåtet" });
+  try {
+    const country = req.query.country;
+    if (!country) return res.status(400).json({ error: "Inget land angivet" });
+    const channels = await dbFind(db.iptvChannels, { country, type: "live" });
+    const counts = {};
+    for (const c of channels) counts[c.group] = (counts[c.group] || 0) + 1;
+    const groups = Object.entries(counts).map(([name, count]) => ({ name, count })).sort((a, b) => a.name.localeCompare(b.name));
+    res.json({ groups });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get("/api/iptv/channels", requireAuth, async (req, res) => {
+  if (!userHasIptvAccess(req.user)) return res.status(403).json({ error: "Ej tillåtet" });
+  try {
+    const query = req.query.group ? { group: req.query.group } : {};
+    if (["live", "movie", "series"].includes(req.query.type)) query.type = req.query.type;
+    const channels = (await dbFind(db.iptvChannels, query)).sort((a, b) => a.name.localeCompare(b.name));
+    const userPlaylists = await dbFind(db.iptvPlaylists, { user_id: req.user._id });
+    const favoritedChannelIds = new Set(userPlaylists.flatMap(p => p.channel_ids || []));
+    const favoritedCountryNames = new Set(userPlaylists.flatMap(p => (p.countries || []).map(c => c.name)));
+    res.json({ channels: channels.map(c => ({
+      id: c._id, name: c.name, logo: c.logo, group: c.group, type: c.type || "live", url: c.url,
+      inAnyPlaylist: favoritedChannelIds.has(c._id) || (c.country && favoritedCountryNames.has(c.country)) || favoritedCountryNames.has(c.group)
+    })) });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── DEPENDENCY UPDATES ────────────────────────────────────────────────────────
@@ -2525,6 +2861,9 @@ app.get("/api/playback/:id", requireMediaAccess, async (req, res) => {
 
   // Get the audio codec once, since both the browser path and the capability path need it.
   // Only probed on demand since it's the one check here that actually shells out to ffprobe.
+  // Detects commentary tracks (director/cast commentary, etc.) via their title metadata — see
+  // the module-level isCommentaryTrack() function, shared with startDashTranscode.
+
   async function getAllAudioStreams() {
     try {
       const { execFileSync } = require("child_process");
@@ -2532,10 +2871,13 @@ app.get("/api/playback/:id", requireMediaAccess, async (req, res) => {
       const out = execFileSync(ffprobePath, [
         "-v", "quiet", "-analyzeduration", "100M", "-probesize", "100M",
         "-show_streams", "-select_streams", "a",
-        "-show_entries", "stream=codec_name",
+        "-show_entries", "stream=codec_name:stream_tags=title",
         "-of", "json", item.file_path
       ], { timeout: 12000, windowsHide: true }).toString();
-      return (JSON.parse(out).streams || []).map(s => normalizeCodec(s.codec_name || ""));
+      return (JSON.parse(out).streams || []).map(s => ({
+        codec: normalizeCodec(s.codec_name || ""),
+        isCommentary: isCommentaryTrack(s.tags?.title)
+      }));
     } catch(e) {
       console.log("[PLAYBACK] ffprobe all-audio check failed:", e.message);
       return [];
@@ -2611,16 +2953,17 @@ app.get("/api/playback/:id", requireMediaAccess, async (req, res) => {
 
     // Audio codec: checks ALL audio tracks, not just the first one — a remux can easily have
     // track 0 as DTS/TrueHD (incompatible) with a perfectly fine AC3/AAC track sitting right
-    // next to it at index 1+. Picks the first compatible track found; its index is returned
-    // below so the client can actually select it (direct-play just streams the raw file —
-    // the server doesn't remap tracks the way DASH does, so the client MUST switch to this
-    // track index itself, or it'll just get whatever the container's default track is).
+    // next to it at index 1+. Picks the first compatible, NON-commentary track found; its
+    // index is returned below so the client can actually select it (direct-play just streams
+    // the raw file — the server doesn't remap tracks the way DASH does, so the client MUST
+    // switch to this track index itself, or it'll just get whatever the container's default
+    // track is).
     let audioOk = true;
     if (containerOk && videoOk && audioCodecs.size > 0) {
       const audioStreams = await getAllAudioStreams();
-      compatibleAudioIndex = audioStreams.findIndex(c => c && audioCodecs.has(c));
+      compatibleAudioIndex = audioStreams.findIndex(s => s.codec && audioCodecs.has(s.codec) && !s.isCommentary);
       audioOk = compatibleAudioIndex !== -1;
-      if (!audioOk) reasons.push(`no compatible audio track among [${audioStreams.join(",")}] for [${[...audioCodecs].join(",")}]`);
+      if (!audioOk) reasons.push(`no compatible non-commentary audio track among [${audioStreams.map(s=>s.codec).join(",")}] for [${[...audioCodecs].join(",")}]`);
     }
 
     needsTranscode = !(containerOk && videoOk && audioOk);
@@ -2966,6 +3309,17 @@ const HARMLESS_STDERR_PATTERNS = [
 ];
 const seekLocks = new Map(); // Prevent concurrent seeks for same item
 
+// Detects commentary tracks (director/cast commentary, etc.) via their title metadata, so
+// they're never picked as a fallback "main" audio track just because the codec happens to
+// match — being technically playable isn't the same as being the track someone actually
+// wants when the real audio track isn't supported by their device. Shared between the
+// direct-play capability check and startDashTranscode's own audio-track selection.
+function isCommentaryTrack(title) {
+  if (!title) return false;
+  const t = title.toLowerCase();
+  return /commentary|kommentar|director'?s? track|cast and crew/.test(t);
+}
+
 async function startDashTranscode(item, seekSec = 0, audioTrackIndex = null, allowedVideoCodecs = null) {
   const itemId = item._id;
   const dashDir = path.join(DASH_CACHE, itemId);
@@ -3042,7 +3396,8 @@ async function startDashTranscode(item, seekSec = 0, audioTrackIndex = null, all
     : [...videoFilterArgs, "-c:v", encoder, ...dashEncoderArgs, "-b:v", "4000k"];
 
   // Audio stream selection - use specific track if requested, otherwise pick best audio stream
-  // Prefer AC3/EAC3/AAC over TrueHD/DTS (TrueHD causes FFmpeg errors in DASH)
+  // Prefer AC3/EAC3/AAC over TrueHD/DTS (TrueHD causes FFmpeg errors in DASH), and never pick
+  // a commentary track just because its codec happens to match — see isCommentaryTrack above.
   let bestAudioIndex = 0;
   if (audioTrackIndex === null) {
     try {
@@ -3054,7 +3409,7 @@ async function startDashTranscode(item, seekSec = 0, audioTrackIndex = null, all
         "-select_streams", "a", item.file_path
       ], { timeout: 12000, windowsHide: true }).toString();
       const audioStreams = JSON.parse(probeOut).streams || [];
-      const preferred = audioStreams.find(s => ["ac3","eac3","aac","mp3"].includes((s.codec_name||"").toLowerCase()));
+      const preferred = audioStreams.find(s => ["ac3","eac3","aac","mp3"].includes((s.codec_name||"").toLowerCase()) && !isCommentaryTrack(s.tags?.title));
       if (preferred) {
         // Find relative audio index
         bestAudioIndex = audioStreams.indexOf(preferred);
@@ -5046,7 +5401,7 @@ app.get("/api/public-config", requireAuth, (req, res) => {
   if (!codes.size) codes.add("sv"), codes.add("en");
   const subtitleSearchLanguages = [...codes].map(code => ({ code, label: OPENSUBS_LANG_LABEL[code] || code }));
 
-  res.json({ server_name: config.server_name || null, subtitleSearchLanguages, defaultLanguage: config.language || null, trailerStreamEnabled: !!config.trailer_stream_enabled });
+  res.json({ server_name: config.server_name || null, subtitleSearchLanguages, defaultLanguage: config.language || null, trailerStreamEnabled: !!config.trailer_stream_enabled, iptvEnabled: !!config.iptv_enabled });
 });
 
 app.get("/api/config", requireAdmin, (req, res) => {
@@ -5054,7 +5409,7 @@ app.get("/api/config", requireAdmin, (req, res) => {
 });
 
 app.patch("/api/config", requireAdmin, (req, res) => {
-  ["tmdb_api_key","opensubtitles_api_key","lastfm_api_key","spotify_client_id","spotify_client_secret","port","language","update_channel","server_name","trailer_stream_enabled"].forEach(k=>{if(req.body[k]!==undefined)config[k]=req.body[k];});
+  ["tmdb_api_key","opensubtitles_api_key","lastfm_api_key","spotify_client_id","spotify_client_secret","port","language","update_channel","server_name","trailer_stream_enabled","iptv_enabled"].forEach(k=>{if(req.body[k]!==undefined)config[k]=req.body[k];});
   fs.writeFileSync(CONFIG_PATH,JSON.stringify(config,null,2));
   res.json({ok:true});
 });
