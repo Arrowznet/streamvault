@@ -380,6 +380,7 @@ function switchSection(name, fromRouter) {
   document.querySelectorAll(".section").forEach(s => s.classList.remove("active"));
   document.querySelectorAll(".sb-item").forEach(b => b.classList.remove("active"));
   if (name !== "settings" && _liveActivityInterval) { clearInterval(_liveActivityInterval); _liveActivityInterval = null; }
+  if (name !== "settings" && _systemStatsInterval) { clearInterval(_systemStatsInterval); _systemStatsInterval = null; }
   if (name !== "settings" && _scanProgressInterval) { clearInterval(_scanProgressInterval); _scanProgressInterval = null; }
   if (name !== "settings" && _inSettingsSidebarMode) { _inSettingsSidebarMode = false; loadSidebarLibraries(); }
   if (!fromRouter) {
@@ -4988,6 +4989,86 @@ var _cacheStatusInterval = null;
 var SUBTITLE_LANG_ADJ = { swe:"svensk", eng:"engelsk", nor:"norsk", dan:"dansk", deu:"tysk", fra:"fransk", spa:"spansk", nld:"nederländsk", fin:"finsk", ita:"italiensk", por:"portugisisk", pol:"polsk", jpn:"japansk", und:"okänd" };
 // ── LIVE ACTIVITY (admin dashboard) ────────────────────────────────────────────
 var _liveActivityInterval = null;
+var _systemStatsInterval = null;
+
+// Simple, dependency-free SVG line chart — deliberately basic for now (this is the "does the
+// live data even work" pass, not the visual polish pass that comes later). Draws one or two
+// series normalized to a 0-100 scale, redraws completely on every poll rather than trying to
+// animate/append, which is simpler and plenty fast at this data volume (60 points × 2 lines).
+function renderLiveLineChart(containerId, samples, seriesConfig, mode) {
+  const el = document.getElementById(containerId);
+  if (!el) return;
+  const w = 700, h = 140, pad = 4;
+  if (!samples.length) { el.innerHTML = `<div style="color:var(--muted);font-size:12px;padding:20px;text-align:center">Samlar data...</div>`; return; }
+  const n = samples.length;
+  const xStep = (w - pad * 2) / Math.max(1, n - 1);
+  // Percentages (CPU/RAM) use a fixed 0-100 scale — always comparable, and 100% has a real
+  // ceiling meaning. Mbps has no natural ceiling, so scale dynamically to whatever the
+  // highest value in view actually is (with a little headroom so a line hugging the top
+  // doesn't look clipped), same idea as the existing daily-playback bar chart.
+  const maxVal = mode === "mbps" ? Math.max(1, ...samples.flatMap(s => seriesConfig.map(sc => s[sc.key] || 0))) * 1.15 : 100;
+  const toY = (val) => h - pad - (Math.max(0, Math.min(maxVal, val)) / maxVal) * (h - pad * 2);
+
+  const lines = seriesConfig.map(s => {
+    const points = samples.map((sample, i) => `${(pad + i * xStep).toFixed(1)},${toY(sample[s.key]).toFixed(1)}`).join(" ");
+    return `<polyline points="${points}" fill="none" stroke="${s.color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+  }).join("");
+
+  const gridLines = [0, 0.25, 0.5, 0.75, 1].map(frac => {
+    const val = frac * maxVal;
+    const y = toY(val);
+    return `<line x1="${pad}" y1="${y}" x2="${w-pad}" y2="${y}" stroke="var(--border)" stroke-width="1" opacity="0.5"/>`;
+  }).join("");
+
+  const unit = mode === "mbps" ? " Mbps" : "%";
+  const latest = samples[samples.length - 1];
+  const legend = seriesConfig.map(s => `<span style="display:inline-flex;align-items:center;gap:5px;margin-right:14px"><span style="width:8px;height:8px;border-radius:50%;background:${s.color};display:inline-block"></span>${s.label} — ${latest[s.key]?.toFixed(2) ?? "–"}${unit}</span>`).join("");
+
+  el.innerHTML = `
+    <svg viewBox="0 0 ${w} ${h}" style="width:100%;height:${h}px;display:block">${gridLines}${lines}</svg>
+    <div style="font-size:12px;color:var(--muted);margin-top:6px">${legend}</div>`;
+}
+
+async function refreshSystemStatsGraphs() {
+  const sec = document.getElementById("system-stats-section");
+  if (!sec) return;
+  try {
+    const data = await API.get("/admin/system-stats");
+    if (!document.getElementById("system-stats-cpu-chart")) {
+      // First load — build the section shell once, then just update the charts in place on
+      // every subsequent poll (avoids replacing the whole section, which would cause a
+      // visible flicker every 3 seconds).
+      sec.innerHTML = `
+        <div class="settings-section-title">Bandbredd</div>
+        <div id="system-stats-bandwidth-chart" style="margin-bottom:20px"></div>
+        <div class="settings-section-title">CPU</div>
+        <div id="system-stats-cpu-chart" style="margin-bottom:20px"></div>
+        <div class="settings-section-title">RAM</div>
+        <div id="system-stats-ram-chart"></div>`;
+    }
+    renderLiveLineChart("system-stats-bandwidth-chart", data.samples, [
+      { key: "localMbps", label: "Lokalt", color: "#3498db" },
+      { key: "remoteMbps", label: "Fjärrserver", color: "#f39c12" }
+    ], "mbps");
+    renderLiveLineChart("system-stats-cpu-chart", data.samples, [
+      { key: "processCpuPct", label: "StreamVault", color: "#2ecc71" },
+      { key: "systemCpuPct", label: "System", color: "#e74c3c" }
+    ]);
+    renderLiveLineChart("system-stats-ram-chart", data.samples, [
+      { key: "processMemPct", label: "StreamVault", color: "#2ecc71" },
+      { key: "systemMemPct", label: "System", color: "#9b59b6" }
+    ]);
+  } catch(e) {
+    sec.innerHTML = `<div style="color:var(--danger);font-size:13px">Kunde inte hämta systemstatistik: ${esc(e.message)}</div>`;
+  }
+}
+
+function startSystemStatsPolling() {
+  if (_systemStatsInterval) return;
+  refreshSystemStatsGraphs();
+  _systemStatsInterval = setInterval(refreshSystemStatsGraphs, 3000); // matches the server's own 3s sampling interval — no point polling faster than new data actually arrives
+}
+
 
 // Historical playback analytics (Tautulli-style) — direct-play vs transcode rates over time,
 // which container/codec combos transcode most, and most-watched titles. Loaded async after
@@ -5000,6 +5081,201 @@ async function resetPlaybackStats() {
     loadPlaybackStats();
   } catch(e) {
     toast("Fel: " + e.message, "error");
+  }
+}
+
+let _allHistoryState = { user: "", days: "", offset: 0, sortKey: "at", sortDir: "desc" };
+
+async function loadAllHistoryPage() {
+  const sec = document.getElementById("sec-settings");
+  if (!sec) return;
+  _allHistoryState = { user: "", days: "", offset: 0, sortKey: "at", sortDir: "desc" };
+  let users = [];
+  try { users = (await API.get("/users")).users || []; } catch(e) {}
+  sec.innerHTML = `
+    <div class="settings-wrap" style="max-width:1400px">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap">
+        <button class="btn-fav" onclick="loadSettings()">← Översikt</button>
+        <h2 style="margin:0">Spelningshistorik</h2>
+        <select class="s-input" id="ah-user-filter" onchange="onAllHistoryFilterChange()" style="max-width:180px">
+          <option value="">Alla användare</option>
+          ${users.map(u => `<option value="${esc(u.username)}">${esc(u.username)}</option>`).join("")}
+        </select>
+        <select class="s-input" id="ah-days-filter" onchange="onAllHistoryFilterChange()" style="max-width:160px">
+          <option value="">Alla tider</option>
+          <option value="7">Senaste 7 dagarna</option>
+          <option value="30">Senaste 30 dagarna</option>
+          <option value="90">Senaste 90 dagarna</option>
+        </select>
+        <span id="ah-total-count" style="color:var(--muted);font-size:13px;margin-left:auto"></span>
+      </div>
+      <div id="ah-table-container"></div>
+      <div style="display:flex;justify-content:center;gap:10px;margin-top:16px" id="ah-pagination"></div>
+    </div>`;
+  loadAllHistoryTable();
+}
+
+function onAllHistoryFilterChange() {
+  _allHistoryState.user = document.getElementById("ah-user-filter")?.value || "";
+  _allHistoryState.days = document.getElementById("ah-days-filter")?.value || "";
+  _allHistoryState.offset = 0;
+  loadAllHistoryTable();
+}
+
+function setAllHistorySort(key) {
+  if (_allHistoryState.sortKey === key) {
+    _allHistoryState.sortDir = _allHistoryState.sortDir === "asc" ? "desc" : "asc";
+  } else {
+    _allHistoryState.sortKey = key;
+    _allHistoryState.sortDir = "asc";
+  }
+  loadAllHistoryTable();
+}
+
+function setAllHistoryPage(offset) {
+  if (offset < 0) return;
+  _allHistoryState.offset = offset;
+  loadAllHistoryTable();
+}
+
+const ALL_HISTORY_TYPE_LABELS = { movie: "🎬 Film", tvshow: "📺 Serie", episode: "📺 Avsnitt", music: "🎵 Musik" };
+const ALL_HISTORY_PAGE_SIZE = 100;
+
+async function loadAllHistoryTable() {
+  const container = document.getElementById("ah-table-container");
+  if (!container) return;
+  container.innerHTML = `<div class="spinner-wrap"><div class="spinner"></div></div>`;
+  try {
+    const params = new URLSearchParams({ limit: ALL_HISTORY_PAGE_SIZE, offset: _allHistoryState.offset });
+    if (_allHistoryState.user) params.set("user", _allHistoryState.user);
+    if (_allHistoryState.days) params.set("days", _allHistoryState.days);
+    const data = await API.get("/admin/all-history?" + params.toString());
+
+    // Sorting happens client-side, on whichever page of results is currently loaded — the
+    // server already did the heavier job of filtering + only sending back one page's worth.
+    const sorted = [...data.entries].sort((a, b) => {
+      const key = _allHistoryState.sortKey;
+      const av = a[key] || "", bv = b[key] || "";
+      const cmp = key === "at" ? new Date(av) - new Date(bv) : String(av).localeCompare(String(bv));
+      return _allHistoryState.sortDir === "asc" ? cmp : -cmp;
+    });
+
+    const totalEl = document.getElementById("ah-total-count");
+    if (totalEl) totalEl.textContent = `${data.total} spelningar totalt`;
+
+    const cols = [["username","Användare"],["type","Typ"],["title","Titel"],["device","Spelare"],["method","Metod"],["at","Spelad"]];
+    container.innerHTML = `
+      <div style="overflow-x:auto">
+        <table style="width:100%;border-collapse:collapse;font-size:13px">
+          <thead>
+            <tr style="border-bottom:1px solid var(--border)">
+              ${cols.map(([key,label]) => `<th onclick="setAllHistorySort('${key}')" style="text-align:left;padding:8px 10px;cursor:pointer;color:var(--muted);white-space:nowrap;user-select:none">${label}${_allHistoryState.sortKey===key ? (_allHistoryState.sortDir==="asc"?" ▲":" ▼") : ""}</th>`).join("")}
+            </tr>
+          </thead>
+          <tbody>
+            ${sorted.map(e => `
+              <tr style="border-bottom:1px solid var(--border)">
+                <td style="padding:7px 10px;white-space:nowrap">${esc(e.username||"–")}</td>
+                <td style="padding:7px 10px;white-space:nowrap">${ALL_HISTORY_TYPE_LABELS[e.type] || esc(e.type||"–")}</td>
+                <td style="padding:7px 10px">${esc(e.title||"–")}</td>
+                <td style="padding:7px 10px;white-space:nowrap;color:var(--muted)">${esc(e.device||"–")}</td>
+                <td style="padding:7px 10px;white-space:nowrap">${e.method === "direct" ? "Direct" : "Transkodning"}</td>
+                <td style="padding:7px 10px;white-space:nowrap;color:var(--muted)">${new Date(e.at).toLocaleString("sv-SE")}</td>
+              </tr>`).join("")}
+          </tbody>
+        </table>
+        ${!sorted.length ? `<div style="text-align:center;color:var(--muted);padding:30px">Inga träffar</div>` : ""}
+      </div>`;
+
+    const paginationEl = document.getElementById("ah-pagination");
+    if (paginationEl) {
+      const page = Math.floor(_allHistoryState.offset / ALL_HISTORY_PAGE_SIZE) + 1;
+      const totalPages = Math.max(1, Math.ceil(data.total / ALL_HISTORY_PAGE_SIZE));
+      paginationEl.innerHTML = `
+        <button class="btn-fav" ${_allHistoryState.offset<=0?"disabled":""} onclick="setAllHistoryPage(${_allHistoryState.offset - ALL_HISTORY_PAGE_SIZE})">‹ Föregående</button>
+        <span style="color:var(--muted);font-size:13px;align-self:center">Sida ${page} av ${totalPages}</span>
+        <button class="btn-fav" ${_allHistoryState.offset + ALL_HISTORY_PAGE_SIZE >= data.total?"disabled":""} onclick="setAllHistoryPage(${_allHistoryState.offset + ALL_HISTORY_PAGE_SIZE})">Nästa ›</button>`;
+    }
+  } catch(e) {
+    container.innerHTML = `<p style="color:var(--danger)">Fel: ${esc(e.message)}</p>`;
+  }
+}
+
+function fmtHoursShort(minutes) {
+  const h = minutes / 60;
+  return h >= 1 ? `${h.toFixed(1)}h` : `${Math.round(minutes)}m`;
+}
+
+async function loadWeeklyHistoryChart() {
+  const el = document.getElementById("weekly-history-section");
+  if (!el) return;
+  try {
+    const data = await API.get("/admin/weekly-history?weeks=5");
+    const maxVal = Math.max(1, ...data.weeks.map(w => w.movie + w.tvshow + w.music));
+    const barAreaH = 220;
+    const typeColors = { movie: "#8bc98b", tvshow: "#e91e63", music: "#3498db" };
+    el.innerHTML = `
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:8px">
+        <div class="settings-section-title" style="margin:0">Spelningshistorik</div>
+        <button class="btn-fav" onclick="loadAllHistoryPage()">Visa all historik</button>
+      </div>
+      <div style="display:flex;align-items:flex-end;gap:14px;height:${barAreaH}px;padding:0 4px 24px;position:relative;border-bottom:1px solid var(--border)">
+        ${data.weeks.map(w => {
+          const total = w.movie + w.tvshow + w.music;
+          const segments = [["movie",w.movie],["tvshow",w.tvshow],["music",w.music]].filter(([,v]) => v > 0);
+          return `
+          <div style="flex:1;display:flex;flex-direction:column;align-items:center;height:100%;justify-content:flex-end;min-width:0;position:relative">
+            <div style="width:70%;display:flex;flex-direction:column-reverse;border-radius:4px 4px 0 0;overflow:hidden;height:${Math.max(2, (total/maxVal)*barAreaH)}px">
+              ${segments.map(([type,val]) => `<div style="background:${typeColors[type]};height:${(val/total)*100}%;width:100%" title="${type}: ${fmtHoursShort(val)}"></div>`).join("")}
+            </div>
+            <div style="position:absolute;bottom:-22px;font-size:11px;color:var(--muted);white-space:nowrap">${w.label}</div>
+          </div>`;
+        }).join("")}
+      </div>
+      <div style="display:flex;gap:16px;margin-top:10px;font-size:12px;color:var(--muted);flex-wrap:wrap">
+        <span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${typeColors.movie};margin-right:5px"></span>Filmer</span>
+        <span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${typeColors.tvshow};margin-right:5px"></span>TV</span>
+        <span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${typeColors.music};margin-right:5px"></span>Musik</span>
+        <span style="margin-left:auto">Totalt: Filmer — ${fmtHoursShort(data.totals.movie)} | TV — ${fmtHoursShort(data.totals.tvshow)} | Musik — ${fmtHoursShort(data.totals.music)}</span>
+      </div>`;
+  } catch(e) {
+    el.innerHTML = "";
+  }
+}
+
+function fmtRelativeTime(isoString) {
+  const diffMs = Date.now() - new Date(isoString).getTime();
+  const mins = Math.floor(diffMs / 60000);
+  if (mins < 1) return "nu";
+  if (mins < 60) return `${mins} min sedan`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h sedan`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days}d sedan`;
+  return new Date(isoString).toLocaleDateString("sv-SE");
+}
+
+async function loadRecentActivity() {
+  const el = document.getElementById("recent-activity-section");
+  if (!el) return;
+  try {
+    const data = await API.get("/admin/recent-activity?limit=20");
+    if (!data.activity.length) { el.innerHTML = ""; return; }
+    el.innerHTML = `
+      <div class="settings-section-title" style="display:flex;align-items:center;gap:8px">🕐 Senaste aktivitet</div>
+      <div style="display:flex;flex-direction:column;gap:2px">
+        ${data.activity.map(a => `
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 4px;font-size:13px;border-bottom:1px solid var(--border)">
+            <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+              <span style="color:var(--accent,#3498db);font-weight:600">${esc(a.username)}</span>
+              <span style="color:var(--muted)"> ${a.completed ? "såg klart" : "tittade på"} </span>
+              <span style="font-weight:600">${esc(a.title)}</span>
+            </div>
+            <span style="color:var(--muted);font-size:12px;white-space:nowrap;padding-left:12px">${fmtRelativeTime(a.watched_at)}</span>
+          </div>`).join("")}
+      </div>`;
+  } catch(e) {
+    el.innerHTML = "";
   }
 }
 
@@ -5060,13 +5336,34 @@ async function loadPlaybackStats() {
         </div>
       </div>` : ""}
 
-      ${s.mostWatched.length ? `<div>
+      ${s.mostWatched.length ? `<div style="margin-bottom:18px">
         <div style="font-size:13px;font-weight:500;margin-bottom:8px">Mest sedda</div>
         <div style="display:flex;flex-direction:column;gap:4px">
           ${s.mostWatched.map(m => `
             <div style="display:flex;justify-content:space-between;font-size:12px;background:var(--card2);border-radius:6px;padding:6px 10px">
               <span>${m.type === "episode" ? "📺" : "🎬"} ${esc(m.title)}</span>
               <span style="color:var(--muted)">${m.plays}x</span>
+            </div>`).join("")}
+        </div>
+      </div>` : ""}
+
+      ${s.mostActiveUsers?.length ? `<div>
+        <div style="font-size:13px;font-weight:500;margin-bottom:8px">Mest aktiva användare</div>
+        <div style="display:flex;flex-direction:column;gap:8px">
+          ${s.mostActiveUsers.map(u => `
+            <div style="background:var(--card2);border-radius:8px;overflow:hidden">
+              <div style="display:flex;align-items:center;gap:10px;padding:10px 12px">
+                <span style="width:28px;height:28px;border-radius:50%;background:var(--accent,#3498db);color:#fff;font-size:13px;display:flex;align-items:center;justify-content:center;flex-shrink:0">${esc((u.username||"?")[0].toUpperCase())}</span>
+                <div>
+                  <div style="font-weight:600;font-size:13px">${esc(u.username)}</div>
+                  <div style="font-size:11px;color:var(--muted)">${u.plays} spelningar · ${fmtHoursMin(u.totalMinutes)}</div>
+                </div>
+              </div>
+              <div style="font-size:12px">
+                <div style="display:flex;justify-content:space-between;padding:5px 12px;background:rgba(0,0,0,0.15)"><span style="color:var(--muted)">Filmer</span><span>${fmtHoursMin(u.minutesByType.movie)}</span></div>
+                <div style="display:flex;justify-content:space-between;padding:5px 12px"><span style="color:var(--muted)">Serier</span><span>${fmtHoursMin(u.minutesByType.tvshow)}</span></div>
+                <div style="display:flex;justify-content:space-between;padding:5px 12px;background:rgba(0,0,0,0.15)"><span style="color:var(--muted)">Musik</span><span>${fmtHoursMin(u.minutesByType.music)}</span></div>
+              </div>
             </div>`).join("")}
         </div>
       </div>` : ""}
@@ -5089,6 +5386,12 @@ function fmtTime(sec) {
   return h > 0 ? `${h}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}` : `${m}:${String(s).padStart(2,"0")}`;
 }
 
+function fmtHoursMin(minutes) {
+  minutes = Math.max(0, Math.round(minutes || 0));
+  const h = Math.floor(minutes / 60), m = minutes % 60;
+  return h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
+
 function renderLiveActivityContent(data) {
   var sessions = data.sessions || [];
   var transcodes = data.transcodes || [];
@@ -5102,17 +5405,24 @@ function renderLiveActivityContent(data) {
   if (!sessions.length) {
     html += `<div style="font-size:12px;color:var(--muted);margin-bottom:14px">Ingen tittar just nu</div>`;
   } else {
-    html += `<div style="display:flex;flex-direction:column;gap:6px;margin-bottom:14px">` + sessions.map(s => `
-      <div style="background:var(--card2);border-radius:8px;padding:8px 12px;font-size:13px">
-        <div style="display:flex;justify-content:space-between;gap:8px">
-          <div><b>${esc(s.username)}</b> – ${esc(s.title)}</div>
-          <span style="font-size:11px;padding:2px 8px;border-radius:10px;background:${s.method === "direct" ? "rgba(46,204,113,0.15);color:#2ecc71" : "rgba(230,126,34,0.15);color:#e67e22"}">${s.method === "direct" ? "Direct" : "Transkodning"}</span>
+    html += `<div style="display:flex;flex-direction:column;gap:10px;margin-bottom:14px">` + sessions.map(s => `
+      <div style="background:var(--card2);border-radius:10px;overflow:hidden;display:flex">
+        <div style="width:60px;flex-shrink:0;position:relative">
+          ${s.posterUrl ? `<img src="${s.posterUrl}" style="width:100%;height:100%;object-fit:cover;display:block">` : `<div style="width:100%;height:100%;min-height:90px;background:var(--border);display:flex;align-items:center;justify-content:center;font-size:20px">${s.type==="tvshow"?"📺":"🎬"}</div>`}
         </div>
-        <div style="display:flex;align-items:center;gap:8px;margin-top:4px">
-          <div style="flex:1;height:4px;background:var(--border);border-radius:2px;overflow:hidden"><div style="height:100%;width:${s.progressPct}%;background:var(--accent,#3498db)"></div></div>
-          <span style="font-size:11px;color:var(--muted);white-space:nowrap">${fmtTime(s.position)} / ${fmtTime(s.duration)}</span>
+        <div style="flex:1;padding:10px 12px;min-width:0">
+          <div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(s.title)}</div>
+          <div style="display:flex;align-items:center;gap:6px;margin-top:4px">
+            <span style="width:18px;height:18px;border-radius:50%;background:var(--accent,#3498db);color:#fff;font-size:10px;display:flex;align-items:center;justify-content:center;flex-shrink:0">${esc((s.username||"?")[0].toUpperCase())}</span>
+            <span style="font-size:12px;color:var(--muted)">${esc(s.username)}</span>
+            <span style="font-size:11px;padding:1px 7px;border-radius:10px;margin-left:auto;background:${s.method === "direct" ? "rgba(46,204,113,0.15)" : "rgba(230,126,34,0.15)"};color:${s.method === "direct" ? "#2ecc71" : "#e67e22"}">${s.method === "direct" ? "Direct" : "Transkodning"}</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;margin-top:6px">
+            <div style="flex:1;height:4px;background:var(--border);border-radius:2px;overflow:hidden"><div style="height:100%;width:${s.progressPct}%;background:var(--accent,#3498db)"></div></div>
+            <span style="font-size:11px;color:var(--muted);white-space:nowrap">${fmtTime(s.position)} / ${fmtTime(s.duration)}</span>
+          </div>
+          <div style="font-size:11px;color:var(--muted);margin-top:4px">${esc(s.device || "Okänd klient")} · ${esc(s.ip || "?")}</div>
         </div>
-        <div style="font-size:11px;color:var(--muted);margin-top:4px">${esc(s.device || "Okänd klient")} · ${esc(s.ip || "?")}</div>
       </div>`).join("") + `</div>`;
   }
 
@@ -5144,18 +5454,6 @@ function renderLiveActivityContent(data) {
           <div style="flex:1;height:4px;background:var(--border);border-radius:2px;overflow:hidden"><div style="height:100%;width:${d.progressPct}%;background:var(--accent,#3498db)"></div></div>
           <span style="font-size:11px;color:var(--muted);white-space:nowrap">${d.progressPct}%</span>
         </div>
-      </div>`).join("") + `</div>`;
-  }
-
-  // Recent history feed (all users)
-  html += `<div style="font-weight:500;margin-bottom:6px">🕓 Senaste aktivitet</div>`;
-  if (!history.length) {
-    html += `<div style="font-size:12px;color:var(--muted)">Ingen historik ännu</div>`;
-  } else {
-    html += `<div style="display:flex;flex-direction:column;gap:4px;max-height:240px;overflow-y:auto">` + history.slice(0, 20).map(h => `
-      <div style="font-size:12px;color:var(--muted);padding:4px 0;border-bottom:1px solid var(--border)">
-        <b style="color:var(--text)">${esc(h.username)}</b> ${h.completed ? "såg klart" : "tittade på"} <b style="color:var(--text)">${esc(h.title)}</b>
-        <span style="float:right">${new Date(h.watchedAt).toLocaleString("sv-SE")}</span>
       </div>`).join("") + `</div>`;
   }
 
@@ -5305,7 +5603,7 @@ async function loadSettings() {
       startScanProgressPolling();
     }
 
-    sec.innerHTML = `<div class="settings-wrap">
+    sec.innerHTML = `<div class="settings-wrap" style="${_settingsActiveTab === "overview" ? "max-width:1400px" : ""}">
       <div class="settings-title">Inställningar</div>
 
       ${_settingsActiveTab === "overview" ? `
@@ -5329,32 +5627,14 @@ async function loadSettings() {
 
       ${liveActivity ? renderLiveActivitySection(liveActivity) : ""}
 
+      <div class="settings-section" id="system-stats-section"></div>
+
+      <div class="settings-section" id="recent-activity-section"></div>
+
+      <div class="settings-section" id="weekly-history-section"></div>
+
       <div class="settings-section" id="playback-stats-section"></div>
 
-      <div class="settings-section">
-        <div class="settings-section-title">Biblioteksstatus</div>
-        <div style="display:flex;gap:12px;margin-bottom:12px">
-          <div style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:14px 20px;text-align:center">
-            <div style="font-size:22px;font-weight:600">${counts.movie || 0}</div>
-            <div style="font-size:12px;color:var(--muted)">Filmer${counts.collections ? " · " + counts.collections + " samlingar" : ""}</div>
-          </div>
-          <div style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:14px 20px;text-align:center">
-            <div style="font-size:22px;font-weight:600">${counts.tvshow || 0}</div>
-            <div style="font-size:12px;color:var(--muted)">Serier · ${counts.episodes || 0} avsnitt</div>
-          </div>
-          <div style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:14px 20px;text-align:center">
-            <div style="font-size:22px;font-weight:600">${counts.albums || 0}</div>
-            <div style="font-size:12px;color:var(--muted)">Album · ${counts.music || 0} låtar</div>
-          </div>
-        </div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap">
-          <button class="s-btn primary" onclick="rescan()">↻ Skanna efter nya filer</button>
-          <button class="s-btn" onclick="updateCollections()">🎬 Uppdatera samlingar</button>
-          <button class="s-btn" onclick="fullRescan()" style="border-color:#e74c3c;color:#e74c3c;">🗑 Rensa och skanna om allt</button>
-        </div>
-        <div id="scan-progress-info" style="font-size:12px;color:var(--muted);margin-top:8px;">${scanStatus.scanning ? scanProgressText(scanStatus.progress) : ""}</div>
-        <div style="font-size:12px;color:var(--muted);margin-top:4px;">👁 Filbevakning aktiv · <span id="next-scan-label">Beräknar...</span></div>
-      </div>
       ` : ""}
 
       ${_settingsActiveTab === "subs" ? `
@@ -5437,6 +5717,31 @@ async function loadSettings() {
       ` : ""}
 
       ${_settingsActiveTab === "library" ? `
+      <div class="settings-section">
+        <div class="settings-section-title">Biblioteksstatus</div>
+        <div style="display:flex;gap:12px;margin-bottom:12px">
+          <div style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:14px 20px;text-align:center">
+            <div style="font-size:22px;font-weight:600">${counts.movie || 0}</div>
+            <div style="font-size:12px;color:var(--muted)">Filmer${counts.collections ? " · " + counts.collections + " samlingar" : ""}</div>
+          </div>
+          <div style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:14px 20px;text-align:center">
+            <div style="font-size:22px;font-weight:600">${counts.tvshow || 0}</div>
+            <div style="font-size:12px;color:var(--muted)">Serier · ${counts.episodes || 0} avsnitt</div>
+          </div>
+          <div style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:14px 20px;text-align:center">
+            <div style="font-size:22px;font-weight:600">${counts.albums || 0}</div>
+            <div style="font-size:12px;color:var(--muted)">Album · ${counts.music || 0} låtar</div>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="s-btn primary" onclick="rescan()">↻ Skanna efter nya filer</button>
+          <button class="s-btn" onclick="updateCollections()">🎬 Uppdatera samlingar</button>
+          <button class="s-btn" onclick="fullRescan()" style="border-color:#e74c3c;color:#e74c3c;">🗑 Rensa och skanna om allt</button>
+        </div>
+        <div id="scan-progress-info" style="font-size:12px;color:var(--muted);margin-top:8px;">${scanStatus.scanning ? scanProgressText(scanStatus.progress) : ""}</div>
+        <div style="font-size:12px;color:var(--muted);margin-top:4px;">👁 Filbevakning aktiv · <span id="next-scan-label">Beräknar...</span></div>
+      </div>
+
       <div class="settings-section">
         <div class="settings-section-title">Bibliotek</div>
         <div class="user-list" id="lib-list">
@@ -5630,7 +5935,7 @@ async function loadSettings() {
     </div>`;
 
     if (currentUser?.role === "admin" && liveActivity) startLiveActivityPolling();
-    if (currentUser?.role === "admin" && _settingsActiveTab === "overview") loadPlaybackStats();
+    if (currentUser?.role === "admin" && _settingsActiveTab === "overview") { loadPlaybackStats(); startSystemStatsPolling(); loadRecentActivity(); loadWeeklyHistoryChart(); }
     if (currentUser?.role === "admin" && _settingsActiveTab === "subs") initVerboseSubtitleLoggingButton();
   } catch (e) {
     sec.innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><h3>${e.message}</h3></div>`;

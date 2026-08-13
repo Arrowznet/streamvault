@@ -9,6 +9,7 @@ const https = require("https");
 let musicMetadata;
 try { musicMetadata = require("music-metadata"); } catch(e) { console.log("[MUSIC] music-metadata not installed, using folder names"); }
 const http = require("http");
+const os = require("os");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const rateLimit = require("express-rate-limit");
@@ -478,6 +479,85 @@ const dbUpdate = (s, q, u, o={}) => new Promise((r, j) => s.update(q, u, o, (e, 
 const dbRemove = (s, q, o={}) => new Promise((r, j) => s.remove(q, o, (e, n) => e ? j(e) : r(n)));
 const dbCount = (s, q) => new Promise((r, j) => s.count(q, (e, n) => e ? j(e) : r(n)));
 
+// ── SYSTEM MONITORING ─────────────────────────────────────────────────────────
+// Continuously samples CPU and RAM usage (both for StreamVault's own process AND the whole
+// system, matching Plex's dashboard style of showing two lines per graph) into a rolling
+// buffer the admin overview page can poll for live-updating graphs. Sampling happens
+// regardless of whether anyone's looking at the page — cheap enough that this doesn't matter,
+// and it means the graph already has history the moment someone opens the page instead of
+// starting from a blank chart.
+const SYSTEM_STATS_INTERVAL_MS = 3000;
+const SYSTEM_STATS_MAX_SAMPLES = 60; // 60 × 3s = 3 minutes of history, comfortably covers Plex's own default "2m" view
+let _systemStatsBuffer = [];
+let _lastCpuSample = null; // { time, processCpu (from process.cpuUsage()), systemCpu }
+let _lastBandwidthSampleTime = null;
+let _bandwidthCounters = { local: 0, remote: 0 };
+function isLocalRequestIp(ip) {
+  if (!ip) return false;
+  const clean = ip.replace(/^::ffff:/, "");
+  return clean === "127.0.0.1" || clean === "::1" ||
+    /^10\./.test(clean) || /^192\.168\./.test(clean) ||
+    /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(clean);
+}
+const BANDWIDTH_TRACKED_PATTERNS = [/^\/api\/stream\//, /^\/api\/dash\//, /^\/api\/media\/.*\/direct/];
+
+function _readSystemCpuTimes() {
+  // Sums idle/total across all cores — os.cpus() gives cumulative counters since boot, so
+  // this only becomes meaningful as a delta between two samples, not a single reading.
+  const cpus = os.cpus();
+  let idle = 0, total = 0;
+  for (const cpu of cpus) {
+    idle += cpu.times.idle;
+    total += cpu.times.user + cpu.times.nice + cpu.times.sys + cpu.times.idle + cpu.times.irq;
+  }
+  return { idle, total, coreCount: cpus.length };
+}
+
+function sampleSystemStats() {
+  const now = Date.now();
+  const processCpu = process.cpuUsage(); // cumulative microseconds of CPU time used by THIS process since it started
+  const systemCpu = _readSystemCpuTimes();
+  const totalMem = os.totalmem();
+  const freeMem = os.freemem();
+  const processMemBytes = process.memoryUsage().rss;
+
+  let systemCpuPct = 0, processCpuPct = 0;
+  if (_lastCpuSample) {
+    const elapsedMs = now - _lastCpuSample.time;
+    const systemIdleDelta = systemCpu.idle - _lastCpuSample.systemCpu.idle;
+    const systemTotalDelta = systemCpu.total - _lastCpuSample.systemCpu.total;
+    systemCpuPct = systemTotalDelta > 0 ? Math.max(0, Math.min(100, 100 * (1 - systemIdleDelta / systemTotalDelta))) : 0;
+    // process.cpuUsage() deltas are in microseconds of CPU TIME, not wall-clock time — divide
+    // by (elapsed wall-clock × core count) to get a percentage comparable to the system one
+    // (matches how Task Manager/Plex present per-process CPU as a share of total capacity).
+    const processCpuDeltaUs = (processCpu.user + processCpu.system) - (_lastCpuSample.processCpu.user + _lastCpuSample.processCpu.system);
+    const availableUs = elapsedMs * 1000 * systemCpu.coreCount;
+    processCpuPct = availableUs > 0 ? Math.max(0, Math.min(100, 100 * processCpuDeltaUs / availableUs)) : 0;
+  }
+  _lastCpuSample = { time: now, processCpu, systemCpu };
+
+  // Bandwidth: bytes accumulated SINCE the last sample, converted to megabits-per-second
+  // over the actual elapsed interval (not assumed to be exactly 3s, in case a GC pause or
+  // slow tick pushed it slightly longer).
+  const elapsedSec = _lastBandwidthSampleTime ? (now - _lastBandwidthSampleTime) / 1000 : SYSTEM_STATS_INTERVAL_MS / 1000;
+  const localMbps = Math.round((_bandwidthCounters.local * 8 / 1e6 / elapsedSec) * 100) / 100;
+  const remoteMbps = Math.round((_bandwidthCounters.remote * 8 / 1e6 / elapsedSec) * 100) / 100;
+  _bandwidthCounters = { local: 0, remote: 0 };
+  _lastBandwidthSampleTime = now;
+
+  _systemStatsBuffer.push({
+    time: now,
+    systemCpuPct: Math.round(systemCpuPct * 10) / 10,
+    processCpuPct: Math.round(processCpuPct * 10) / 10,
+    systemMemPct: Math.round(100 * (totalMem - freeMem) / totalMem * 10) / 10,
+    processMemPct: Math.round(100 * processMemBytes / totalMem * 10) / 10,
+    localMbps, remoteMbps
+  });
+  if (_systemStatsBuffer.length > SYSTEM_STATS_MAX_SAMPLES) _systemStatsBuffer.shift();
+}
+setInterval(sampleSystemStats, SYSTEM_STATS_INTERVAL_MS);
+sampleSystemStats(); // seed the first sample immediately rather than waiting 3s for anything to show
+
 const app = express();
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: "10mb" }));
@@ -495,6 +575,24 @@ app.use((req, res, next) => {
 });
 app.use("/api/auth", rateLimit({ windowMs: 15*60*1000, max: 20 }));
 app.use("/api", rateLimit({ windowMs: 60*1000, max: 300 }));
+
+// Bandwidth tracking (for the same live "system-stats" graphs as CPU/RAM) — counts bytes
+// actually streamed to clients, split into "local" (same network) vs "remote" (over the
+// internet), matching Plex's own bandwidth graph. Deliberately scoped to the actual
+// media-streaming routes (direct-play, DASH segments, subtitle/artwork would just be noise)
+// rather than counting every API response — a JSON reply to "/api/media/:id" isn't
+// meaningful "bandwidth" in the sense this graph is trying to show.
+app.use((req, res, next) => {
+  if (!BANDWIDTH_TRACKED_PATTERNS.some(p => p.test(req.path))) return next();
+  const isLocal = isLocalRequestIp(req.ip || req.connection?.remoteAddress);
+  const originalWrite = res.write.bind(res);
+  res.write = (chunk, ...args) => {
+    const len = Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(chunk || "");
+    if (isLocal) _bandwidthCounters.local += len; else _bandwidthCounters.remote += len;
+    return originalWrite(chunk, ...args);
+  };
+  next();
+});
 
 function generateTokens(userId) {
   return {
@@ -1159,6 +1257,10 @@ app.get("/api/admin/server-log/dates", requireAdmin, (req, res) => {
       .sort().reverse();
     res.json({ dates });
   } catch(e) { res.json({ dates: [] }); }
+});
+
+app.get("/api/admin/system-stats", requireAdmin, (req, res) => {
+  res.json({ samples: _systemStatsBuffer, intervalMs: SYSTEM_STATS_INTERVAL_MS });
 });
 
 // ── IPTV ──────────────────────────────────────────────────────────────────────
@@ -2552,6 +2654,7 @@ app.post("/api/media/:id/progress", requireAuth, async (req, res) => {
       username: req.user.username,
       mediaId: req.params.id,
       title: item?.title || "Okänd",
+      posterUrl: item?.poster_url || null,
       type: item?.type || "unknown",
       position: position || 0,
       duration: duration || 0,
@@ -5235,6 +5338,106 @@ app.get("/api/admin/live-activity", requireAdmin, async (req, res) => {
 // container/codec combinations transcode most often (so it's visible at a glance instead of
 // manually reading server console logs), and per-title play counts. Reads from the
 // append-only playbackLog collection, separate from db.history (resume-position state).
+// "Senaste aktivitet" — a chronological feed of "X tittade på Y" / "X såg klart Y", Plex-style.
+// Built from db.history (each user's latest watch state per title) rather than a true
+// append-only event log — since watched_at updates every time someone plays something, and
+// naturally lands on "completed" once they actually finish it, sorting by watched_at gives a
+// reasonable approximation of "what happened most recently" without needing a separate log.
+// "Spelningshistorik" (Plex-style) — total time watched per week, broken down by content
+// type. Same time-approximation caveat as "Mest aktiva användare": derived from db.history's
+// position field (each user's latest watch state per title), not a precise per-session
+// timer. Weeks are simple rolling 7-day buckets counting back from today, not calendar weeks.
+// "Visa all historik" — the full, unaggregated playback log, filterable and paginated.
+// Sourced from db.playbackLog (a genuine append-only event log, one row per play request),
+// unlike the other history-based cards above which approximate from db.history's
+// latest-state-per-title data — this one shows every individual play, exactly as it happened.
+app.get("/api/admin/all-history", requireAdmin, async (req, res) => {
+  try {
+    const query = {};
+    if (req.query.user) query.username = req.query.user;
+    if (req.query.days) query.at = { $gte: new Date(Date.now() - parseInt(req.query.days) * 86400000).toISOString() };
+    const limit = Math.min(parseInt(req.query.limit) || 100, 500);
+    const offset = parseInt(req.query.offset) || 0;
+    const allMatching = (await dbFind(db.playbackLog, query)).sort((a, b) => new Date(b.at) - new Date(a.at));
+    const page = allMatching.slice(offset, offset + limit);
+    res.json({
+      entries: page.map(e => ({
+        username: e.username, type: e.type, title: e.title,
+        device: e.device, method: e.method, at: e.at
+      })),
+      total: allMatching.length
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get("/api/admin/weekly-history", requireAdmin, async (req, res) => {
+  try {
+    const weekCount = Math.min(parseInt(req.query.weeks) || 5, 12);
+    const now = new Date();
+    const weekMs = 7 * 86400000;
+    const rangeStart = new Date(now.getTime() - weekCount * weekMs);
+    const entries = await dbFind(db.history, { watched_at: { $gte: rangeStart.toISOString() } });
+    const mediaIds = [...new Set(entries.map(e => e.media_id))];
+    const media = await dbFind(db.media, { _id: { $in: mediaIds } });
+    const typeMap = Object.fromEntries(media.map(m => [m._id, m.type]));
+
+    const weeks = [];
+    for (let i = weekCount - 1; i >= 0; i--) {
+      const weekStart = new Date(now.getTime() - (i + 1) * weekMs);
+      const weekEnd = new Date(now.getTime() - i * weekMs);
+      weeks.push({ start: weekStart, end: weekEnd, movie: 0, tvshow: 0, music: 0 });
+    }
+    for (const e of entries) {
+      const watchedAt = new Date(e.watched_at);
+      const week = weeks.find(w => watchedAt >= w.start && watchedAt < w.end);
+      if (!week) continue;
+      const type = typeMap[e.media_id];
+      const minutes = (e.position || 0) / 60;
+      if (type === "movie") week.movie += minutes;
+      else if (type === "tvshow") week.tvshow += minutes;
+      else if (type === "music") week.music += minutes;
+    }
+
+    const fmtDate = (d) => d.toLocaleDateString("sv-SE", { month: "short", day: "numeric" });
+    res.json({
+      weeks: weeks.map(w => ({
+        label: `${fmtDate(w.start)} - ${fmtDate(w.end)}`,
+        movie: Math.round(w.movie), tvshow: Math.round(w.tvshow), music: Math.round(w.music)
+      })),
+      totals: {
+        movie: Math.round(weeks.reduce((s, w) => s + w.movie, 0)),
+        tvshow: Math.round(weeks.reduce((s, w) => s + w.tvshow, 0)),
+        music: Math.round(weeks.reduce((s, w) => s + w.music, 0))
+      }
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get("/api/admin/recent-activity", requireAdmin, async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit) || 20, 100);
+    const entries = (await dbFind(db.history, {})).sort((a, b) => new Date(b.watched_at) - new Date(a.watched_at)).slice(0, limit);
+    const userIds = [...new Set(entries.map(e => e.user_id))];
+    const mediaIds = [...new Set(entries.map(e => e.media_id))];
+    const [users, media] = await Promise.all([
+      dbFind(db.users, { _id: { $in: userIds } }),
+      dbFind(db.media, { _id: { $in: mediaIds } })
+    ]);
+    const userMap = Object.fromEntries(users.map(u => [u._id, u.username]));
+    const mediaMap = Object.fromEntries(media.map(m => [m._id, m]));
+    const activity = entries
+      .filter(e => userMap[e.user_id] && mediaMap[e.media_id]) // skip entries whose user/media has since been deleted
+      .map(e => ({
+        username: userMap[e.user_id],
+        title: mediaMap[e.media_id].title,
+        type: mediaMap[e.media_id].type,
+        completed: !!e.completed,
+        watched_at: e.watched_at
+      }));
+    res.json({ activity });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get("/api/admin/playback-stats", requireAdmin, async (req, res) => {
   try {
     const days = Math.min(parseInt(req.query.days) || 30, 365);
@@ -5291,10 +5494,45 @@ app.get("/api/admin/playback-stats", requireAdmin, async (req, res) => {
     }
     const byUser = [...userMap.values()].sort((a, b) => b.plays - a.plays);
 
+    // "Mest aktiva användare" — minutes watched per content type, not just play counts.
+    // Derived from db.history (each user's latest position per title) rather than
+    // playbackLog, since that's where actual watch position/duration lives. This is an
+    // approximation, not a precise "time actually spent watching" — position reflects
+    // wherever playback last left off, so a rewatch-from-scratch after finishing something
+    // wouldn't double-count, and a session that was scrubbed around isn't measured as
+    // continuously-watched time. Good enough for "who's actually using this and for what",
+    // which is the actual question this card answers.
+    const historyEntries = await dbFind(db.history, { watched_at: { $gte: since } });
+    const historyUserIds = [...new Set(historyEntries.map(h => h.user_id))];
+    const historyMediaIds = [...new Set(historyEntries.map(h => h.media_id))];
+    const [activeUsersInfo, activeMediaInfo] = await Promise.all([
+      dbFind(db.users, { _id: { $in: historyUserIds } }),
+      dbFind(db.media, { _id: { $in: historyMediaIds } })
+    ]);
+    const userInfoMap = Object.fromEntries(activeUsersInfo.map(u => [u._id, u]));
+    const mediaTypeMap = Object.fromEntries(activeMediaInfo.map(m => [m._id, m.type]));
+    const activeUserMap = new Map();
+    for (const h of historyEntries) {
+      const uname = userInfoMap[h.user_id]?.username;
+      if (!uname) continue; // deleted user — nothing meaningful left to attribute this to
+      if (!activeUserMap.has(h.user_id)) activeUserMap.set(h.user_id, { username: uname, plays: 0, minutesByType: { movie: 0, tvshow: 0, music: 0 } });
+      const u = activeUserMap.get(h.user_id);
+      u.plays++;
+      const type = mediaTypeMap[h.media_id];
+      const minutes = Math.round((h.position || 0) / 60);
+      if (type === "movie") u.minutesByType.movie += minutes;
+      else if (type === "tvshow") u.minutesByType.tvshow += minutes;
+      else if (type === "music") u.minutesByType.music += minutes;
+    }
+    const mostActiveUsers = [...activeUserMap.values()]
+      .map(u => ({ ...u, totalMinutes: u.minutesByType.movie + u.minutesByType.tvshow + u.minutesByType.music }))
+      .sort((a, b) => b.totalMinutes - a.totalMinutes)
+      .slice(0, 10);
+
     res.json({
       days, totalPlays, directCount, transcodeCount, confirmedPlays: confirmedEntries.length,
       directPct: totalPlays ? Math.round((directCount / totalPlays) * 100) : 0,
-      byContainerCodec, mostWatched, dailyStats, byUser
+      byContainerCodec, mostWatched, dailyStats, byUser, mostActiveUsers
     });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
