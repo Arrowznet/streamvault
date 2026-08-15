@@ -761,11 +761,26 @@ app.get("/api/me", requireAuth, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Personal preference, but same permission model as language: you can always change your
+// own, admins can change anyone's (e.g. setting a theme for a new/test account without
+// having to log in as them).
+app.patch("/api/users/:id/theme", requireAuth, async (req, res) => {
+  try {
+    const { theme } = req.body;
+    if (!theme) return res.status(400).json({ error: "Inget tema angivet" });
+    if (req.params.id !== req.user._id && req.user.role !== "admin") {
+      return res.status(403).json({ error: "Ej tillåtet" });
+    }
+    await dbUpdate(db.users, { _id: req.params.id }, { $set: { theme } });
+    res.json({ ok: true, theme });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get("/api/users", requireAdmin, async (req, res) => {
   const users = await dbFind(db.users, { is_active: true });
   res.json(users.map(u => ({
     id: u._id, username: u.username, role: u.role, created_at: u.created_at, last_login: u.last_login,
-    library_ids: u.library_ids || [], language: u.language || null, subtitleLanguages: u.subtitleLanguages || []
+    library_ids: u.library_ids || [], language: u.language || null, subtitleLanguages: u.subtitleLanguages || [], theme: u.theme || null
   })));
 });
 
@@ -3417,6 +3432,17 @@ const seekLocks = new Map(); // Prevent concurrent seeks for same item
 // match — being technically playable isn't the same as being the track someone actually
 // wants when the real audio track isn't supported by their device. Shared between the
 // direct-play capability check and startDashTranscode's own audio-track selection.
+// Converts raw pixel dimensions into the common resolution names people actually recognize
+// (matching how Plex/most media apps label things), rather than showing raw "3836x1604".
+function friendlyResolutionLabel(width, height) {
+  if (!width || !height) return "Okänd upplösning";
+  if (width >= 3800) return "4K";
+  if (width >= 1900) return "1080p";
+  if (width >= 1200) return "720p";
+  if (width >= 700) return "480p";
+  return `${width}x${height}`;
+}
+
 function isCommentaryTrack(title) {
   if (!title) return false;
   const t = title.toLowerCase();
@@ -3502,6 +3528,7 @@ async function startDashTranscode(item, seekSec = 0, audioTrackIndex = null, all
   // Prefer AC3/EAC3/AAC over TrueHD/DTS (TrueHD causes FFmpeg errors in DASH), and never pick
   // a commentary track just because its codec happens to match — see isCommentaryTrack above.
   let bestAudioIndex = 0;
+  let sourceAudioCodec = null, sourceAudioChannels = null, sourceAudioLanguage = null;
   if (audioTrackIndex === null) {
     try {
       const { execFileSync } = require("child_process");
@@ -3516,6 +3543,9 @@ async function startDashTranscode(item, seekSec = 0, audioTrackIndex = null, all
       if (preferred) {
         // Find relative audio index
         bestAudioIndex = audioStreams.indexOf(preferred);
+        sourceAudioCodec = preferred.codec_name;
+        sourceAudioChannels = preferred.channel_layout || (preferred.channels ? `${preferred.channels}ch` : null);
+        sourceAudioLanguage = preferred.tags?.language ? subtitleLangLabel(normalizeLangCode(preferred.tags.language)) : null;
         console.log(`[DASH] Auto-selected audio stream: ${bestAudioIndex} (${preferred.codec_name})`);
       }
     } catch(e) {
@@ -3565,7 +3595,8 @@ async function startDashTranscode(item, seekSec = 0, audioTrackIndex = null, all
   const proc = spawn(ffmpeg, args, { windowsHide: false, cwd: dashDir });
   activeDashTranscodes.set(itemId, {
     proc, startTime: Date.now(), startSec: seekSec, duration: await getDuration(item),
-    title: item.title, videoMode: canCopyVideo ? (canCopyHevc ? "copy-hevc" : "copy-h264") : `encode-${encoder}`
+    title: item.title, videoMode: canCopyVideo ? (canCopyHevc ? "copy-hevc" : "copy-h264") : `encode-${encoder}`,
+    sourceAudioCodec, sourceAudioChannels, sourceAudioLanguage
   });
 
   let stderrBuf = "";
@@ -5278,19 +5309,47 @@ app.get("/api/admin/live-activity", requireAdmin, async (req, res) => {
   try {
     const now = Date.now();
 
-    const sessions = [...(_activeSessions.values())].map(s => ({
-      ...s,
-      idleSeconds: Math.round((now - s.lastHeartbeat) / 1000),
-      progressPct: s.duration > 0 ? Math.min(100, Math.round((s.position / s.duration) * 100)) : 0
-    }));
+    const transcodeByMediaId = new Map(activeDashTranscodes.entries());
+    const sessionMediaIds = [...new Set([...(_activeSessions.values())].map(s => s.mediaId).filter(Boolean))];
+    const sessionMedia = sessionMediaIds.length ? Object.fromEntries((await dbFind(db.media, { _id: { $in: sessionMediaIds } })).map(m => [m._id, m])) : {};
 
-    const transcodes = [...activeDashTranscodes.entries()].map(([mediaId, t]) => ({
-      mediaId,
-      title: t.title,
-      videoMode: t.videoMode || "unknown",
-      elapsedSeconds: Math.round((now - t.startTime) / 1000),
-      startSec: t.startSec
-    }));
+    const sessions = [...(_activeSessions.values())].map(s => {
+      const t = transcodeByMediaId.get(s.mediaId);
+      const item = sessionMedia[s.mediaId];
+      let videoInfo = null, audioInfo = null;
+      if (t && item) {
+        // Merged in from the transcode job directly — this used to be its own separate
+        // "Aktiva transkodningar" list; showing it right on the session it belongs to
+        // (Plex's own "visa detaljer" style) makes a lot more sense than a disconnected list.
+        const isHdr = (item.width || 0) >= 3000 && (item.bit_depth || 8) === 10;
+        const srcRes = friendlyResolutionLabel(item.width, item.height);
+        const srcCodec = (item.codec || "?").toUpperCase();
+        // "Main 10" vs "Main" is inferred from bit depth, not stored directly — HDR content is
+        // essentially always 10-bit "Main 10" profile, SDR HEVC is essentially always 8-bit
+        // "Main". A reasonable approximation, not a guaranteed-exact readout from the file.
+        const profile = srcCodec === "HEVC" ? ((item.bit_depth || 8) === 10 ? " Main 10" : " Main") : "";
+        const isHw = /nvenc|amf|qsv/.test(t.videoMode || "");
+        videoInfo = {
+          source: `${srcRes}${isHdr ? " HDR10" : ""} (${srcCodec}${profile})`,
+          target: `1080p (H264) — Transkodas${isHw ? " (GPU)" : ""}`
+        };
+        const cleanChannels = (t.sourceAudioChannels || "").replace(/\s*\((side|back|front)\)/gi, ""); // ffprobe channel_layout includes technical detail like "5.1(side)" that isn't meaningful to a viewer
+        audioInfo = {
+          source: t.sourceAudioCodec
+            ? `${t.sourceAudioLanguage ? t.sourceAudioLanguage + " " : ""}(${t.sourceAudioCodec.toUpperCase()}${cleanChannels ? " " + cleanChannels : ""})`
+            : "Okänt format",
+          target: "AAC — Omkodas"
+        };
+      } else if (item) {
+        videoInfo = { source: "Direktuppspelning", target: null };
+      }
+      return {
+        ...s,
+        idleSeconds: Math.round((now - s.lastHeartbeat) / 1000),
+        progressPct: s.duration > 0 ? Math.min(100, Math.round((s.position / s.duration) * 100)) : 0,
+        videoInfo, audioInfo
+      };
+    });
 
     const downloads = [...(_activeDownloads.values())].map(d => ({
       ...d,
@@ -5326,7 +5385,6 @@ app.get("/api/admin/live-activity", requireAdmin, async (req, res) => {
 
     res.json({
       sessions,
-      transcodes,
       downloads,
       recentHistory,
       subtitleQueue: { running: _subtitleCacheRunning, queued: _subtitleCacheQueue.length }

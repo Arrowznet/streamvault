@@ -20,6 +20,7 @@ window.addEventListener("DOMContentLoaded", async () => {
     const user = JSON.parse(localStorage.getItem("sv_user") || "null");
     if (user) {
       currentUser = user;
+      applyTheme(user.theme || "standard");
       try {
         const c = await API.get("/public-config");
         window._serverName = c.server_name || "StreamVault";
@@ -35,6 +36,7 @@ window.addEventListener("DOMContentLoaded", async () => {
         if (fresh && fresh._id) {
           currentUser = Object.assign({}, currentUser, fresh, { id: fresh._id });
           localStorage.setItem("sv_user", JSON.stringify(currentUser));
+          if (fresh.theme) applyTheme(fresh.theme);
         }
       }).catch(() => {});
       return;
@@ -45,7 +47,7 @@ window.addEventListener("DOMContentLoaded", async () => {
     if (data?.accessToken) {
       API.setTokens(data.accessToken, data.refreshToken);
       const user = JSON.parse(localStorage.getItem("sv_user") || "null");
-      if (user) { currentUser = user; showApp(); return; }
+      if (user) { currentUser = user; applyTheme(user.theme || "standard"); showApp(); return; }
     }
   } catch {}
 });
@@ -75,6 +77,7 @@ async function login() {
       if (fresh && fresh._id) {
         currentUser = Object.assign({}, currentUser, fresh, { id: fresh._id });
         localStorage.setItem("sv_user", JSON.stringify(currentUser));
+        applyTheme(currentUser.theme || "standard");
         console.log("[LOGIN] Full profile refreshed — language:", currentUser.language, "subtitleLanguages:", currentUser.subtitleLanguages);
       } else {
         console.log("[LOGIN] /me returned no usable data:", fresh);
@@ -381,6 +384,7 @@ function switchSection(name, fromRouter) {
   document.querySelectorAll(".sb-item").forEach(b => b.classList.remove("active"));
   if (name !== "settings" && _liveActivityInterval) { clearInterval(_liveActivityInterval); _liveActivityInterval = null; }
   if (name !== "settings" && _systemStatsInterval) { clearInterval(_systemStatsInterval); _systemStatsInterval = null; }
+  if (name !== "settings" && _downloadsInterval) { clearInterval(_downloadsInterval); _downloadsInterval = null; }
   if (name !== "settings" && _scanProgressInterval) { clearInterval(_scanProgressInterval); _scanProgressInterval = null; }
   if (name !== "settings" && _inSettingsSidebarMode) { _inSettingsSidebarMode = false; loadSidebarLibraries(); }
   if (!fromRouter) {
@@ -4988,6 +4992,66 @@ var _cacheStatusInterval = null;
 // Falls back to the raw code for anything not in the list, so new/rare languages still show up.
 var SUBTITLE_LANG_ADJ = { swe:"svensk", eng:"engelsk", nor:"norsk", dan:"dansk", deu:"tysk", fra:"fransk", spa:"spansk", nld:"nederländsk", fin:"finsk", ita:"italiensk", por:"portugisisk", pol:"polsk", jpn:"japansk", und:"okänd" };
 // ── LIVE ACTIVITY (admin dashboard) ────────────────────────────────────────────
+// ── THEMES ────────────────────────────────────────────────────────────────────
+// Each theme is just a different set of values for the same CSS custom properties the whole
+// app already uses (--bg, --card, --text, --accent, etc.) — switching themes never touches
+// any actual page markup, just re-points what those variables resolve to.
+const THEMES = {
+  standard: {
+    label: "Standard (mörk)",
+    vars: { "--bg":"#0a0a12", "--surface":"#0f0f1a", "--card":"#141420", "--card2":"#1a1a28", "--border":"#222235", "--accent":"#e05724", "--accent2":"#e05724", "--text":"#eeeef8", "--muted":"#8080a0", "--success":"#2ecc71", "--danger":"#e05724" }
+  },
+  plexlik: {
+    label: "Plex-liknande (mörk, guld)",
+    vars: { "--bg":"#1f1f1f", "--surface":"#232323", "--card":"#282828", "--card2":"#2f2f2f", "--border":"#3a3a3a", "--accent":"#cc7b19", "--accent2":"#e5a00d", "--text":"#f2f2f2", "--muted":"#a3a3a3", "--success":"#2ecc71", "--danger":"#e5541b" }
+  },
+  midnatt: {
+    label: "Midnattsblå (mörk)",
+    vars: { "--bg":"#0a0e1a", "--surface":"#0f1524", "--card":"#141b2e", "--card2":"#1b2338", "--border":"#253048", "--accent":"#3498db", "--accent2":"#5dade2", "--text":"#e8ecf5", "--muted":"#7c8aa8", "--success":"#2ecc71", "--danger":"#e74c3c" }
+  },
+  skog: {
+    label: "Skog (mörk, grön)",
+    vars: { "--bg":"#0d1410", "--surface":"#111c15", "--card":"#16211a", "--card2":"#1c2921", "--border":"#28382c", "--accent":"#4caf7d", "--accent2":"#6ec99a", "--text":"#e8f0ea", "--muted":"#84998c", "--success":"#4caf7d", "--danger":"#e05724" }
+  },
+  ljus: {
+    label: "Ljus",
+    vars: { "--bg":"#f4f4f7", "--surface":"#ffffff", "--card":"#ffffff", "--card2":"#eef0f4", "--border":"#dcdfe6", "--accent":"#d9531e", "--accent2":"#d9531e", "--text":"#1a1a24", "--muted":"#6b6b7d", "--success":"#27ae60", "--danger":"#d9531e" }
+  },
+  ljusvarm: {
+    label: "Ljus (varm)",
+    vars: { "--bg":"#faf6f0", "--surface":"#fffdf9", "--card":"#fffdf9", "--card2":"#f3ece1", "--border":"#e5dbc9", "--accent":"#c1701e", "--accent2":"#c1701e", "--text":"#2b2418", "--muted":"#7a6f5c", "--success":"#27ae60", "--danger":"#c1381e" }
+  }
+};
+
+function applyTheme(themeName) {
+  const theme = THEMES[themeName] || THEMES.standard;
+  for (const [key, val] of Object.entries(theme.vars)) {
+    document.documentElement.style.setProperty(key, val);
+  }
+  // Belt-and-suspenders: some chrome elements (sidebar, topbar) may have their own hardcoded
+  // background/border colors in the stylesheet rather than referencing the CSS variables
+  // above, which would make them not update live when switching themes. Setting them
+  // directly here guarantees they follow the theme regardless of how the stylesheet itself
+  // is written.
+  const sidebar = document.getElementById("sidebar");
+  if (sidebar) { sidebar.style.background = theme.vars["--surface"]; sidebar.style.borderColor = theme.vars["--border"]; }
+  const topbar = document.getElementById("topbar");
+  if (topbar) { topbar.style.background = theme.vars["--surface"]; topbar.style.borderColor = theme.vars["--border"]; }
+  window._currentTheme = themeName;
+}
+
+async function saveUserTheme(userId, themeName) {
+  const isOwnProfile = userId === currentUser?.id;
+  if (isOwnProfile) applyTheme(themeName); // no reason to visually change YOUR OWN screen when setting someone else's theme
+  try {
+    await API.patch("/users/" + userId + "/theme", { theme: themeName });
+    toast("✓ Tema sparat", "success");
+    if (currentUser.role === "admin") loadUserPage(userId); // refresh to show the new selection highlighted
+  } catch(e) {
+    toast("Kunde inte spara tema: " + e.message, "error");
+  }
+}
+
 var _liveActivityInterval = null;
 var _systemStatsInterval = null;
 
@@ -5039,12 +5103,20 @@ async function refreshSystemStatsGraphs() {
       // every subsequent poll (avoids replacing the whole section, which would cause a
       // visible flicker every 3 seconds).
       sec.innerHTML = `
-        <div class="settings-section-title">Bandbredd</div>
-        <div id="system-stats-bandwidth-chart" style="margin-bottom:20px"></div>
-        <div class="settings-section-title">CPU</div>
-        <div id="system-stats-cpu-chart" style="margin-bottom:20px"></div>
-        <div class="settings-section-title">RAM</div>
-        <div id="system-stats-ram-chart"></div>`;
+        <div style="display:flex;gap:20px;flex-wrap:wrap">
+          <div style="flex:1;min-width:220px">
+            <div class="settings-section-title">Bandbredd</div>
+            <div id="system-stats-bandwidth-chart"></div>
+          </div>
+          <div style="flex:1;min-width:220px">
+            <div class="settings-section-title">CPU</div>
+            <div id="system-stats-cpu-chart"></div>
+          </div>
+          <div style="flex:1;min-width:220px">
+            <div class="settings-section-title">RAM</div>
+            <div id="system-stats-ram-chart"></div>
+          </div>
+        </div>`;
     }
     renderLiveLineChart("system-stats-bandwidth-chart", data.samples, [
       { key: "localMbps", label: "Lokalt", color: "#3498db" },
@@ -5281,77 +5353,86 @@ async function loadRecentActivity() {
 
 async function loadPlaybackStats() {
   const el = document.getElementById("playback-stats-section");
+  const activeUsersEl = document.getElementById("most-active-users-section");
   if (!el) return;
   try {
     const s = await API.get("/admin/playback-stats?days=30");
     if (!s.totalPlays) {
       el.innerHTML = `<div class="settings-section-title">Uppspelningsstatistik (senaste 30 dagarna)</div>
         <p style="color:var(--muted);font-size:13px">Inga uppspelningar loggade än.</p>`;
+      if (activeUsersEl) activeUsersEl.innerHTML = "";
       return;
     }
     const maxDaily = Math.max(1, ...s.dailyStats.map(d => d.direct + d.transcode));
+
+    // Bottom row, matching the sketch: Format som transkodas mest (small) | Uppspelningsstatistik (wide, middle) | Mest sedda (small)
     el.innerHTML = `
-      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
-        <div class="settings-section-title" style="margin:0">Uppspelningsstatistik (senaste ${s.days} dagarna)</div>
-        <button class="btn-fav" style="font-size:11px;color:var(--muted)" onclick="resetPlaybackStats()" title="Rensar all uppspelningshistorik permanent">🗑 Nollställ statistik</button>
+      <div style="display:flex;gap:20px;flex-wrap:wrap;align-items:flex-start">
+        <div style="flex:1;min-width:200px">
+          <div class="settings-section-title">Format som transkodas mest</div>
+          ${s.byContainerCodec.length ? `<div style="display:flex;flex-direction:column;gap:4px">
+            ${s.byContainerCodec.map(c => `
+              <div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;background:var(--card2);border-radius:6px;padding:6px 10px">
+                <span>${esc(c.combo)}</span>
+                <span style="color:${c.transcodePct > 50 ? "#e67e22" : "var(--muted)"}">${c.transcodePct}% (${c.total}x)</span>
+              </div>`).join("")}
+          </div>` : `<p style="color:var(--muted);font-size:12px">Inget ännu</p>`}
+        </div>
+
+        <div style="flex:2;min-width:280px">
+          <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+            <div class="settings-section-title" style="margin:0">Uppspelningsstatistik (senaste ${s.days} dagarna)</div>
+            <button class="btn-fav" style="font-size:11px;color:var(--muted)" onclick="resetPlaybackStats()" title="Rensar all uppspelningshistorik permanent">🗑 Nollställ</button>
+          </div>
+          <div style="display:flex;gap:10px;margin:10px 0;flex-wrap:wrap">
+            <div style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:10px 16px;text-align:center;flex:1;min-width:100px">
+              <div style="font-size:20px;font-weight:600">${s.totalPlays}</div>
+              <div style="font-size:11px;color:var(--muted)">Uppspelningar</div>
+            </div>
+            <div style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:10px 16px;text-align:center;flex:1;min-width:100px">
+              <div style="font-size:20px;font-weight:600;color:#2ecc71">${s.directPct}%</div>
+              <div style="font-size:11px;color:var(--muted)">Direkt</div>
+            </div>
+            <div style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:10px 16px;text-align:center;flex:1;min-width:100px">
+              <div style="font-size:20px;font-weight:600;color:#e67e22">${100 - s.directPct}%</div>
+              <div style="font-size:11px;color:var(--muted)">Transkodning</div>
+            </div>
+          </div>
+          ${s.dailyStats.length ? `<div>
+            <div style="font-size:12px;color:var(--muted);margin-bottom:6px">Per dag (Direkt/Transkodning)</div>
+            <div style="display:flex;align-items:flex-end;gap:3px;height:80px">
+              ${s.dailyStats.map(d => {
+                const total = d.direct + d.transcode;
+                const h = Math.max(2, Math.round((total / maxDaily) * 76));
+                const directH = total ? Math.round((d.direct / total) * h) : 0;
+                return `<div title="${d.date}: ${d.direct} direkt, ${d.transcode} transkodat" style="flex:1;display:flex;flex-direction:column;justify-content:flex-end;height:76px">
+                  <div style="background:#e67e22;height:${h - directH}px;border-radius:2px 2px 0 0"></div>
+                  <div style="background:#2ecc71;height:${directH}px;border-radius:${h - directH > 0 ? "0" : "2px 2px"} 0 0"></div>
+                </div>`;
+              }).join("")}
+            </div>
+          </div>` : ""}
+        </div>
+
+        <div style="flex:1;min-width:200px">
+          <div class="settings-section-title">Mest sedda</div>
+          ${s.mostWatched.length ? `<div style="display:flex;flex-direction:column;gap:4px">
+            ${s.mostWatched.map(m => `
+              <div style="display:flex;justify-content:space-between;font-size:12px;background:var(--card2);border-radius:6px;padding:6px 10px">
+                <span>${m.type === "episode" ? "📺" : "🎬"} ${esc(m.title)}</span>
+                <span style="color:var(--muted)">${m.plays}x</span>
+              </div>`).join("")}
+          </div>` : `<p style="color:var(--muted);font-size:12px">Inget ännu</p>`}
+        </div>
       </div>
-      <div style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap;margin-top:10px">
-        <div style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:14px 20px;text-align:center;flex:1;min-width:120px">
-          <div style="font-size:22px;font-weight:600">${s.totalPlays}</div>
-          <div style="font-size:12px;color:var(--muted)">Uppspelningar${s.confirmedPlays !== undefined ? ` (${s.confirmedPlays} bekräftat sedda)` : ""}</div>
-        </div>
-        <div style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:14px 20px;text-align:center;flex:1;min-width:120px">
-          <div style="font-size:22px;font-weight:600;color:#2ecc71">${s.directPct}%</div>
-          <div style="font-size:12px;color:var(--muted)">Direktuppspelning</div>
-        </div>
-        <div style="background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:14px 20px;text-align:center;flex:1;min-width:120px">
-          <div style="font-size:22px;font-weight:600;color:#e67e22">${100 - s.directPct}%</div>
-          <div style="font-size:12px;color:var(--muted)">Transkodning</div>
-        </div>
-      </div>
+    `;
 
-      ${s.dailyStats.length ? `<div style="margin-bottom:18px">
-        <div style="font-size:13px;font-weight:500;margin-bottom:8px">Per dag</div>
-        <div style="display:flex;align-items:flex-end;gap:3px;height:80px">
-          ${s.dailyStats.map(d => {
-            const total = d.direct + d.transcode;
-            const h = Math.max(2, Math.round((total / maxDaily) * 76));
-            const directH = total ? Math.round((d.direct / total) * h) : 0;
-            return `<div title="${d.date}: ${d.direct} direkt, ${d.transcode} transkodat" style="flex:1;display:flex;flex-direction:column;justify-content:flex-end;height:76px">
-              <div style="background:#e67e22;height:${h - directH}px;border-radius:2px 2px 0 0"></div>
-              <div style="background:#2ecc71;height:${directH}px;border-radius:${h - directH > 0 ? "0" : "2px 2px"} 0 0"></div>
-            </div>`;
-          }).join("")}
-        </div>
-      </div>` : ""}
-
-      ${s.byContainerCodec.length ? `<div style="margin-bottom:18px">
-        <div style="font-size:13px;font-weight:500;margin-bottom:8px">Format som transkodas mest</div>
-        <div style="display:flex;flex-direction:column;gap:4px">
-          ${s.byContainerCodec.map(c => `
-            <div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;background:var(--card2);border-radius:6px;padding:6px 10px">
-              <span>${esc(c.combo)}</span>
-              <span style="color:${c.transcodePct > 50 ? "#e67e22" : "var(--muted)"}">${c.transcodePct}% transkodat (${c.total} ggr)</span>
-            </div>`).join("")}
-        </div>
-      </div>` : ""}
-
-      ${s.mostWatched.length ? `<div style="margin-bottom:18px">
-        <div style="font-size:13px;font-weight:500;margin-bottom:8px">Mest sedda</div>
-        <div style="display:flex;flex-direction:column;gap:4px">
-          ${s.mostWatched.map(m => `
-            <div style="display:flex;justify-content:space-between;font-size:12px;background:var(--card2);border-radius:6px;padding:6px 10px">
-              <span>${m.type === "episode" ? "📺" : "🎬"} ${esc(m.title)}</span>
-              <span style="color:var(--muted)">${m.plays}x</span>
-            </div>`).join("")}
-        </div>
-      </div>` : ""}
-
-      ${s.mostActiveUsers?.length ? `<div>
-        <div style="font-size:13px;font-weight:500;margin-bottom:8px">Mest aktiva användare</div>
-        <div style="display:flex;flex-direction:column;gap:8px">
+    if (activeUsersEl && s.mostActiveUsers?.length) {
+      activeUsersEl.innerHTML = `
+        <div class="settings-section-title">Mest aktiva användare</div>
+        <div style="display:flex;flex-wrap:wrap;gap:12px">
           ${s.mostActiveUsers.map(u => `
-            <div style="background:var(--card2);border-radius:8px;overflow:hidden">
+            <div style="background:var(--card2);border-radius:8px;overflow:hidden;flex:1;min-width:240px">
               <div style="display:flex;align-items:center;gap:10px;padding:10px 12px">
                 <span style="width:28px;height:28px;border-radius:50%;background:var(--accent,#3498db);color:#fff;font-size:13px;display:flex;align-items:center;justify-content:center;flex-shrink:0">${esc((u.username||"?")[0].toUpperCase())}</span>
                 <div>
@@ -5365,19 +5446,22 @@ async function loadPlaybackStats() {
                 <div style="display:flex;justify-content:space-between;padding:5px 12px;background:rgba(0,0,0,0.15)"><span style="color:var(--muted)">Musik</span><span>${fmtHoursMin(u.minutesByType.music)}</span></div>
               </div>
             </div>`).join("")}
-        </div>
-      </div>` : ""}
-    `;
+        </div>`;
+    } else if (activeUsersEl) {
+      activeUsersEl.innerHTML = "";
+    }
   } catch(e) {
     el.innerHTML = "";
   }
 }
 
 function renderLiveActivitySection(data) {
-  return `<div class="settings-section" id="live-activity-section">
-    <div class="settings-section-title">🔴 Live-aktivitet</div>
-    <div id="live-activity-content">${renderLiveActivityContent(data)}</div>
-  </div>`;
+  var sessions = data.sessions || [];
+  return `
+    <div class="settings-section" id="now-playing-section">
+      <div class="settings-section-title">📺 Nu spelas</div>
+      <div id="now-playing-content">${renderNowPlayingContent(sessions)}</div>
+    </div>`;
 }
 
 function fmtTime(sec) {
@@ -5392,72 +5476,50 @@ function fmtHoursMin(minutes) {
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
 
-function renderLiveActivityContent(data) {
-  var sessions = data.sessions || [];
-  var transcodes = data.transcodes || [];
-  var downloads = data.downloads || [];
-  var history = data.recentHistory || [];
-
-  var html = "";
-
-  // Active sessions
-  html += `<div style="font-weight:500;margin-bottom:6px">📺 Just nu (${sessions.length})</div>`;
-  if (!sessions.length) {
-    html += `<div style="font-size:12px;color:var(--muted);margin-bottom:14px">Ingen tittar just nu</div>`;
-  } else {
-    html += `<div style="display:flex;flex-direction:column;gap:10px;margin-bottom:14px">` + sessions.map(s => `
-      <div style="background:var(--card2);border-radius:10px;overflow:hidden;display:flex">
-        <div style="width:60px;flex-shrink:0;position:relative">
-          ${s.posterUrl ? `<img src="${s.posterUrl}" style="width:100%;height:100%;object-fit:cover;display:block">` : `<div style="width:100%;height:100%;min-height:90px;background:var(--border);display:flex;align-items:center;justify-content:center;font-size:20px">${s.type==="tvshow"?"📺":"🎬"}</div>`}
+function renderNowPlayingContent(sessions) {
+  if (!sessions.length) return `<div style="font-size:12px;color:var(--muted)">Ingen tittar just nu</div>`;
+  return `<div style="display:flex;flex-direction:column;gap:10px">` + sessions.map(s => `
+    <div style="background:var(--card2);border-radius:10px;overflow:hidden;display:flex">
+      <div style="width:60px;flex-shrink:0;position:relative">
+        ${s.posterUrl ? `<img src="${s.posterUrl}" style="width:100%;height:100%;object-fit:cover;display:block">` : `<div style="width:100%;height:100%;min-height:90px;background:var(--border);display:flex;align-items:center;justify-content:center;font-size:20px">${s.type==="tvshow"?"📺":"🎬"}</div>`}
+      </div>
+      <div style="flex:1;padding:10px 12px;min-width:0">
+        <div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(s.title)}</div>
+        <div style="display:flex;align-items:center;gap:6px;margin-top:4px">
+          <span style="width:18px;height:18px;border-radius:50%;background:var(--accent,#3498db);color:#fff;font-size:10px;display:flex;align-items:center;justify-content:center;flex-shrink:0">${esc((s.username||"?")[0].toUpperCase())}</span>
+          <span style="font-size:12px;color:var(--muted)">${esc(s.username)}</span>
+          <span style="font-size:11px;padding:1px 7px;border-radius:10px;margin-left:auto;background:${s.method === "direct" ? "rgba(46,204,113,0.15)" : "rgba(230,126,34,0.15)"};color:${s.method === "direct" ? "#2ecc71" : "#e67e22"}">${s.method === "direct" ? "Direct" : "Transkodning"}</span>
         </div>
-        <div style="flex:1;padding:10px 12px;min-width:0">
-          <div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(s.title)}</div>
-          <div style="display:flex;align-items:center;gap:6px;margin-top:4px">
-            <span style="width:18px;height:18px;border-radius:50%;background:var(--accent,#3498db);color:#fff;font-size:10px;display:flex;align-items:center;justify-content:center;flex-shrink:0">${esc((s.username||"?")[0].toUpperCase())}</span>
-            <span style="font-size:12px;color:var(--muted)">${esc(s.username)}</span>
-            <span style="font-size:11px;padding:1px 7px;border-radius:10px;margin-left:auto;background:${s.method === "direct" ? "rgba(46,204,113,0.15)" : "rgba(230,126,34,0.15)"};color:${s.method === "direct" ? "#2ecc71" : "#e67e22"}">${s.method === "direct" ? "Direct" : "Transkodning"}</span>
-          </div>
-          <div style="display:flex;align-items:center;gap:8px;margin-top:6px">
-            <div style="flex:1;height:4px;background:var(--border);border-radius:2px;overflow:hidden"><div style="height:100%;width:${s.progressPct}%;background:var(--accent,#3498db)"></div></div>
-            <span style="font-size:11px;color:var(--muted);white-space:nowrap">${fmtTime(s.position)} / ${fmtTime(s.duration)}</span>
-          </div>
-          <div style="font-size:11px;color:var(--muted);margin-top:4px">${esc(s.device || "Okänd klient")} · ${esc(s.ip || "?")}</div>
+        <div style="display:flex;align-items:center;gap:8px;margin-top:6px">
+          <div style="flex:1;height:4px;background:var(--border);border-radius:2px;overflow:hidden"><div style="height:100%;width:${s.progressPct}%;background:var(--accent,#3498db)"></div></div>
+          <span style="font-size:11px;color:var(--muted);white-space:nowrap">${fmtTime(s.position)} / ${fmtTime(s.duration)}</span>
         </div>
-      </div>`).join("") + `</div>`;
-  }
+        <div style="font-size:11px;color:var(--muted);margin-top:4px">${esc(s.device || "Okänd klient")} · ${esc(s.ip || "?")}</div>
+        ${s.videoInfo ? `<div style="font-size:11px;color:var(--muted);margin-top:6px;border-top:1px solid var(--border);padding-top:6px">
+          <span style="opacity:0.7">Video</span> ${esc(s.videoInfo.source)}
+          ${s.videoInfo.target ? `<div style="margin-left:14px">↳ ${esc(s.videoInfo.target)}</div>` : ""}
+        </div>` : ""}
+        ${s.audioInfo ? `<div style="font-size:11px;color:var(--muted);margin-top:4px">
+          <span style="opacity:0.7">Ljud</span> ${esc(s.audioInfo.source)}
+          <div style="margin-left:14px">↳ ${esc(s.audioInfo.target)}</div>
+        </div>` : ""}
+      </div>
+    </div>`).join("") + `</div>`;
+}
 
-  // Active transcodes (server load)
-  html += `<div style="font-weight:500;margin-bottom:6px">⚙️ Aktiva transkodningar (${transcodes.length})</div>`;
-  if (!transcodes.length) {
-    html += `<div style="font-size:12px;color:var(--muted);margin-bottom:14px">Inga just nu</div>`;
-  } else {
-    var modeLabels = { "copy-hevc": "HEVC (kopierad, ingen kvalitetsförlust)", "copy-h264": "H264 (kopierad, ingen kvalitetsförlust)" };
-    html += `<div style="display:flex;flex-direction:column;gap:6px;margin-bottom:14px">` + transcodes.map(t => `
-      <div style="background:var(--card2);border-radius:8px;padding:8px 12px;font-size:13px">
-        <b>${esc(t.title)}</b>
-        <div style="font-size:11px;color:var(--muted)">${esc(modeLabels[t.videoMode] || t.videoMode)} · körts i ${fmtTime(t.elapsedSeconds)}</div>
-      </div>`).join("") + `</div>`;
-  }
-
-  // Active downloads
-  html += `<div style="font-weight:500;margin-bottom:6px">⬇️ Nedladdningar (${downloads.length})</div>`;
-  if (!downloads.length) {
-    html += `<div style="font-size:12px;color:var(--muted);margin-bottom:14px">Inga pågående</div>`;
-  } else {
-    html += `<div style="display:flex;flex-direction:column;gap:6px;margin-bottom:14px">` + downloads.map(d => `
-      <div style="background:var(--card2);border-radius:8px;padding:8px 12px;font-size:13px">
-        <div style="display:flex;justify-content:space-between;gap:8px">
-          <div><b>${esc(d.username)}</b> – ${esc(d.title)}</div>
-          ${d.stalled ? `<span style="font-size:11px;color:var(--muted)">Pausad/klar</span>` : ""}
-        </div>
-        <div style="display:flex;align-items:center;gap:8px;margin-top:4px">
-          <div style="flex:1;height:4px;background:var(--border);border-radius:2px;overflow:hidden"><div style="height:100%;width:${d.progressPct}%;background:var(--accent,#3498db)"></div></div>
-          <span style="font-size:11px;color:var(--muted);white-space:nowrap">${d.progressPct}%</span>
-        </div>
-      </div>`).join("") + `</div>`;
-  }
-
-  return html;
+function renderDownloadsContent(downloads) {
+  if (!downloads.length) return `<div style="font-size:12px;color:var(--muted)">Inga pågående</div>`;
+  return `<div style="display:flex;flex-direction:column;gap:6px">` + downloads.map(d => `
+    <div style="background:var(--card2);border-radius:8px;padding:8px 12px;font-size:13px">
+      <div style="display:flex;justify-content:space-between;gap:8px">
+        <div><b>${esc(d.username)}</b> – ${esc(d.title)}</div>
+        ${d.stalled ? `<span style="font-size:11px;color:var(--muted)">Pausad/klar</span>` : ""}
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;margin-top:4px">
+        <div style="flex:1;height:4px;background:var(--border);border-radius:2px;overflow:hidden"><div style="height:100%;width:${d.progressPct}%;background:var(--accent,#3498db)"></div></div>
+        <span style="font-size:11px;color:var(--muted);white-space:nowrap">${d.progressPct}%</span>
+      </div>
+    </div>`).join("") + `</div>`;
 }
 
 function startLiveActivityPolling() {
@@ -5465,10 +5527,24 @@ function startLiveActivityPolling() {
   _liveActivityInterval = setInterval(async () => {
     try {
       var data = await API.get("/admin/live-activity");
-      var el = document.getElementById("live-activity-content");
-      if (el) el.innerHTML = renderLiveActivityContent(data);
+      var el = document.getElementById("now-playing-content");
+      if (el) el.innerHTML = renderNowPlayingContent(data.sessions || []);
     } catch {}
   }, 5000);
+}
+
+var _downloadsInterval = null;
+function startDownloadsPolling() {
+  if (_downloadsInterval) return;
+  const refresh = async () => {
+    try {
+      var data = await API.get("/admin/live-activity");
+      var el = document.getElementById("downloads-content");
+      if (el) el.innerHTML = renderDownloadsContent(data.downloads || []);
+    } catch {}
+  };
+  refresh();
+  _downloadsInterval = setInterval(refresh, 5000);
 }
 
 function subtitleLangBreakdownHtml(counts, featured) {
@@ -5633,6 +5709,8 @@ async function loadSettings() {
 
       <div class="settings-section" id="weekly-history-section"></div>
 
+      <div class="settings-section" id="most-active-users-section"></div>
+
       <div class="settings-section" id="playback-stats-section"></div>
 
       ` : ""}
@@ -5740,6 +5818,11 @@ async function loadSettings() {
         </div>
         <div id="scan-progress-info" style="font-size:12px;color:var(--muted);margin-top:8px;">${scanStatus.scanning ? scanProgressText(scanStatus.progress) : ""}</div>
         <div style="font-size:12px;color:var(--muted);margin-top:4px;">👁 Filbevakning aktiv · <span id="next-scan-label">Beräknar...</span></div>
+      </div>
+
+      <div class="settings-section" id="downloads-section">
+        <div class="settings-section-title">⬇️ Nedladdningar</div>
+        <div id="downloads-content"><div style="font-size:12px;color:var(--muted)">Laddar...</div></div>
       </div>
 
       <div class="settings-section">
@@ -5935,6 +6018,7 @@ async function loadSettings() {
     </div>`;
 
     if (currentUser?.role === "admin" && liveActivity) startLiveActivityPolling();
+    if (currentUser?.role === "admin" && _settingsActiveTab === "library") startDownloadsPolling();
     if (currentUser?.role === "admin" && _settingsActiveTab === "overview") { loadPlaybackStats(); startSystemStatsPolling(); loadRecentActivity(); loadWeeklyHistoryChart(); }
     if (currentUser?.role === "admin" && _settingsActiveTab === "subs") initVerboseSubtitleLoggingButton();
   } catch (e) {
@@ -6086,6 +6170,20 @@ async function renderUserPage(user) {
         <div class="settings-section-title">Användarinformation</div>
         <div style="font-size:13px;color:var(--muted)">Senast inloggad: ${user.last_login ? new Date(user.last_login).toLocaleDateString("sv-SE") : "Aldrig"}</div>
         <div style="font-size:13px;color:var(--muted);margin-top:4px">Skapad: ${user.created_at ? new Date(user.created_at).toLocaleDateString("sv-SE") : "Okänt"}</div>
+      </div>
+      <div class="settings-section">
+        <div class="settings-section-title">Utseende</div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:10px">${(user.id === currentUser?.id || user._id === currentUser?.id) ? "Välj tema — sparas på ditt konto och gäller på alla enheter du loggar in på." : "Välj tema för den här användaren."}</div>
+        <div style="display:flex;flex-wrap:wrap;gap:10px">
+          ${Object.entries(THEMES).map(([key, t]) => `
+            <div onclick="saveUserTheme('${user.id}', '${key}')" style="cursor:pointer;width:120px;border-radius:10px;overflow:hidden;border:2px solid ${(user.theme||"standard")===key ? "var(--accent)" : "var(--border)"}">
+              <div style="height:50px;background:${t.vars["--bg"]};display:flex;align-items:center;justify-content:center">
+                <span style="width:16px;height:16px;border-radius:50%;background:${t.vars["--accent"]}"></span>
+                <span style="width:24px;height:10px;border-radius:3px;background:${t.vars["--card2"]};margin-left:6px"></span>
+              </div>
+              <div style="padding:6px 8px;font-size:11px;background:var(--card2);color:var(--text)">${esc(t.label)}</div>
+            </div>`).join("")}
+        </div>
       </div>
       ${currentUser.role === "admin" && user.role !== "admin" ? `<div class="settings-section">
         <div class="settings-section-title">Biblioteksbehörigheter</div>
