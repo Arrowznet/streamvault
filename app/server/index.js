@@ -490,6 +490,7 @@ const SYSTEM_STATS_INTERVAL_MS = 3000;
 const SYSTEM_STATS_MAX_SAMPLES = 60; // 60 × 3s = 3 minutes of history, comfortably covers Plex's own default "2m" view
 let _systemStatsBuffer = [];
 let _lastCpuSample = null; // { time, processCpu (from process.cpuUsage()), systemCpu }
+let _lastPeriodicScanTime = null;
 let _lastBandwidthSampleTime = null;
 let _bandwidthCounters = { local: 0, remote: 0 };
 function isLocalRequestIp(ip) {
@@ -776,11 +777,30 @@ app.patch("/api/users/:id/theme", requireAuth, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Personal preference, same permission model as theme/language — you can always set your
+// own, admins can set anyone's.
+app.patch("/api/users/:id/webhook", requireAuth, async (req, res) => {
+  try {
+    const { webhook_url, webhook_enabled } = req.body;
+    if (req.params.id !== req.user._id && req.user.role !== "admin") {
+      return res.status(403).json({ error: "Ej tillåtet" });
+    }
+    if (webhook_url) {
+      try { new URL(webhook_url); } catch { return res.status(400).json({ error: "Ogiltig webbadress" }); }
+    }
+    const update = {};
+    if (webhook_url !== undefined) update.webhook_url = webhook_url || null;
+    if (webhook_enabled !== undefined) update.webhook_enabled = !!webhook_enabled;
+    await dbUpdate(db.users, { _id: req.params.id }, { $set: update });
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get("/api/users", requireAdmin, async (req, res) => {
   const users = await dbFind(db.users, { is_active: true });
   res.json(users.map(u => ({
     id: u._id, username: u.username, role: u.role, created_at: u.created_at, last_login: u.last_login,
-    library_ids: u.library_ids || [], language: u.language || null, subtitleLanguages: u.subtitleLanguages || [], theme: u.theme || null
+    library_ids: u.library_ids || [], language: u.language || null, subtitleLanguages: u.subtitleLanguages || [], theme: u.theme || null, webhook_url: u.webhook_url || null, webhook_enabled: !!u.webhook_enabled, preferred_watch_providers: u.preferred_watch_providers || []
   })));
 });
 
@@ -1274,6 +1294,29 @@ app.get("/api/admin/server-log/dates", requireAdmin, (req, res) => {
   } catch(e) { res.json({ dates: [] }); }
 });
 
+// Backfills genres onto titles scanned before this field existed — uses the tmdb_id already
+// stored on each item (no need to re-match by title/year), so this is quick and safe to run
+// even on a large library.
+app.post("/api/admin/backfill-genres", requireAdmin, async (req, res) => {
+  try {
+    const items = await dbFind(db.media, { type: { $in: ["movie", "tvshow"] }, tmdb_id: { $ne: null } });
+    const missing = items.filter(i => !i.genres || !i.genres.length);
+    let updated = 0;
+    for (const item of missing) {
+      try {
+        const endpoint = item.type === "movie" ? `/movie/${item.tmdb_id}` : `/tv/${item.tmdb_id}`;
+        const data = await tmdbFetch(endpoint);
+        const genres = (data?.genres || []).map(g => g.name);
+        if (genres.length) {
+          await dbUpdate(db.media, { _id: item._id }, { $set: { genres } });
+          updated++;
+        }
+      } catch(e) {} // one bad lookup shouldn't stop the whole backfill
+    }
+    res.json({ ok: true, checked: missing.length, updated });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get("/api/admin/system-stats", requireAdmin, (req, res) => {
   res.json({ samples: _systemStatsBuffer, intervalMs: SYSTEM_STATS_INTERVAL_MS });
 });
@@ -1749,6 +1792,7 @@ async function getMovieMeta(title, year) {
     backdrop_url: m.backdrop_path ? `https://image.tmdb.org/t/p/w1280${m.backdrop_path}` : null,
     rating: m.vote_average||null,
     year: m.release_date ? parseInt(m.release_date) : year,
+    genres: (details?.genres || []).map(g => g.name),
     collection_id: collection?.id || null,
     collection_name: collection?.name || null,
     collection_poster: collection?.poster_path ? `https://image.tmdb.org/t/p/w500${collection.poster_path}` : null,
@@ -1796,7 +1840,8 @@ async function getTVMeta(title) {
   const data = await tmdbFetch(`/search/tv?query=${encodeURIComponent(title)}`);
   const m = data?.results?.[0];
   if (!m) { metaCache.set(key, null); return null; }
-  const meta = { tmdb_id:m.id, overview:m.overview||"", poster_url:m.poster_path?`https://image.tmdb.org/t/p/w500${m.poster_path}`:null, backdrop_url:m.backdrop_path?`https://image.tmdb.org/t/p/w1280${m.backdrop_path}`:null, rating:m.vote_average||null, status:m.status||null };
+  const details = await tmdbFetch(`/tv/${m.id}`); // search results only include genre_ids (numbers), not genre names — need the full details call for that
+  const meta = { tmdb_id:m.id, overview:m.overview||"", poster_url:m.poster_path?`https://image.tmdb.org/t/p/w500${m.poster_path}`:null, backdrop_url:m.backdrop_path?`https://image.tmdb.org/t/p/w1280${m.backdrop_path}`:null, rating:m.vote_average||null, status:m.status||null, genres:(details?.genres||[]).map(g=>g.name) };
   // Same fix as movies: fetch the poster via /images with an explicit English pick, since
   // poster_path on the basic details/search response can silently fall back to any language
   // per TMDB's own documented behavior (see getMovieMeta for the full explanation).
@@ -1931,7 +1976,7 @@ async function scanOneLibrary(lib) {
       const movieTitle = meta?.title_en || cleanName;
       const movieYear = meta?.year || year;
       const slug = await generateUniqueSlug(movieTitle, movieYear, "movie");
-      const newItem = {_id:id,library_id:lib.id,type:"movie",title:movieTitle,year:movieYear,slug,file_path:filePath,file_size:stat.size,tmdb_id:meta?.tmdb_id||null,poster_url:meta?.poster_url||null,backdrop_url:meta?.backdrop_url||null,overview:meta?.overview||null,rating:meta?.rating||null,collection_id:meta?.collection_id||null,collection_name:meta?.collection_name||null,collection_poster:meta?.collection_poster||null,collection_backdrop:meta?.collection_backdrop||null,added_at:new Date().toISOString()};
+      const newItem = {_id:id,library_id:lib.id,type:"movie",title:movieTitle,year:movieYear,slug,file_path:filePath,file_size:stat.size,tmdb_id:meta?.tmdb_id||null,poster_url:meta?.poster_url||null,backdrop_url:meta?.backdrop_url||null,overview:meta?.overview||null,rating:meta?.rating||null,genres:meta?.genres||[],collection_id:meta?.collection_id||null,collection_name:meta?.collection_name||null,collection_poster:meta?.collection_poster||null,collection_backdrop:meta?.collection_backdrop||null,added_at:new Date().toISOString()};
       await dbInsert(db.media, newItem);
       queueSubtitleCache(newItem); // queue Swedish subtitle pre-cache (sequential)
       added++;
@@ -1951,7 +1996,7 @@ async function scanOneLibrary(lib) {
         if (!meta) console.log(`[SCAN] No TMDB match for TV show: "${cleanName}"`);
         else console.log(`[SCAN] Matched TV show: "${cleanName}" → "${meta.title || cleanName}" (TMDB ${meta.tmdb_id})`);
         const showSlug = await generateUniqueSlug(meta?.title || cleanName, null, "tvshow");
-        await dbInsert(db.media,{_id:showId,library_id:lib.id,type:"tvshow",title:cleanName,slug:showSlug,file_path:showPath,tmdb_id:meta?.tmdb_id||null,poster_url:meta?.poster_url||null,backdrop_url:meta?.backdrop_url||null,overview:meta?.overview||null,rating:meta?.rating||null,status:meta?.status||null,added_at:new Date().toISOString()});
+        await dbInsert(db.media,{_id:showId,library_id:lib.id,type:"tvshow",title:cleanName,slug:showSlug,file_path:showPath,tmdb_id:meta?.tmdb_id||null,poster_url:meta?.poster_url||null,backdrop_url:meta?.backdrop_url||null,overview:meta?.overview||null,rating:meta?.rating||null,status:meta?.status||null,genres:meta?.genres||[],added_at:new Date().toISOString()});
         added++;
       }
       await scanEpisodes(showPath,showId,lib.id);
@@ -1964,16 +2009,33 @@ async function scanOneLibrary(lib) {
   return added;
 }
 
+// Best-effort: lower the whole Node process's OS priority while a scan runs, so it competes
+// less aggressively with an active playback for CPU — same idea as Plex's "run scan at a
+// lower priority" toggle. Windows-specific (uses wmic); silently does nothing on failure,
+// since this is a nice-to-have that must never be allowed to break scanning itself if it
+// doesn't work in a given environment.
+function setProcessPriority(priorityClass) {
+  if (process.platform !== "win32") return;
+  try {
+    const { exec } = require("child_process");
+    exec(`wmic process where processid=${process.pid} call setpriority ${priorityClass}`, () => {});
+  } catch(e) {}
+}
+
 async function scanLibraries() {
   if (isScanning) return;
   isScanning = true;
   _scanProgress = { library: null, found: 0, processed: 0 };
   let added = 0;
+  if (config.scan_low_priority) setProcessPriority(64); // 64 = BELOW_NORMAL_PRIORITY_CLASS
   try {
     for (const lib of (config.libraries||[])) {
       added += await scanOneLibrary(lib);
     }
-  } finally { isScanning=false; }
+  } finally {
+    isScanning=false;
+    if (config.scan_low_priority) setProcessPriority(32); // 32 = NORMAL_PRIORITY_CLASS — restore once the scan's done
+  }
   console.log(`Scan complete: ${added} new items`);
   // Scan's done — now it's safe to let the subtitle-cache queue (FFmpeg/OCR, CPU + disk
   // heavy) start working through whatever got queued during the scan, without competing
@@ -2660,8 +2722,10 @@ app.post("/api/media/:id/progress", requireAuth, async (req, res) => {
   // Live activity: refresh (or create) this session's heartbeat entry, unless playback
   // just completed — a finished item shouldn't linger in the "currently watching" list.
   const sessionKey = `${req.user._id}:${req.params.id}`;
+  const isNewSession = !_activeSessions.has(sessionKey);
   if (completed) {
     _activeSessions.delete(sessionKey);
+    fireUserWebhook(req.user, "stopped", { title: (await dbFindOne(db.media, { _id: req.params.id }))?.title });
   } else {
     const item = await dbFindOne(db.media, { _id: req.params.id });
     _activeSessions.set(sessionKey, {
@@ -2681,6 +2745,7 @@ app.post("/api/media/:id/progress", requireAuth, async (req, res) => {
       startedAt: _activeSessions.get(sessionKey)?.startedAt || Date.now(),
       lastHeartbeat: Date.now()
     });
+    if (isNewSession) fireUserWebhook(req.user, "started", { title: item?.title });
   }
 
   res.json({ok:true});
@@ -2690,10 +2755,22 @@ app.get("/api/continue-watching", requireAuth, async (req, res) => {
   try {
     const history = await dbFind(db.history,{user_id:req.user._id,completed:0,position:{$gt:30}});
     history.sort((a,b)=>new Date(b.watched_at)-new Date(a.watched_at));
+    const maxWeeks = config.continue_watching_max_weeks ?? 16;
+    const maxItems = config.continue_watching_max_items ?? 20;
+    const cutoff = maxWeeks > 0 ? new Date(Date.now() - maxWeeks * 7 * 86400000) : null;
     const items=[];
-    for (const h of history.slice(0,20)) {
+    for (const h of history) {
+      if (items.length >= maxItems) break;
       const item = await dbFindOne(db.media,{_id:h.media_id});
-      if (item) items.push({...safe(item),position:h.position,duration:h.duration});
+      if (!item) continue;
+      // Normal rule: drop anything not watched in the last `maxWeeks`. Exception (approximates
+      // Plex's "include season premieres" — surfacing a show even after a long gap if a new
+      // episode/season has actually shown up): skip the cutoff if the item itself was added
+      // to the library recently, since that's inherently fresh content worth resurfacing
+      // regardless of how long ago the person last watched something from this show.
+      const recentlyAdded = item.added_at && new Date(item.added_at) > (cutoff || new Date(0));
+      if (cutoff && new Date(h.watched_at) < cutoff && !recentlyAdded) continue;
+      items.push({...safe(item),position:h.position,duration:h.duration});
     }
     res.json(items);
   } catch(e){res.status(500).json({error:e.message});}
@@ -2730,9 +2807,27 @@ app.get("/api/favorites", requireAuth, async (req, res) => {
   } catch(e){res.status(500).json({error:e.message});}
 });
 
+// Whether the current user has already liked this title — used so the button shows its
+// correct state on load instead of always starting blank.
+app.get("/api/favorites/:id/status", requireAuth, async (req, res) => {
+  try {
+    const existing = await dbFindOne(db.favorites, { user_id: req.user._id, media_id: req.params.id });
+    res.json({ liked: !!existing });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Real on/off toggle now — previously this only ever inserted, so repeated clicks quietly
+// piled up duplicate rows in the database rather than actually un-liking anything.
 app.post("/api/favorites/:id", requireAuth, async (req, res) => {
-  try { await dbInsert(db.favorites,{_id:uuidv4(),user_id:req.user._id,media_id:req.params.id,added_at:new Date().toISOString()}); } catch{}
-  res.json({ok:true});
+  try {
+    const existing = await dbFindOne(db.favorites, { user_id: req.user._id, media_id: req.params.id });
+    if (existing) {
+      await dbRemove(db.favorites, { _id: existing._id });
+      return res.json({ ok: true, liked: false });
+    }
+    await dbInsert(db.favorites,{_id:uuidv4(),user_id:req.user._id,media_id:req.params.id,added_at:new Date().toISOString()});
+    res.json({ ok: true, liked: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 app.delete("/api/favorites/:id", requireAuth, async (req, res) => {
@@ -3432,6 +3527,28 @@ const seekLocks = new Map(); // Prevent concurrent seeks for same item
 // match — being technically playable isn't the same as being the track someone actually
 // wants when the real audio track isn't supported by their device. Shared between the
 // direct-play capability check and startDashTranscode's own audio-track selection.
+// Fires a small JSON POST to whatever webhook URL the user has configured on their own
+// profile (e.g. a Home Assistant webhook) — entirely fire-and-forget. A failing or slow
+// webhook (wrong URL, unreachable server, etc.) must never affect actual playback in any way,
+// so every failure mode here is swallowed silently rather than surfaced to the caller.
+function fireUserWebhook(user, event, extra) {
+  if (!user?.webhook_enabled || !user?.webhook_url) return;
+  try {
+    const url = new URL(user.webhook_url);
+    const client = url.protocol === "http:" ? http : https;
+    const payload = JSON.stringify({ event, username: user.username, timestamp: new Date().toISOString(), ...extra });
+    const req = client.request(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) },
+      timeout: 5000
+    }, (res) => { res.resume(); }); // drain the response, don't care about the body
+    req.on("error", () => {}); // unreachable/misconfigured webhook — nothing to do about it here
+    req.on("timeout", () => req.destroy());
+    req.write(payload);
+    req.end();
+  } catch(e) {} // malformed URL etc — same story, just don't let it affect playback
+}
+
 // Converts raw pixel dimensions into the common resolution names people actually recognize
 // (matching how Plex/most media apps label things), rather than showing raw "3836x1604".
 function friendlyResolutionLabel(width, height) {
@@ -3742,6 +3859,20 @@ app.post("/api/dash/:id/seek", requireAuth, async (req, res) => {
 });
 
 // Stop DASH transcode
+// Called whenever the player closes, regardless of whether it finished or was just quit
+// partway through — separate from /dash/:id/stop (which only concerns killing the FFmpeg
+// process). This is what lets the "stopped" webhook fire promptly instead of waiting for the
+// session to time out on its own a few minutes later.
+app.post("/api/media/:id/stop", requireAuth, async (req, res) => {
+  const sessionKey = `${req.user._id}:${req.params.id}`;
+  if (_activeSessions.has(sessionKey)) {
+    _activeSessions.delete(sessionKey);
+    const item = await dbFindOne(db.media, { _id: req.params.id });
+    fireUserWebhook(req.user, "stopped", { title: item?.title });
+  }
+  res.json({ ok: true });
+});
+
 app.post("/api/dash/:id/stop", requireAuth, (req, res) => {
   const t = activeDashTranscodes.get(req.params.id);
   if (t) {
@@ -3983,11 +4114,46 @@ app.post("/api/hls/:id/stop", requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
+// All providers TMDB knows about for Sweden — used to populate the "choose your services"
+// settings list. Cached for a day since this barely ever changes.
+let _allProvidersCache = null, _allProvidersCacheTime = 0;
+app.get("/api/watch-providers/all", requireAuth, async (req, res) => {
+  if (!config.tmdb_api_key) return res.json({ providers: [] });
+  if (_allProvidersCache && Date.now() - _allProvidersCacheTime < 86400000) return res.json({ providers: _allProvidersCache });
+  const data = await tmdbFetch(`/watch/providers/movie?watch_region=SE`);
+  const providers = (data?.results || [])
+    .map(p => ({ name: p.provider_name, logo: p.logo_path ? `https://image.tmdb.org/t/p/w92${p.logo_path}` : null }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  _allProvidersCache = providers; _allProvidersCacheTime = Date.now();
+  res.json({ providers });
+});
+
+app.patch("/api/users/:id/preferred-providers", requireAuth, async (req, res) => {
+  try {
+    if (req.params.id !== req.user._id && req.user.role !== "admin") {
+      return res.status(403).json({ error: "Ej tillåtet" });
+    }
+    await dbUpdate(db.users, { _id: req.params.id }, { $set: { preferred_watch_providers: req.body.providers || [] } });
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get("/api/watch-providers/:tmdb_id", requireAuth, async (req, res) => {
   if (!config.tmdb_api_key) return res.json({});
   const kind = req.query.kind === "tv" ? "tv" : "movie";
   const data = await tmdbFetch(`/${kind}/${req.params.tmdb_id}/watch/providers?watch_region=SE`);
-  res.json(data?.results?.SE || {});
+  const region = data?.results?.SE || {};
+  const withLogo = (arr) => (arr || []).map(p => ({ name: p.provider_name, logo: p.logo_path ? `https://image.tmdb.org/t/p/w92${p.logo_path}` : null }));
+  const preferred = req.user.preferred_watch_providers || [];
+  // Default (nothing chosen yet) shows everything, unchanged from before. Once the person has
+  // picked their own services, this switches to showing ONLY those — not just prioritizing
+  // them at the top — since that's specifically what was asked for here.
+  const filterIfPreferred = (arr) => preferred.length ? arr.filter(p => preferred.includes(p.name)) : arr;
+  res.json({
+    flatrate: filterIfPreferred(withLogo(region.flatrate)),
+    rent: filterIfPreferred(withLogo(region.rent)),
+    buy: filterIfPreferred(withLogo(region.buy))
+  });
 });
 
 // Related movies/shows for a detail page — pulls TMDB's recommendations for the title, then
@@ -4122,6 +4288,25 @@ app.get("/api/media/slug/:slug", requireAuth, async (req, res) => {
     if (!item) return res.status(404).json({ error: "Hittades inte" });
     if (item.library_id && !userHasLibraryAccess(req.user, item.library_id)) return res.status(403).json({ error: "Ej tillåtet" });
     res.json({ id: item._id, type: item.type });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Everything TMDB has beyond just the main trailer — featurettes, behind-the-scenes clips,
+// bloopers, scenes, teasers. Same underlying /videos call as the trailer feature already
+// makes, just keeping every result instead of picking out only the one "Trailer" entry.
+const EXTRAS_TYPE_LABELS = { "Trailer": "Trailer", "Teaser": "Teaser", "Clip": "Scen", "Featurette": "Bakom kulisserna", "Behind the Scenes": "Bakom kulisserna", "Bloopers": "Utanför manus" };
+app.get("/api/media/:id/extras", requireAuth, async (req, res) => {
+  try {
+    const item = await dbFindOne(db.media, { _id: req.params.id });
+    if (!item || !item.tmdb_id) return res.json({ extras: [] });
+    const kind = item.type === "tvshow" ? "tv" : "movie";
+    let data = await tmdbFetch(`/${kind}/${item.tmdb_id}/videos`);
+    let videos = data?.results || [];
+    if (!videos.length) { data = await tmdbFetch(`/${kind}/${item.tmdb_id}/videos`, "en-US"); videos = data?.results || []; }
+    const extras = videos
+      .filter(v => v.site === "YouTube")
+      .map(v => ({ key: v.key, name: v.name, type: EXTRAS_TYPE_LABELS[v.type] || v.type, thumbnail: `https://img.youtube.com/vi/${v.key}/hqdefault.jpg` }));
+    res.json({ extras });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -4419,6 +4604,39 @@ app.get("/api/tmdb/trailer-stream/:kind/:tmdb_id", requireAuth, async (req, res)
   }
 });
 
+// "Du gillade X — du kanske även gillar detta" — picks one random liked title (not the most
+// recent, on purpose: a rotating pick keeps the homepage row from going stale if the person
+// just keeps liking the same handful of things) and reuses the exact same TMDB
+// recommendations logic as the detail page's "Liknande filmer", so unowned suggestions show
+// up too with the same "I biblioteket" badge.
+app.get("/api/recommendations", requireAuth, async (req, res) => {
+  try {
+    const likes = await dbFind(db.favorites, { user_id: req.user._id });
+    if (!likes.length) return res.json({ sourceTitle: null, items: [] });
+    const pick = likes[Math.floor(Math.random() * likes.length)];
+    const item = await dbFindOne(db.media, { _id: pick.media_id });
+    if (!item || !item.tmdb_id) return res.json({ sourceTitle: null, items: [] });
+
+    const kind = item.type === "tvshow" ? "tv" : "movie";
+    let data = await tmdbFetch(`/${kind}/${item.tmdb_id}/recommendations`);
+    let candidates = data?.results || [];
+    if (!candidates.length) {
+      data = await tmdbFetch(`/${kind}/${item.tmdb_id}/similar`);
+      candidates = data?.results || [];
+    }
+    const candidateTmdbIds = candidates.map(c => c.id).filter(Boolean);
+    const owned = await dbFind(db.media, { type: item.type, tmdb_id: { $in: candidateTmdbIds } });
+    const ownedByTmdbId = new Map(owned.map(o => [o.tmdb_id, o]));
+    const items = candidates.slice(0, 20).map(c => {
+      const ownedItem = ownedByTmdbId.get(c.id);
+      return ownedItem
+        ? { id: ownedItem._id, tmdb_id: c.id, title: ownedItem.title, year: ownedItem.year, poster_url: ownedItem.poster_url, type: ownedItem.type, owned: true }
+        : { id: null, tmdb_id: c.id, title: c.title || c.name, year: (c.release_date || c.first_air_date || "").slice(0,4) || null, poster_url: c.poster_path ? `https://image.tmdb.org/t/p/w342${c.poster_path}` : null, type: kind === "tv" ? "tvshow" : "movie", owned: false };
+    });
+    res.json({ sourceTitle: item.title, items });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get("/api/media/:id/related", requireAuth, async (req, res) => {
   try {
     const item = await dbFindOne(db.media, { _id: req.params.id });
@@ -4432,7 +4650,7 @@ app.get("/api/media/:id/related", requireAuth, async (req, res) => {
     let collectionItems = [];
     if (item.collection_id) {
       const inCollection = await dbFind(db.media, { type: "movie", collection_id: item.collection_id, _id: { $ne: item._id } });
-      collectionItems = inCollection.map(o => ({ id: o._id, title: o.title, year: o.year, poster_url: o.poster_url, type: o.type }));
+      collectionItems = inCollection.map(o => ({ id: o._id, tmdb_id: o.tmdb_id, title: o.title, year: o.year, poster_url: o.poster_url, type: o.type, owned: true }));
     }
 
     let recItems = [];
@@ -4444,18 +4662,26 @@ app.get("/api/media/:id/related", requireAuth, async (req, res) => {
         data = await tmdbFetch(`/${kind}/${item.tmdb_id}/similar`);
         candidates = data?.results || [];
       }
-      const candidateIds = candidates.map(c => c.id).filter(Boolean);
-      if (candidateIds.length) {
-        const owned = await dbFind(db.media, { type: item.type, tmdb_id: { $in: candidateIds } });
-        const ownedByTmdbId = new Map(owned.map(o => [o.tmdb_id, o]));
-        recItems = candidateIds.map(id => ownedByTmdbId.get(id)).filter(Boolean)
-          .map(o => ({ id: o._id, title: o.title, year: o.year, poster_url: o.poster_url, type: o.type }));
-      }
+      const candidateTmdbIds = candidates.map(c => c.id).filter(Boolean);
+      const owned = await dbFind(db.media, { type: item.type, tmdb_id: { $in: candidateTmdbIds } });
+      const ownedByTmdbId = new Map(owned.map(o => [o.tmdb_id, o]));
+      // Unlike before, unowned candidates are now included too (matching Plex's own "similar"
+      // section, which isn't limited to your library) — each item just carries an owned flag
+      // so the card can show the same "I biblioteket" badge Utforska already uses, and route
+      // to the right detail page (ours if owned, TMDB's if not) when clicked.
+      recItems = candidates.map(c => {
+        const ownedItem = ownedByTmdbId.get(c.id);
+        return ownedItem
+          ? { id: ownedItem._id, tmdb_id: c.id, title: ownedItem.title, year: ownedItem.year, poster_url: ownedItem.poster_url, type: ownedItem.type, owned: true }
+          : { id: null, tmdb_id: c.id, title: c.title || c.name, year: (c.release_date || c.first_air_date || "").slice(0,4) || null, poster_url: c.poster_path ? `https://image.tmdb.org/t/p/w342${c.poster_path}` : null, type: kind === "tv" ? "tvshow" : "movie", owned: false };
+      });
     }
 
     // Collection entries first, then fill the rest with TMDB recommendations, deduplicated
-    const seen = new Set(collectionItems.map(i => i.id));
-    const items = [...collectionItems, ...recItems.filter(i => !seen.has(i.id) && (seen.add(i.id), true))].slice(0, 20);
+    // by tmdb_id (not id — unowned items don't have one, so deduping on id would wrongly
+    // treat every unowned item as a duplicate of the first one)
+    const seen = new Set(collectionItems.map(i => i.tmdb_id).filter(Boolean));
+    const items = [...collectionItems, ...recItems.filter(i => !i.tmdb_id || !seen.has(i.tmdb_id) && (seen.add(i.tmdb_id), true))].slice(0, 20);
 
     res.json({ items });
   } catch(e) {
@@ -5697,7 +5923,7 @@ app.get("/api/public-config", requireAuth, (req, res) => {
   if (!codes.size) codes.add("sv"), codes.add("en");
   const subtitleSearchLanguages = [...codes].map(code => ({ code, label: OPENSUBS_LANG_LABEL[code] || code }));
 
-  res.json({ server_name: config.server_name || null, subtitleSearchLanguages, defaultLanguage: config.language || null, trailerStreamEnabled: !!config.trailer_stream_enabled, iptvEnabled: !!config.iptv_enabled });
+  res.json({ server_name: config.server_name || null, subtitleSearchLanguages, defaultLanguage: config.language || null, trailerStreamEnabled: !!config.trailer_stream_enabled, iptvEnabled: !!config.iptv_enabled, watchedThresholdPct: config.watched_threshold_pct || 90 });
 });
 
 app.get("/api/config", requireAdmin, (req, res) => {
@@ -5705,7 +5931,7 @@ app.get("/api/config", requireAdmin, (req, res) => {
 });
 
 app.patch("/api/config", requireAdmin, (req, res) => {
-  ["tmdb_api_key","opensubtitles_api_key","lastfm_api_key","spotify_client_id","spotify_client_secret","port","language","update_channel","server_name","trailer_stream_enabled","iptv_enabled"].forEach(k=>{if(req.body[k]!==undefined)config[k]=req.body[k];});
+  ["tmdb_api_key","opensubtitles_api_key","lastfm_api_key","spotify_client_id","spotify_client_secret","port","language","update_channel","server_name","trailer_stream_enabled","iptv_enabled","watched_threshold_pct","continue_watching_max_weeks","continue_watching_max_items","periodic_scan_enabled","periodic_scan_interval_hours","scan_low_priority"].forEach(k=>{if(req.body[k]!==undefined)config[k]=req.body[k];});
   fs.writeFileSync(CONFIG_PATH,JSON.stringify(config,null,2));
   res.json({ok:true});
 });
@@ -5734,6 +5960,17 @@ app.get("/api/media/:id/images", requireAuth, async (req, res) => {
 });
 
 // ── FILE INFO (ffprobe) ───────────────────────────────────────────────────────
+// Derives the human-readable chroma subsampling (e.g. "4:2:0") from ffprobe's pix_fmt string
+// (e.g. "yuv420p10le") — not a direct ffprobe field, just a well-known naming convention.
+function chromaSubsamplingFromPixFmt(pixFmt) {
+  if (!pixFmt) return null;
+  if (/444/.test(pixFmt)) return "4:4:4";
+  if (/422/.test(pixFmt)) return "4:2:2";
+  if (/420/.test(pixFmt)) return "4:2:0";
+  if (/411/.test(pixFmt)) return "4:1:1";
+  return null;
+}
+
 app.get("/api/media/:id/fileinfo", requireAdmin, async (req, res) => {
   try {
     const item = await dbFindOne(db.media, { _id: req.params.id });
@@ -5749,23 +5986,40 @@ app.get("/api/media/:id/fileinfo", requireAdmin, async (req, res) => {
     const audioStreams = probe?.streams?.filter(s => s.codec_type === "audio") || [];
     const subtitleStreams = probe?.streams?.filter(s => s.codec_type === "subtitle") || [];
     const fmt = probe?.format || {};
+
+    const videoResLabel = videoStream ? friendlyResolutionLabel(videoStream.width, videoStream.height) : null;
     res.json({
       title: item.title, file_path: item.file_path, file_size: item.file_size, tmdb_id: item.tmdb_id,
       library_id: item.library_id, added_at: item.added_at, year: item.year, type: item.type, rating: item.rating,
       video: videoStream ? {
         codec: videoStream.codec_name?.toUpperCase(), profile: videoStream.profile,
         width: videoStream.width, height: videoStream.height,
-        fps: videoStream.r_frame_rate ? Math.round(eval(videoStream.r_frame_rate)) : null,
-        bitrate: videoStream.bit_rate ? Math.round(videoStream.bit_rate/1000)+" kbps" : null,
-        bit_depth: videoStream.bits_per_raw_sample || null, color_space: videoStream.color_space || null
+        coded_width: videoStream.coded_width || null, coded_height: videoStream.coded_height || null,
+        resolution_label: videoResLabel,
+        fps: videoStream.r_frame_rate ? (eval(videoStream.r_frame_rate)).toFixed(3).replace(/\.?0+$/, "") : null,
+        bitrate: videoStream.bit_rate ? Math.round(videoStream.bit_rate/1000)+" kbps" : (fmt.bit_rate ? Math.round(fmt.bit_rate/1000)+" kbps (container)" : null),
+        bit_depth: videoStream.bits_per_raw_sample || null,
+        color_space: videoStream.color_space || null, color_range: videoStream.color_range || null,
+        color_transfer: videoStream.color_transfer || null, color_primaries: videoStream.color_primaries || null,
+        chroma_location: videoStream.chroma_location || null, chroma_subsampling: chromaSubsamplingFromPixFmt(videoStream.pix_fmt),
+        level: videoStream.level != null ? (videoStream.level / 10).toFixed(1) : null,
+        ref_frames: videoStream.refs || null,
+        aspect_ratio: videoStream.display_aspect_ratio || null,
+        language: videoStream.tags?.language || null,
+        display_title: `${videoResLabel || ""} ${videoStream.bits_per_raw_sample === 10 ? "HDR10 " : ""}(${(videoStream.codec_name||"").toUpperCase()}${videoStream.profile ? " " + videoStream.profile : ""})`.trim()
       } : null,
       audio: audioStreams.map(a => ({
         codec: a.codec_name?.toUpperCase(), channels: a.channels, channel_layout: a.channel_layout,
-        language: a.tags?.language || "und", bitrate: a.bit_rate ? Math.round(a.bit_rate/1000)+" kbps" : null, title: a.tags?.title || null
+        language: a.tags?.language || "und", language_tag: a.tags?.language || null,
+        bitrate: a.bit_rate ? Math.round(a.bit_rate/1000)+" kbps" : null,
+        sampling_rate: a.sample_rate ? `${a.sample_rate} Hz` : null,
+        title: a.tags?.title || null,
+        display_title: `${subtitleLangLabel(normalizeLangCode(a.tags?.language || "und"))}${a.channel_layout ? " (" + (a.codec_name||"").toUpperCase() + " " + a.channel_layout.replace(/\s*\((side|back|front)\)/gi,"") + ")" : ""}`
       })),
       subtitles: subtitleStreams.map(s => ({
-        codec: s.codec_name?.toUpperCase(), language: s.tags?.language || "und",
-        title: s.tags?.title || null, forced: s.disposition?.forced === 1, default: s.disposition?.default === 1
+        codec: s.codec_name?.toUpperCase(), language: s.tags?.language || "und", language_tag: s.tags?.language || null,
+        title: s.tags?.title || null, forced: s.disposition?.forced === 1, default: s.disposition?.default === 1,
+        display_title: `${subtitleLangLabel(normalizeLangCode(s.tags?.language || "und"))}${s.disposition?.forced === 1 ? " Tvingad" : ""} (${(s.codec_name||"").toUpperCase()})`
       })),
       container: {
         format: fmt.format_long_name || fmt.format_name,
@@ -5774,6 +6028,46 @@ app.get("/api/media/:id/fileinfo", requireAdmin, async (req, res) => {
         size: fmt.size ? (fmt.size/1024/1024/1024).toFixed(2)+" GB" : null
       }
     });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Raw ffprobe dump — the "Visa rådata" equivalent of Plex's "Visa XML" link, for anyone who
+// wants to see literally everything ffprobe reports, not just what we've chosen to surface.
+// Same idea as /fileinfo but for the regular detail page (everyone sees this on Plex, not
+// just admins) — deliberately excludes file_path and other admin-only detail.
+app.get("/api/media/:id/techinfo", requireAuth, async (req, res) => {
+  try {
+    const item = await dbFindOne(db.media, { _id: req.params.id });
+    if (!item) return res.status(404).json({ error: "Hittades inte" });
+    let probe = null;
+    try {
+      const { execSync } = require("child_process");
+      const ffprobePath = getFfprobePath();
+      const cmd = `"${ffprobePath}" -v quiet -print_format json -show_streams "${item.file_path.replace(/"/g, '')}"`;
+      probe = JSON.parse(execSync(cmd, { timeout: 15000 }).toString());
+    } catch {}
+    const videoStream = probe?.streams?.find(s => s.codec_type === "video");
+    const audioStream = probe?.streams?.find(s => s.codec_type === "audio" && !isCommentaryTrack(s.tags?.title));
+    const subtitleStreams = probe?.streams?.filter(s => s.codec_type === "subtitle") || [];
+    const videoResLabel = videoStream ? friendlyResolutionLabel(videoStream.width, videoStream.height) : null;
+    const isHdr = videoStream && (videoStream.width || 0) >= 3000 && (videoStream.bits_per_raw_sample || 8) === 10;
+    res.json({
+      video: videoStream ? `${videoResLabel}${isHdr ? " HDR10" : ""} (${(videoStream.codec_name||"").toUpperCase()}${videoStream.profile ? " " + videoStream.profile : ""})` : null,
+      audio: audioStream ? `${subtitleLangLabel(normalizeLangCode(audioStream.tags?.language || "und"))} (${(audioStream.codec_name||"").toUpperCase()}${audioStream.channel_layout ? " " + audioStream.channel_layout.replace(/\s*\((side|back|front)\)/gi,"") : ""})` : null,
+      subtitles: subtitleStreams.length ? subtitleStreams.map(s => subtitleLangLabel(normalizeLangCode(s.tags?.language || "und"))).join(", ") : "Av"
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get("/api/media/:id/fileinfo/raw", requireAdmin, async (req, res) => {
+  try {
+    const item = await dbFindOne(db.media, { _id: req.params.id });
+    if (!item) return res.status(404).json({ error: "Hittades inte" });
+    const { execSync } = require("child_process");
+    const ffprobePath = getFfprobePath();
+    const cmd = `"${ffprobePath}" -v quiet -print_format json -show_streams -show_format "${item.file_path.replace(/"/g, '')}"`;
+    const probe = JSON.parse(execSync(cmd, { timeout: 15000 }).toString());
+    res.json(probe);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -6386,13 +6680,13 @@ app.get("/api/collections", requireAuth, async (req, res) => {
 app.get("/api/media/:id/details", requireAuth, async (req, res) => {
   try {
     const item = await dbFindOne(db.media, { _id: req.params.id });
-    if (!item || !item.tmdb_id || !config.tmdb_api_key) return res.json({ cast: [], crew: [], genres: [], runtime: null, overview: null });
+    if (!item || !item.tmdb_id || !config.tmdb_api_key) return res.json({ cast: [], crew: [], genres: [], runtime: null, overview: null, reviews: [] });
     const userLang = req.user?.language || null;
     const endpoint = item.type === "tvshow"
-      ? `/tv/${item.tmdb_id}?append_to_response=aggregate_credits`
-      : `/movie/${item.tmdb_id}?append_to_response=credits`;
+      ? `/tv/${item.tmdb_id}?append_to_response=aggregate_credits,reviews`
+      : `/movie/${item.tmdb_id}?append_to_response=credits,reviews`;
     const data = await tmdbFetch(endpoint, userLang);
-    if (!data) return res.json({ cast: [], crew: [], genres: [], runtime: null, overview: null });
+    if (!data) return res.json({ cast: [], crew: [], genres: [], runtime: null, overview: null, reviews: [] });
     // TV shows use aggregate_credits for full series cast
     const castSource = item.type === "tvshow"
       ? (data.aggregate_credits?.cast || data.credits?.cast || [])
@@ -6407,7 +6701,19 @@ app.get("/api/media/:id/details", requireAuth, async (req, res) => {
       .slice(0, 5).map(p => ({ id: p.id, name: p.name, job: p.job }));
     const genres = (data.genres || []).map(g => g.name);
     const runtime = data.runtime || (data.episode_run_time?.[0]) || null;
-    res.json({ cast, crew, genres, runtime, overview: data.overview || null });
+    // Real TMDB user reviews — genuine content/rating/date, but no like/reaction counts like
+    // Plex shows, since those come from Plex's own community layer that we have no
+    // equivalent of. Reviews are almost always written in English regardless of what language
+    // was requested, so — same issue we've hit before with subtitles/videos — asking in the
+    // user's own language very often comes back completely empty even when reviews exist;
+    // falls back to an explicit English-language request when that happens.
+    let reviewResults = data.reviews?.results || [];
+    if (!reviewResults.length && userLang !== "en-US" && userLang !== "en") {
+      const enData = await tmdbFetch(item.type === "tvshow" ? `/tv/${item.tmdb_id}?append_to_response=reviews` : `/movie/${item.tmdb_id}?append_to_response=reviews`, "en-US");
+      reviewResults = enData?.reviews?.results || [];
+    }
+    const reviews = mapTmdbReviews(reviewResults);
+    res.json({ cast, crew, genres, runtime, overview: data.overview || null, reviews });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -6622,15 +6928,34 @@ app.get("/api/explore/tvshows", requireAuth, async (req, res) => {
   }
 });
 
+// Shared by every endpoint that surfaces TMDB reviews (owned titles, and now unowned
+// tv/movie lookups too) — maps TMDB's raw review objects into our simpler shape, handling
+// the same avatar_path quirk each time.
+function mapTmdbReviews(results) {
+  return (results || []).slice(0, 12).map(r => ({
+    author: r.author_details?.username || r.author,
+    avatar: r.author_details?.avatar_path
+      ? (r.author_details.avatar_path.startsWith("/http") ? r.author_details.avatar_path.slice(1) : `https://image.tmdb.org/t/p/w64${r.author_details.avatar_path}`)
+      : null,
+    rating: r.author_details?.rating || null,
+    content: r.content?.length > 220 ? r.content.slice(0, 220) + "…" : r.content,
+    date: r.created_at
+  }));
+}
+
 app.get("/api/tmdb/tv/:tmdb_id", requireAuth, async (req, res) => {
   if (!config.tmdb_api_key) return res.status(503).json({ error: "Ingen TMDB-nyckel" });
   try {
     const userLang = req.user?.language || null;
-    const data = await tmdbFetch(`/tv/${req.params.tmdb_id}?append_to_response=credits,videos`, userLang);
+    const data = await tmdbFetch(`/tv/${req.params.tmdb_id}?append_to_response=credits,videos,reviews`, userLang);
     if (!data) return res.status(404).json({ error: "Hittades inte" });
+    // Reused for the English title/poster fallback AND, now, as the reviews source — TMDB
+    // reviews are almost always English-only and come back empty otherwise, same issue
+    // already handled for owned titles.
     const enData = (userLang && userLang !== "en-US")
-      ? await tmdbFetch(`/tv/${req.params.tmdb_id}`, "en-US")
+      ? await tmdbFetch(`/tv/${req.params.tmdb_id}?append_to_response=reviews`, "en-US")
       : null;
+    const reviews = mapTmdbReviews(data.reviews?.results?.length ? data.reviews.results : enData?.reviews?.results);
     res.json({
       tmdb_id: data.id,
       title: enData?.name || data.name,
@@ -6646,7 +6971,8 @@ app.get("/api/tmdb/tv/:tmdb_id", requireAuth, async (req, res) => {
         profile_url: p.profile_path ? `https://image.tmdb.org/t/p/w185${p.profile_path}` : null
       })),
       // TV shows use "created_by" instead of a director crew credit
-      crew: (data.created_by||[]).slice(0,3).map(p => ({ id: p.id, name: p.name, job: "Skapare" }))
+      crew: (data.created_by||[]).slice(0,3).map(p => ({ id: p.id, name: p.name, job: "Skapare" })),
+      reviews
     });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -6655,11 +6981,12 @@ app.get("/api/tmdb/movie/:tmdb_id", requireAuth, async (req, res) => {
   if (!config.tmdb_api_key) return res.status(503).json({ error: "Ingen TMDB-nyckel" });
   try {
     const userLang = req.user?.language || null;
-    const data = await tmdbFetch(`/movie/${req.params.tmdb_id}?append_to_response=credits,videos`, userLang);
+    const data = await tmdbFetch(`/movie/${req.params.tmdb_id}?append_to_response=credits,videos,reviews`, userLang);
     if (!data) return res.status(404).json({ error: "Hittades inte" });
     const enData = (userLang && userLang !== "en-US")
-      ? await tmdbFetch(`/movie/${req.params.tmdb_id}`, "en-US")
+      ? await tmdbFetch(`/movie/${req.params.tmdb_id}?append_to_response=reviews`, "en-US")
       : null;
+    const reviews = mapTmdbReviews(data.reviews?.results?.length ? data.reviews.results : enData?.reviews?.results);
     res.json({
       tmdb_id: data.id,
       title: enData?.title || data.title,
@@ -6674,7 +7001,8 @@ app.get("/api/tmdb/movie/:tmdb_id", requireAuth, async (req, res) => {
         id: p.id, name: p.name, character: p.character,
         profile_url: p.profile_path ? `https://image.tmdb.org/t/p/w185${p.profile_path}` : null
       })),
-      crew: (data.credits?.crew||[]).filter(p => p.job === "Director").slice(0,3).map(p => ({ id: p.id, name: p.name, job: p.job }))
+      crew: (data.credits?.crew||[]).filter(p => p.job === "Director").slice(0,3).map(p => ({ id: p.id, name: p.name, job: p.job })),
+      reviews
     });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -7164,6 +7492,20 @@ server.listen(PORT,()=>{
   console.log(`\n StreamVault v${STREAMVAULT_VERSION} - http://localhost:${PORT}\n`);
   setTimeout(()=>scanLibraries().catch(console.error),2000);
   setTimeout(()=>startFileWatchers(), 3000);
+
+  // Scheduled safety-net rescan, on top of the real-time file watchers — catches cases the
+  // watchers might miss (e.g. a network drive dropping its watch, or changes made while the
+  // server was offline). Off unless explicitly enabled, matching how Plex's own equivalent
+  // setting defaults to on but is still just an extra safety net, not the primary mechanism.
+  setInterval(() => {
+    if (!config.periodic_scan_enabled) return;
+    const intervalHours = config.periodic_scan_interval_hours || 12;
+    const hoursSinceLastScan = (Date.now() - (_lastPeriodicScanTime || 0)) / 3600000;
+    if (hoursSinceLastScan < intervalHours) return;
+    _lastPeriodicScanTime = Date.now();
+    console.log(`[SCAN] Running scheduled safety-net rescan (every ${intervalHours}h)...`);
+    scanLibraries().catch(e => console.error("[SCAN] Scheduled rescan error:", e));
+  }, 30 * 60 * 1000); // checked every 30 min — cheap, and means the configured interval doesn't need to divide evenly into anything
 });
 
 process.on("SIGTERM",()=>{server.close();process.exit(0);});

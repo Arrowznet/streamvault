@@ -26,7 +26,7 @@ window.addEventListener("DOMContentLoaded", async () => {
         window._serverName = c.server_name || "StreamVault";
         window._subtitleSearchLanguages = c.subtitleSearchLanguages || [];
         window._serverDefaultLanguage = c.defaultLanguage || null;
-        window._iptvEnabled = !!c.iptvEnabled;
+        window._iptvEnabled = !!c.iptvEnabled; window._watchedThresholdPct = c.watchedThresholdPct || 90;
       } catch(e) {}
       showApp();
       // The localStorage copy can go stale (e.g. after changing language/password on another
@@ -88,7 +88,7 @@ async function login() {
       window._serverName = cfg.server_name || "StreamVault";
       window._subtitleSearchLanguages = cfg.subtitleSearchLanguages || [];
       window._serverDefaultLanguage = cfg.defaultLanguage || null;
-      window._iptvEnabled = !!cfg.iptvEnabled;
+      window._iptvEnabled = !!cfg.iptvEnabled; window._watchedThresholdPct = cfg.watchedThresholdPct || 90;
       console.log("[LOGIN] Server default language:", window._serverDefaultLanguage);
     } catch(e) { console.log("[LOGIN] Could not fetch public config:", e.message); }
     showApp();
@@ -382,6 +382,8 @@ function activateIptvSection() {
 function switchSection(name, fromRouter) {
   document.querySelectorAll(".section").forEach(s => s.classList.remove("active"));
   document.querySelectorAll(".sb-item").forEach(b => b.classList.remove("active"));
+  document.getElementById("sidebar")?.style.removeProperty("background"); // undo the detail page's "blend into backdrop" effect, in case it was left on
+  document.getElementById("topbar")?.style.removeProperty("background");
   if (name !== "settings" && _liveActivityInterval) { clearInterval(_liveActivityInterval); _liveActivityInterval = null; }
   if (name !== "settings" && _systemStatsInterval) { clearInterval(_systemStatsInterval); _systemStatsInterval = null; }
   if (name !== "settings" && _downloadsInterval) { clearInterval(_downloadsInterval); _downloadsInterval = null; }
@@ -1121,10 +1123,10 @@ async function startUpdate(version, downloadUrl, banner) {
 function buildCastScroll(cast, scrollId) {
   return `<div class="cast-scroll-wrap">
     <button class="cast-scroll-btn left" onclick="document.getElementById('${scrollId}').scrollBy({left:-300,behavior:'smooth'})">‹</button>
-    <div class="cast-scroll" id="${scrollId}">
+    <div class="cast-scroll" id="${scrollId}" style="gap:22px !important">
       ${cast.map(p => `
-        <div class="cast-card" onclick="openPersonDetail(${p.id})">
-          ${p.profile_url ? `<img class="cast-photo" src="${p.profile_url}" alt="" loading="lazy">` : `<div class="cast-photo-ph">👤</div>`}
+        <div class="cast-card" onclick="openPersonDetail(${p.id})" style="min-width:110px !important;flex-shrink:0">
+          ${p.profile_url ? `<img class="cast-photo" src="${p.profile_url}" alt="" loading="lazy" style="width:90px !important;height:90px !important">` : `<div class="cast-photo-ph" style="width:90px !important;height:90px !important">👤</div>`}
           <div class="cast-name">${esc(p.name)}</div>
           <div class="cast-char">${esc(p.character||"")}</div>
         </div>`).join("")}
@@ -1177,37 +1179,59 @@ async function loadCollections() {
       sec.innerHTML = `<div class="empty"><div class="empty-icon">🎬</div><h3>Inga samlingar hittades</h3><p>Skanna om biblioteket för att hitta filmserier</p></div>`;
       return;
     }
+    const genreSet = new Set();
+    collections.forEach(c => c.movies.forEach(m => (m.genres || []).forEach(g => genreSet.add(g))));
+    const sortedGenres = [...genreSet].sort((a, b) => a.localeCompare(b));
     sec.innerHTML = `
       <div class="grid-wrap" style="padding-right:32px">
         <div class="row-header" style="margin-bottom:20px">
           <span class="row-title">Samlingar</span>
           <div style="display:flex;align-items:center;gap:12px">
-  <span class="row-count">${collections.length} samlingar</span>
+  <select class="filter-select" id="coll-filter-genre" onchange="filterCollections()">
+    <option value="">Alla genrer</option>
+    ${sortedGenres.map(g => `<option value="${esc(g)}">${esc(g)}</option>`).join("")}
+  </select>
+  <span class="row-count" id="coll-count">${collections.length} samlingar</span>
   ${currentUser?.role === "admin" ? `<button class="s-btn s-btn-primary" onclick="createCollection()" style="padding:6px 14px;font-size:13px">➕ Ny samling</button>` : ""}
 </div>
         </div>
         <div class="media-grid" id="lib-grid">
-          ${collections.map(c => `
-            <div class="mcard" onclick="openCollection('${c.id}')">
-              <div style="position:relative">
-                ${c.poster_url
-                  ? `<img class="mcard-poster" src="${c.poster_url}" alt="" loading="lazy">`
-                  : `<div class="mcard-poster-ph"><span>🎬</span><span>${esc((c.name||"").slice(0,14))}</span></div>`}
-                <div class="mcard-overlay"><span class="mcard-play">▶</span></div>
-              </div>
-              <div class="mcard-info">
-                <div class="mcard-title">${esc(c.name||"")}</div>
-                <div class="mcard-meta">${c.movies.length} filmer</div>
-              </div>
-            </div>`).join("")}
+          ${collections.map(c => buildCollectionCard(c)).join("")}
         </div>
       </div>
       ${buildAbcNav(collections.map(c => ({ title: c.name })))}`;
-    // Store for openCollection
+    // Store for openCollection and the genre filter
     window._collectionsData = collections;
   } catch(e) {
     sec.innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><h3>${e.message}</h3></div>`;
   }
+}
+
+function buildCollectionCard(c) {
+  return `
+    <div class="mcard" onclick="openCollection('${c.id}')">
+      <div style="position:relative">
+        ${c.poster_url
+          ? `<img class="mcard-poster" src="${c.poster_url}" alt="" loading="lazy">`
+          : `<div class="mcard-poster-ph"><span>🎬</span><span>${esc((c.name||"").slice(0,14))}</span></div>`}
+        <div class="mcard-overlay"><span class="mcard-play">▶</span></div>
+      </div>
+      <div class="mcard-info">
+        <div class="mcard-title">${esc(c.name||"")}</div>
+        <div class="mcard-meta">${c.movies.length} filmer</div>
+      </div>
+    </div>`;
+}
+
+function filterCollections() {
+  const genre = document.getElementById("coll-filter-genre")?.value || "";
+  const all = window._collectionsData || [];
+  const filtered = genre ? all.filter(c => c.movies.some(m => (m.genres || []).includes(genre))) : all;
+  document.getElementById("lib-grid").innerHTML = filtered.length
+    ? filtered.map(c => buildCollectionCard(c)).join("")
+    : '<div style="color:var(--muted);font-size:14px;padding:20px 0">Inga träffar</div>';
+  const countEl = document.getElementById("coll-count");
+  if (countEl) countEl.textContent = `${filtered.length} samlingar`;
 }
 async function createCollection() {
   const modal = document.createElement("div");
@@ -1566,15 +1590,23 @@ async function loadLibraryView(libId, libName, libType) {
     }
     const data = await API.get(`/libraries/${libId}/contents`);
     const items = data.items || [];
+    const genreSet = new Set();
+    items.forEach(i => (i.genres || []).forEach(g => genreSet.add(g)));
+    const sortedGenres = [...genreSet].sort((a, b) => a.localeCompare(b));
     sec.innerHTML = `
       <div class="grid-wrap" style="padding-right:32px">
         <div class="filter-bar">
           <h2 style="font-size:22px;font-weight:700;margin:0;flex:1">${esc(libName)}</h2>
           <input class="filter-input" type="text" placeholder="Sök i ${esc(libName)}..." id="lib-filter-q" oninput="filterLibraryView()"/>
-          <select class="filter-select" id="lib-filter-sort" onchange="filterLibraryView()">
+          <select class="filter-select" id="lib-filter-sort" onchange="onLibrarySortChange()">
             <option value="title">A–Ö</option>
             <option value="year">År (nyast)</option>
             <option value="rating">Betyg</option>
+            <option value="genre">Genre</option>
+          </select>
+          <select class="filter-select" id="lib-filter-genre" onchange="filterLibraryView()" style="display:none">
+            <option value="">Alla genrer</option>
+            ${sortedGenres.map(g => `<option value="${esc(g)}">${esc(g)}</option>`).join("")}
           </select>
           <select class="filter-select" id="lib-filter-sublang" onchange="filterLibraryView()" title="Visa bara titlar med undertext på valt språk">
             <option value="">🔤 Alla undertextspråk</option>
@@ -1717,15 +1749,27 @@ function filterCollectionBySubLang() {
     : '<div style="color:var(--muted);font-size:14px;padding:20px 0">Inga träffar</div>';
 }
 
+function onLibrarySortChange() {
+  const sort = document.getElementById("lib-filter-sort")?.value;
+  const genreSelect = document.getElementById("lib-filter-genre");
+  if (genreSelect) {
+    genreSelect.style.display = sort === "genre" ? "inline-block" : "none";
+    if (sort !== "genre") genreSelect.value = "";
+  }
+  filterLibraryView();
+}
+
 function filterLibraryView() {
   const sec = document.getElementById("sec-library");
   const q = (document.getElementById("lib-filter-q")?.value || "").toLowerCase();
   const sort = document.getElementById("lib-filter-sort")?.value || "title";
+  const genre = document.getElementById("lib-filter-genre")?.value || "";
   const subLang = document.getElementById("lib-filter-sublang")?.value || "";
   let items = JSON.parse(sec.dataset.items || "[]");
   if (q) items = items.filter(m => (m.title||"").toLowerCase().includes(q) || String(m.year||"").includes(q));
+  if (genre) items = items.filter(m => (m.genres || []).includes(genre));
   if (subLang) items = items.filter(m => ((m.cached_subtitle_langs && m.cached_subtitle_langs.length ? m.cached_subtitle_langs : m.episode_subtitle_langs) || []).includes(subLang));
-  if (sort === "title") items.sort((a,b) => (a.title||"").localeCompare(b.title||""));
+  if (sort === "title" || sort === "genre") items.sort((a,b) => (a.title||"").localeCompare(b.title||""));
   else if (sort === "year") items.sort((a,b) => (b.year||0)-(a.year||0));
   else if (sort === "rating") items.sort((a,b) => (b.rating||0)-(a.rating||0));
   document.getElementById("lib-grid").innerHTML = items.length
@@ -1737,12 +1781,13 @@ async function loadHome() {
   const sec = document.getElementById("sec-home");
   sec.innerHTML = `<div class="spinner-wrap"><div class="spinner"></div></div>`;
   try {
-    const [libs, continueW, recentMovies, recentShows, ongoingShows] = await Promise.all([
+    const [libs, continueW, recentMovies, recentShows, ongoingShows, recs] = await Promise.all([
       API.get("/libraries"),
       API.get("/continue-watching"),
       API.get("/recently-added?type=movie"),
       API.get("/recently-added?type=tvshow"),
-      API.get("/ongoing-shows")
+      API.get("/ongoing-shows"),
+      API.get("/recommendations").catch(() => ({ items: [] }))
     ]);
     allLibraries = libs;
     let html = "";
@@ -1764,6 +1809,26 @@ async function loadHome() {
     }
 
     if (continueW?.length) html += buildRow("Fortsätt titta", continueW);
+    if (recs?.items?.length) {
+      html += `
+        <div class="row-section">
+          <div class="row-header"><span class="row-title">Du gillade ${esc(recs.sourceTitle)} — du kanske även gillar detta</span></div>
+          <div class="cast-scroll-wrap">
+            <button class="cast-scroll-btn left" onclick="document.getElementById('recs-scroll').scrollBy({left:-300,behavior:'smooth'})">‹</button>
+            <div class="cast-scroll" id="recs-scroll">
+              ${recs.items.map(r => `
+                <div class="mcard" style="width:140px;flex-shrink:0;position:relative" onclick='${r.owned ? `openDetail("${r.id}")` : `openTmdbDetail(${r.tmdb_id}, "${r.type === "tvshow" ? "tv" : "movie"}")`}'>
+                  ${r.owned ? `<span style="position:absolute;top:6px;right:6px;background:rgba(46,204,113,0.9);color:#fff;font-size:10px;padding:2px 6px;border-radius:4px;z-index:2">✓ I biblioteket</span>` : ""}
+                  ${r.poster_url
+                    ? `<img class="mcard-poster" src="${r.poster_url}" alt="" loading="lazy">`
+                    : `<div class="mcard-poster-ph"><span>${r.type==="tvshow"?"📺":"🎬"}</span><span>${esc((r.title||"").slice(0,14))}</span></div>`}
+                  <div class="mcard-info"><div class="mcard-title">${esc(r.title||"")}</div></div>
+                </div>`).join("")}
+            </div>
+            <button class="cast-scroll-btn right" onclick="document.getElementById('recs-scroll').scrollBy({left:300,behavior:'smooth'})">›</button>
+          </div>
+        </div>`;
+    }
     if (recentMovies?.length) html += buildRow("Nyligen tillagda filmer", recentMovies.slice(0, 16));
     if (recentShows?.length) html += buildRow("Nyligen tillagda TV-serier", recentShows.slice(0, 16));
 
@@ -1787,17 +1852,36 @@ async function loadMediaSection(sectionType) {
     }
 
     const letters = "#ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("");
-  const alphaNav = `<div class="alpha-nav" id="alpha-nav-${sectionType}">${letters.map(l => 
-    `<span class="alpha-letter" onclick="jumpToLetter('${sectionType}','${l}')">${l}</span>`
+  const alphaNav = `<div class="abc-nav" id="alpha-nav-${sectionType}">${letters.map(l => 
+    `<a onclick="jumpToLetter('${sectionType}','${l}')">${l}</a>`
   ).join("")}</div>`;
 
-  let html = `<div class="grid-wrap" style="position:relative">
+    // Fetch all libraries and render each as its own section
+    const allItemsForGenres = [];
+    let libraryContentsCache = {};
+    for (const lib of relevantLibs) {
+      const data = await API.get(`/libraries/${lib.id}/contents`);
+      libraryContentsCache[lib.id] = data;
+      allItemsForGenres.push(...data.items);
+    }
+    // Genre list built from what's ACTUALLY in this collection, not TMDB's master list — no
+    // point offering "Documentary" as a filter option if nothing in the library has it.
+    const genreSet = new Set();
+    allItemsForGenres.forEach(i => (i.genres || []).forEach(g => genreSet.add(g)));
+    const sortedGenres = [...genreSet].sort((a, b) => a.localeCompare(b));
+
+    let html = `<div class="grid-wrap" style="position:relative">
       <div class="filter-bar">
         <input class="filter-input" type="text" placeholder="Sök..." id="filter-q-${sectionType}" oninput="filterMediaSection('${sectionType}')"/>
-        <select class="filter-select" id="filter-sort-${sectionType}" onchange="filterMediaSection('${sectionType}')">
+        <select class="filter-select" id="filter-sort-${sectionType}" onchange="onSortChange('${sectionType}')">
           <option value="title">A–Ö</option>
           <option value="year">År (nyast)</option>
           <option value="rating">Betyg</option>
+          <option value="genre">Genre</option>
+        </select>
+        <select class="filter-select" id="filter-genre-${sectionType}" onchange="filterMediaSection('${sectionType}')" style="display:none">
+          <option value="">Alla genrer</option>
+          ${sortedGenres.map(g => `<option value="${esc(g)}">${esc(g)}</option>`).join("")}
         </select>
         <select class="filter-select" id="filter-sublang-${sectionType}" onchange="filterMediaSection('${sectionType}')" title="Visa bara titlar med undertext på valt språk">
           <option value="">🔤 Alla undertextspråk</option>
@@ -1806,16 +1890,15 @@ async function loadMediaSection(sectionType) {
       </div>
       ${alphaNav}`;
 
-    // Fetch all libraries and render each as its own section
     for (const lib of relevantLibs) {
-      const data = await API.get(`/libraries/${lib.id}/contents`);
+      const data = libraryContentsCache[lib.id];
       html += `
         <div class="section-group" data-lib="${lib.id}" data-type="${sectionType}">
           <div class="row-header" style="margin-bottom:14px">
             <span class="row-title">📁 ${esc(lib.name)}</span>
             <span class="row-count">${data.items.length} ${sectionType === "movies" ? "titlar" : "serier"}</span>
           </div>
-          <div class="media-grid lib-grid-${lib.id}" data-items='${esc(JSON.stringify(data.items.map(i => ({ id: i.id, title: i.title, year: i.year, rating: i.rating, poster_url: i.poster_url, type: i.type, added_at: i.added_at, cached_subtitle_langs: (i.cached_subtitle_langs && i.cached_subtitle_langs.length ? i.cached_subtitle_langs : i.episode_subtitle_langs) || [] }))))}'>
+          <div class="media-grid lib-grid-${lib.id}" data-items='${esc(JSON.stringify(data.items.map(i => ({ id: i.id, title: i.title, year: i.year, rating: i.rating, poster_url: i.poster_url, type: i.type, added_at: i.added_at, genres: i.genres || [], cached_subtitle_langs: (i.cached_subtitle_langs && i.cached_subtitle_langs.length ? i.cached_subtitle_langs : i.episode_subtitle_langs) || [] }))))}'>
             ${data.items.map(i => buildCard(i)).join("")}
           </div>
         </div>`;
@@ -1843,8 +1926,8 @@ function jumpToLetter(sectionType, letter) {
       if (card) {
         card.scrollIntoView({ behavior: "smooth", block: "start" });
         // Highlight active letter
-        document.querySelectorAll(`#alpha-nav-${sectionType} .alpha-letter`).forEach(el => el.classList.remove("active"));
-        document.querySelectorAll(`#alpha-nav-${sectionType} .alpha-letter`).forEach(el => {
+        document.querySelectorAll(`#alpha-nav-${sectionType} a`).forEach(el => el.classList.remove("active"));
+        document.querySelectorAll(`#alpha-nav-${sectionType} a`).forEach(el => {
           if (el.textContent === letter) el.classList.add("active");
         });
         return;
@@ -1853,9 +1936,20 @@ function jumpToLetter(sectionType, letter) {
   }
 }
 
+function onSortChange(sectionType) {
+  const sort = document.getElementById(`filter-sort-${sectionType}`)?.value;
+  const genreSelect = document.getElementById(`filter-genre-${sectionType}`);
+  if (genreSelect) {
+    genreSelect.style.display = sort === "genre" ? "inline-block" : "none";
+    if (sort !== "genre") genreSelect.value = ""; // don't let a leftover genre choice keep silently filtering once its picker is hidden
+  }
+  filterMediaSection(sectionType);
+}
+
 function filterMediaSection(sectionType) {
   const q = (document.getElementById(`filter-q-${sectionType}`)?.value || "").toLowerCase();
   const sort = document.getElementById(`filter-sort-${sectionType}`)?.value || "title";
+  const genre = document.getElementById(`filter-genre-${sectionType}`)?.value || "";
   const subLang = document.getElementById(`filter-sublang-${sectionType}`)?.value || "";
   document.querySelectorAll(`.section-group[data-type="${sectionType}"]`).forEach(group => {
     const libId = group.getAttribute("data-lib");
@@ -1863,14 +1957,15 @@ function filterMediaSection(sectionType) {
     if (!grid) return;
     let items = JSON.parse(grid.getAttribute("data-items") || "[]");
     if (q) items = items.filter(i => (i.title || "").toLowerCase().includes(q));
+    if (genre) items = items.filter(i => (i.genres || []).includes(genre));
     if (subLang) items = items.filter(i => ((i.cached_subtitle_langs && i.cached_subtitle_langs.length ? i.cached_subtitle_langs : i.episode_subtitle_langs) || []).includes(subLang));
-    if (sort === "title") items.sort((a, b) => a.title.localeCompare(b.title));
+    if (sort === "title" || sort === "genre") items.sort((a, b) => a.title.localeCompare(b.title));
     else if (sort === "year") items.sort((a, b) => (b.year || 0) - (a.year || 0));
     else if (sort === "rating") items.sort((a, b) => (b.rating || 0) - (a.rating || 0));
     grid.innerHTML = items.map(i => buildCard(i)).join("") ||
       `<div style="color:var(--muted);font-size:14px;padding:20px 0">Inga träffar</div>`;
     // Show/hide the group based on results
-    group.style.display = (q || subLang) && !items.length ? "none" : "block";
+    group.style.display = (q || genre || subLang) && !items.length ? "none" : "block";
   });
 }
 
@@ -2171,6 +2266,8 @@ function buildCard(item, wide = false) {
 // ── DETAIL ────────────────────────────────────────────────────────────────────
 async function openShowDetail(id, fromRouter) {
   document.querySelectorAll(".section").forEach(s => s.classList.remove("active"));
+  document.getElementById("sidebar")?.style.removeProperty("background");
+  document.getElementById("topbar")?.style.removeProperty("background");
   const sec = document.getElementById("sec-detail") || (() => {
     const s = document.createElement("section");
     s.id = "sec-detail"; s.className = "section";
@@ -2181,21 +2278,44 @@ async function openShowDetail(id, fromRouter) {
   sec.dataset.fromId = id;
   sec.innerHTML = `<div class="spinner-wrap" style="height:60vh"><div class="spinner"></div></div>`;
   try {
-    const [item, details, seasonsData] = await Promise.all([
+    const [item, details, seasonsData, progress] = await Promise.all([
       API.get("/media/" + id),
       API.get("/media/" + id + "/details").catch(() => ({})),
-      API.get("/tvshow/" + id + "/seasons").catch(() => ({ seasons: [] }))
+      API.get("/tvshow/" + id + "/seasons").catch(() => ({ seasons: [] })),
+      API.get("/media/" + id + "/progress").catch(() => ({}))
     ]);
     if (!fromRouter && item.slug) {
       navigateToPath(`/serier/${item.slug}`, item.title);
     }
     const seasons = seasonsData.seasons || [];
-    const genresHtml = (details.genres||[]).map(g => `<span class="detail-genre">${esc(g)}</span>`).join("");
+    const genresHtml = (details.genres||[]).slice(0, 3).join(", ") + (details.genres?.length > 3 ? ", och mer" : "");
     const directors = (details.crew||[]).filter(c => ["Creator","Director"].includes(c.job)).map(c => esc(c.name)).join(", ");
     const castHtml = (details.cast||[]).length ? `
       <div class="detail-section">
         <h3 class="detail-section-title">Skådespelare</h3>
         ${buildCastScroll(details.cast, "cast-show-${id}")}
+      </div>` : "";
+    const reviewsHtml = (details.reviews||[]).length ? `
+      <div class="detail-section">
+        <h3 class="detail-section-title">Betyg och recensioner</h3>
+        <div class="cast-scroll-wrap">
+          <button class="cast-scroll-btn left" onclick="document.getElementById('reviews-scroll-${id}').scrollBy({left:-320,behavior:'smooth'})">‹</button>
+          <div class="cast-scroll" id="reviews-scroll-${id}">
+            ${details.reviews.map(r => `
+              <div style="background:var(--card2);border-radius:10px;padding:14px;width:260px;flex-shrink:0">
+                <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+                  ${r.avatar ? `<img src="${r.avatar}" style="width:36px;height:36px;border-radius:50%;object-fit:cover">` : `<div style="width:36px;height:36px;border-radius:50%;background:var(--border);display:flex;align-items:center;justify-content:center">👤</div>`}
+                  <div>
+                    <div style="font-size:13px;font-weight:600">${esc(r.author||"Anonym")}</div>
+                    <div style="font-size:11px;color:var(--muted)">${r.date ? new Date(r.date).toLocaleDateString("sv-SE") : ""}</div>
+                  </div>
+                </div>
+                ${r.rating ? `<div style="color:#f5c518;font-size:13px;margin-bottom:6px">${"★".repeat(Math.round(r.rating/2))}${"☆".repeat(5-Math.round(r.rating/2))}</div>` : ""}
+                <div style="font-size:13px;color:var(--text);line-height:1.4">${esc(r.content||"")}</div>
+              </div>`).join("")}
+          </div>
+          <button class="cast-scroll-btn right" onclick="document.getElementById('reviews-scroll-${id}').scrollBy({left:320,behavior:'smooth'})">›</button>
+        </div>
       </div>` : "";
     const seasonsHtml = seasons.length ? `
       <div class="detail-section">
@@ -2218,34 +2338,132 @@ async function openShowDetail(id, fromRouter) {
       </div>` : "";
     sec.innerHTML = `
       <div class="detail-page">
-        <div class="show-hero" ${item.backdrop_url ? `style="background-image:url('${item.backdrop_url}')"` : ""}>
-          <div class="show-hero-overlay"></div>
-          <button class="detail-back" onclick="closeDetail()">← Tillbaka</button>
-          <div class="show-hero-content">
-            <div class="detail-poster-col">
-              ${item.poster_url ? `<img class="detail-poster" src="${item.poster_url}" alt="">` : `<div class="detail-poster-ph">📺</div>`}
+        ${item.backdrop_url ? `<div id="detail-fullbg-${item.id}" style="position:fixed;inset:0;z-index:-1;background-size:cover;background-position:70% 25%;opacity:0;transition:opacity .3s;background-image:url('${item.backdrop_url}');filter:saturate(30%) brightness(0.75)"></div>
+        <div id="detail-fullbg-overlay-${item.id}" style="position:fixed;inset:0;z-index:-1;background:rgba(0,0,0,0.5);opacity:0;transition:opacity .3s"></div>` : ""}
+        <div class="detail-hero-bar" style="display:flex !important;align-items:center !important;justify-content:space-between !important;padding:14px 20px !important;position:relative !important;z-index:50 !important;background:transparent !important;margin:0 !important">
+          <button class="detail-back" onclick="closeDetail()" style="position:static !important;background:var(--card2, #1a1a28);color:var(--text, #fff);border:1px solid var(--border, #333);padding:8px 16px;border-radius:8px;cursor:pointer;font-size:14px;top:auto !important;left:auto !important">← Tillbaka</button>
+          ${item.backdrop_url ? `<button onclick="toggleDetailBackground('${item.id}', this)" title="Visa bakgrund" style="position:static !important;display:flex;align-items:center;gap:6px;background:var(--card2, #1a1a28);color:var(--muted);border:1px solid var(--border, #333);padding:6px 12px;border-radius:8px;cursor:pointer;font-size:13px;top:auto !important;right:auto !important">🖼 Visa bakgrund</button>` : ""}
+        </div>
+        <div class="detail-content" style="position:relative !important;z-index:2;padding-top:115px !important;margin-top:0 !important">
+          <div class="detail-main">
+            <div class="detail-poster-col" style="overflow:visible !important;height:auto !important;max-height:none !important">
+              ${item.poster_url ? `<img class="detail-poster" src="${item.poster_url}" alt="" style="max-width:230px;width:100%;height:auto !important;max-height:none !important;object-fit:contain">` : `<div class="detail-poster-ph" style="max-width:230px">📺</div>`}
             </div>
             <div class="detail-info-col">
               <h1 class="detail-page-title">${esc(item.title)}</h1>
-              <div class="detail-meta-row">
+              ${directors ? `<div class="detail-director-line" style="color:var(--muted);font-size:13px;margin-top:2px">${directors}</div>` : ""}
+              <div class="detail-meta-row" style="margin-top:8px">
                 ${item.rating ? `<span class="detail-rating">⭐ ${parseFloat(item.rating).toFixed(1)}</span>` : ""}
-                ${directors ? `<span class="detail-meta-item">🎬 ${directors}</span>` : ""}
+                ${genresHtml ? `<span class="detail-meta-item">${esc(genresHtml)}</span>` : ""}
               </div>
-              ${genresHtml ? `<div class="detail-genres">${genresHtml}</div>` : ""}
               ${item.overview ? `<p class="detail-page-overview">${esc(item.overview)}</p>` : ""}
-              <div class="detail-actions">
-                <button class="btn-fav" id="trailer-btn-${item.id}" onclick='toggleTrailer("${item.id}")'>▶ Se trailer</button>
-                ${currentUser?.role === "admin" ? `<button class="btn-fav" onclick='openFixMeta("${item.id}","${esc(item.title)}","tv")'>🔍 Fixa info</button>` : ""}
-                ${currentUser?.role === "admin" ? `<button class="btn-fav" onclick='openEditMedia("${item.id}")'>✏ Redigera</button>` : ""}
+              <div class="detail-actions" style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">
+                <span id="like-btn-${item.id}">${pillBtn("👍", "Gillar", `toggleFav('${item.id}',this)`, `like-btn-inner-${item.id}`, "Ger dig rekommendationer baserat på det du gillar")}</span>
+                ${progress?.completed
+                  ? pillBtn("↺", "Osedd", `markUnwatched('${item.id}')`, `watched-btn-${item.id}`, "Markera som sedd eller osedd")
+                  : pillBtn("✓", "Sedd", `markWatched('${item.id}', 0)`, `watched-btn-${item.id}`, "Markera som sedd eller osedd")}
+                ${pillBtn("🎬", "Trailer", `toggleTrailer("${item.id}")`, `trailer-btn-${item.id}`, "Se trailer")}
+                <div style="position:relative">
+                  <button onclick="toggleDetailMoreMenu('${item.id}')" title="Mer" style="width:38px;height:38px;border-radius:50%;background:var(--card2, #1a1a28);border:1px solid var(--border, #333);color:var(--text, #fff);font-size:16px;cursor:pointer">⋯</button>
+                  <div id="detail-more-menu-${item.id}" style="display:none;position:absolute;top:44px;left:0;background:var(--surface, #141420);border:1px solid var(--border);border-radius:10px;padding:6px;z-index:10;min-width:170px;box-shadow:0 6px 20px rgba(0,0,0,0.4)">
+                    ${currentUser?.role === "admin" ? `<div onclick='openFixMeta("${item.id}","${esc(item.title)}","tv")' style="padding:8px 12px;cursor:pointer;font-size:13px;border-radius:6px;display:flex;align-items:center;gap:8px">🔍 Fixa info</div>` : ""}
+                    ${currentUser?.role === "admin" ? `<div onclick='openEditMedia("${item.id}")' style="padding:8px 12px;cursor:pointer;font-size:13px;border-radius:6px;display:flex;align-items:center;gap:8px">✏ Redigera</div>` : ""}
+                  </div>
+                </div>
               </div>
             </div>
           </div>
-        </div>
-        <div class="detail-content">
           ${seasonsHtml}
           ${castHtml}
+          ${reviewsHtml}
+          ${item.tmdb_id ? `<div class="detail-section" id="extras-${id}"></div>` : ""}
+          ${item.tmdb_id ? `<div class="wtw-section" style="padding:0 20px 20px">
+            <div id="wtw-${id}"><span style="font-size:13px;color:var(--muted)">Hämtar streaming...</span></div>
+          </div>` : ""}
+          ${item.tmdb_id ? `<div class="detail-section" id="related-${id}"></div>` : ""}
         </div>
       </div>`;
+    loadLikeStatus(item.id);
+    if (item.backdrop_url && localStorage.getItem("sv_detail_bg_shown") === "1") {
+      const btn = sec.querySelector('[title="Visa bakgrund"]');
+      toggleDetailBackground(item.id, btn, true);
+    }
+    if (item.tmdb_id) {
+      API.get("/media/" + id + "/extras").then(data => {
+        const el = document.getElementById("extras-" + id);
+        if (!el || !data.extras || !data.extras.length) return;
+        el.innerHTML = `
+          <h3 class="detail-section-title">Extramaterial</h3>
+          <div class="cast-scroll-wrap">
+            <button class="cast-scroll-btn left" onclick="document.getElementById('extras-scroll-${id}').scrollBy({left:-300,behavior:'smooth'})">‹</button>
+            <div class="cast-scroll" id="extras-scroll-${id}">
+              ${data.extras.map(v => `
+                <div style="width:220px;flex-shrink:0;cursor:pointer" onclick='openTrailerModal("${v.key}","${esc(v.name).replace(/"/g,"&quot;")}")'>
+                  <div style="position:relative;border-radius:8px;overflow:hidden">
+                    <img src="${v.thumbnail}" style="width:100%;aspect-ratio:16/9;object-fit:cover;display:block">
+                    <span style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.25);font-size:28px;color:#fff">▶</span>
+                  </div>
+                  <div style="font-size:13px;font-weight:600;margin-top:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(v.name)}</div>
+                  <div style="font-size:11px;color:var(--muted)">${esc(v.type)}</div>
+                </div>`).join("")}
+            </div>
+            <button class="cast-scroll-btn right" onclick="document.getElementById('extras-scroll-${id}').scrollBy({left:300,behavior:'smooth'})">›</button>
+          </div>`;
+      }).catch(()=>{});
+    }
+    if (item.tmdb_id) {
+      API.get("/watch-providers/" + item.tmdb_id + "?kind=tv").then(data => {
+        const el = document.getElementById("wtw-" + id);
+        if (!el) return;
+        window._wtwData = window._wtwData || {};
+        window._wtwData[id] = data;
+        const all = [
+          ...(data.flatrate||[]).map(p => ({ ...p, kind: "Streaming" })),
+          ...(data.rent||[]).map(p => ({ ...p, kind: "Hyr" })),
+          ...(data.buy||[]).map(p => ({ ...p, kind: "Köp" }))
+        ];
+        if (!all.length) { el.innerHTML = ""; return; }
+        const featured = all[0];
+        const rest = all.length - 1;
+        el.innerHTML = `
+          <div style="font-size:11px;color:var(--muted);margin-bottom:4px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">Fler sätt att se den på</div>
+          <div style="display:flex;gap:10px;flex-wrap:wrap">
+            <div style="background:var(--card2);border-radius:8px;padding:10px 14px;display:flex;align-items:center;gap:10px;min-width:160px">
+              ${featured.logo ? `<img src="${featured.logo}" style="width:36px;height:36px;border-radius:6px;object-fit:cover">` : `<div style="width:36px;height:36px;border-radius:6px;background:var(--border)"></div>`}
+              <div>
+                <div style="font-size:13px;font-weight:600">${esc(featured.name)}</div>
+                <div style="font-size:11px;color:var(--muted)">${esc(featured.kind)}</div>
+              </div>
+            </div>
+            ${rest > 0 ? `<div onclick="openWatchProvidersModal('${id}')" style="background:var(--card2);border-radius:8px;padding:10px 14px;display:flex;align-items:center;gap:10px;cursor:pointer;min-width:120px">
+              <span style="font-size:20px">☰</span>
+              <span style="font-size:13px;color:var(--muted)">+${rest} mer</span>
+            </div>` : ""}
+          </div>`;
+      }).catch(()=>{});
+    }
+    if (item.tmdb_id) {
+      API.get("/media/" + id + "/related").then(data => {
+        const el = document.getElementById("related-" + id);
+        if (!el || !data.items || !data.items.length) return;
+        el.innerHTML = `
+          <h3 class="detail-section-title">Liknande serier</h3>
+          <div class="cast-scroll-wrap">
+            <button class="cast-scroll-btn left" onclick="document.getElementById('related-scroll-${id}').scrollBy({left:-300,behavior:'smooth'})">‹</button>
+            <div class="cast-scroll" id="related-scroll-${id}">
+              ${data.items.map(r => `
+                <div class="mcard" style="width:140px;flex-shrink:0;position:relative" onclick='${r.owned ? `openDetail("${r.id}")` : `openTmdbDetail(${r.tmdb_id}, "tv")`}'>
+                  ${r.owned ? `<span style="position:absolute;top:6px;right:6px;background:rgba(46,204,113,0.9);color:#fff;font-size:10px;padding:2px 6px;border-radius:4px;z-index:2">✓ I biblioteket</span>` : ""}
+                  ${r.poster_url
+                    ? `<img class="mcard-poster" src="${r.poster_url}" alt="" loading="lazy">`
+                    : `<div class="mcard-poster-ph"><span>📺</span><span>${esc((r.title||"").slice(0,14))}</span></div>`}
+                  <div class="mcard-info"><div class="mcard-title">${esc(r.title||"")}</div></div>
+                </div>`).join("")}
+            </div>
+            <button class="cast-scroll-btn right" onclick="document.getElementById('related-scroll-${id}').scrollBy({left:300,behavior:'smooth'})">›</button>
+          </div>`;
+      }).catch(()=>{});
+    }
   } catch(e) {
     sec.innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><h3>${e.message}</h3></div>`;
   }
@@ -2349,6 +2567,28 @@ async function openTmdbDetail(tmdbId, kind) {
             </div>`).join("")}
         </div>
       </div>` : "";
+    const reviewsHtml = (item.reviews||[]).length ? `
+      <div class="detail-section">
+        <h3 class="detail-section-title">Betyg och recensioner</h3>
+        <div class="cast-scroll-wrap">
+          <button class="cast-scroll-btn left" onclick="document.getElementById('reviews-scroll-tmdb-${tmdbId}').scrollBy({left:-320,behavior:'smooth'})">‹</button>
+          <div class="cast-scroll" id="reviews-scroll-tmdb-${tmdbId}">
+            ${item.reviews.map(r => `
+              <div style="background:var(--card2);border-radius:10px;padding:14px;width:260px;flex-shrink:0">
+                <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+                  ${r.avatar ? `<img src="${r.avatar}" style="width:36px;height:36px;border-radius:50%;object-fit:cover">` : `<div style="width:36px;height:36px;border-radius:50%;background:var(--border);display:flex;align-items:center;justify-content:center">👤</div>`}
+                  <div>
+                    <div style="font-size:13px;font-weight:600">${esc(r.author||"Anonym")}</div>
+                    <div style="font-size:11px;color:var(--muted)">${r.date ? new Date(r.date).toLocaleDateString("sv-SE") : ""}</div>
+                  </div>
+                </div>
+                ${r.rating ? `<div style="color:#f5c518;font-size:13px;margin-bottom:6px">${"★".repeat(Math.round(r.rating/2))}${"☆".repeat(5-Math.round(r.rating/2))}</div>` : ""}
+                <div style="font-size:13px;color:var(--text);line-height:1.4">${esc(r.content||"")}</div>
+              </div>`).join("")}
+          </div>
+          <button class="cast-scroll-btn right" onclick="document.getElementById('reviews-scroll-tmdb-${tmdbId}').scrollBy({left:320,behavior:'smooth'})">›</button>
+        </div>
+      </div>` : "";
     sec.innerHTML = `
       <div class="detail-page">
         <div class="detail-hero" ${item.backdrop_url ? `style="background-image:url('${item.backdrop_url}')"` : ""}>
@@ -2380,16 +2620,36 @@ async function openTmdbDetail(tmdbId, kind) {
             </div>
           </div>
           ${castHtml}
+          ${reviewsHtml}
         </div>
       </div>`;
     API.get(`/watch-providers/${tmdbId}?kind=${kind}`).then(data => {
       const el = document.getElementById("wtw-tmdb-" + tmdbId);
       if (!el) return;
-      const flat = new Set((data.flatrate||[]).map(p => p.provider_name));
-      const providers = [...new Set([...(data.flatrate||[]),...(data.rent||[])].map(p => p.provider_name))];
-      el.innerHTML = providers.length
-        ? providers.map(n => `<span class="wtw-pill ${flat.has(n)?"stream":"rent"}">${esc(n)}</span>`).join("")
-        : `<span style="font-size:13px;color:var(--muted)">Ej tillgänglig på streaming i Sverige</span>`;
+      window._wtwData = window._wtwData || {};
+      window._wtwData["tmdb-" + tmdbId] = data;
+      const all = [
+        ...(data.flatrate||[]).map(p => ({ ...p, kind: "Streaming" })),
+        ...(data.rent||[]).map(p => ({ ...p, kind: "Hyr" })),
+        ...(data.buy||[]).map(p => ({ ...p, kind: "Köp" }))
+      ];
+      if (!all.length) { el.innerHTML = `<span style="font-size:13px;color:var(--muted)">Ej tillgänglig på streaming i Sverige</span>`; return; }
+      const featured = all[0];
+      const rest = all.length - 1;
+      el.innerHTML = `
+        <div style="display:flex;gap:10px;flex-wrap:wrap">
+          <div style="background:var(--card2);border-radius:8px;padding:10px 14px;display:flex;align-items:center;gap:10px;min-width:160px">
+            ${featured.logo ? `<img src="${featured.logo}" style="width:36px;height:36px;border-radius:6px;object-fit:cover">` : `<div style="width:36px;height:36px;border-radius:6px;background:var(--border)"></div>`}
+            <div>
+              <div style="font-size:13px;font-weight:600">${esc(featured.name)}</div>
+              <div style="font-size:11px;color:var(--muted)">${esc(featured.kind)}</div>
+            </div>
+          </div>
+          ${rest > 0 ? `<div onclick="openWatchProvidersModal('tmdb-${tmdbId}')" style="background:var(--card2);border-radius:8px;padding:10px 14px;display:flex;align-items:center;gap:10px;cursor:pointer;min-width:120px">
+            <span style="font-size:20px">☰</span>
+            <span style="font-size:13px;color:var(--muted)">+${rest} mer</span>
+          </div>` : ""}
+        </div>`;
     }).catch(()=>{});
   } catch(e) {
     sec.innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><h3>${e.message}</h3></div>`;
@@ -2407,8 +2667,117 @@ async function openDetailByTmdb(tmdbId) {
   } catch(e) { console.error("openDetailByTmdb:", e); }
 }
 
+// Compact, icon-only circular button matching Plex's action-row style — a tooltip (title)
+// carries the label instead of visible text, so a row of 6-7 actions doesn't sprawl.
+// Compact pill button — icon + short text, kept small so a row of 3-4 still doesn't take up
+// much more room than the icon-only version did. Deliberately not identical to Plex's
+// icon-only row, per Christian's own "let's not just be a Plex clone" note.
+function pillBtn(icon, label, onclick, id, tooltip) {
+  return `<button ${id ? `id="${id}"` : ""} onclick='${onclick}' ${tooltip ? `title="${esc(tooltip)}"` : ""} style="display:flex;align-items:center;gap:5px;padding:8px 14px;border-radius:20px;background:var(--card2, #1a1a28);border:1px solid var(--border, #333);color:var(--text, #fff);font-size:13px;cursor:pointer;white-space:nowrap">${icon} ${esc(label)}</button>`;
+}
+
+function iconBtn(icon, label, onclick, id) {
+  return `<button ${id ? `id="${id}"` : ""} onclick='${onclick}' title="${esc(label)}" style="width:38px;height:38px;border-radius:50%;background:var(--card2, #1a1a28);border:1px solid var(--border, #333);color:var(--text, #fff);font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center">${icon}</button>`;
+}
+
+async function loadDetailTechInfo(itemId, itemTitle) {
+  const el = document.getElementById(`detail-techinfo-${itemId}`);
+  if (!el) return;
+  try {
+    const info = await API.get(`/media/${itemId}/techinfo`);
+    el.innerHTML = `
+      <div style="margin-top:14px;font-size:13px">
+        ${info.video ? `<div style="display:flex;gap:10px;margin-bottom:4px"><span class="techinfo-label" style="color:var(--muted);width:80px;flex-shrink:0">Video</span><span>${esc(info.video)}</span></div>` : ""}
+        ${info.audio ? `<div style="display:flex;gap:10px;margin-bottom:4px"><span class="techinfo-label" style="color:var(--muted);width:80px;flex-shrink:0">Ljud</span><span>${esc(info.audio)}</span></div>` : ""}
+        <div style="display:flex;gap:10px;align-items:center">
+          <span class="techinfo-label" style="color:var(--muted);width:80px;flex-shrink:0">Undertexter</span>
+          <button onclick='openSubtitles("${itemId}","${esc(itemTitle||"")}")' style="background:none;border:none;color:var(--accent, #e05724);font-size:13px;cursor:pointer;display:flex;align-items:center;gap:4px;padding:0">🔤 Välj undertext ▾</button>
+        </div>
+      </div>`;
+  } catch(e) {
+    el.innerHTML = "";
+  }
+}
+
+function openWatchProvidersModal(itemId) {
+  const data = window._wtwData?.[itemId];
+  if (!data) return;
+  const overlay = document.createElement("div");
+  overlay.id = "wtw-modal-overlay";
+  overlay.style.cssText = "position:fixed;inset:0;z-index:600;background:rgba(0,0,0,0.85);display:flex;align-items:center;justify-content:center;padding:20px";
+  overlay.addEventListener("click", e => { if (e.target === overlay) overlay.remove(); });
+
+  const section = (title, list) => !list.length ? "" : `
+    <div style="margin-bottom:18px">
+      <div style="font-size:13px;color:var(--muted);margin-bottom:10px">${esc(title)}</div>
+      ${list.map(p => `
+        <div style="display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid var(--border)">
+          ${p.logo ? `<img src="${p.logo}" style="width:36px;height:36px;border-radius:6px;object-fit:cover">` : `<div style="width:36px;height:36px;border-radius:6px;background:var(--card2)"></div>`}
+          <span style="font-size:14px;flex:1">${esc(p.name)}</span>
+        </div>`).join("")}
+    </div>`;
+
+  overlay.innerHTML = `
+    <div style="background:var(--surface, #141420);border:1px solid var(--border);border-radius:14px;width:100%;max-width:420px;max-height:80vh;overflow-y:auto">
+      <div style="padding:16px 20px">
+        ${section("Tillgängligt att streama", data.flatrate || [])}
+        ${section("Hyra", data.rent || [])}
+        ${section("Köpa", data.buy || [])}
+      </div>
+      <div style="padding:12px 20px;border-top:1px solid var(--border);display:flex;justify-content:flex-end">
+        <button onclick="document.getElementById('wtw-modal-overlay').remove()" style="background:var(--accent,#e05724);color:#fff;border:none;padding:8px 20px;border-radius:8px;font-size:14px;cursor:pointer">Klar</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+}
+
+function toggleDetailMoreMenu(itemId) {
+  const menu = document.getElementById(`detail-more-menu-${itemId}`);
+  if (!menu) return;
+  const isOpen = menu.style.display === "block";
+  menu.style.display = isOpen ? "none" : "block";
+  if (!isOpen) {
+    const closeOnOutsideClick = (e) => {
+      if (!menu.contains(e.target) && e.target.title !== "Mer") {
+        menu.style.display = "none";
+        document.removeEventListener("click", closeOnOutsideClick);
+      }
+    };
+    setTimeout(() => document.addEventListener("click", closeOnOutsideClick), 0);
+  }
+}
+
+function toggleDetailBackground(itemId, btn, skipSave) {
+  const bg = document.getElementById(`detail-fullbg-${itemId}`);
+  const overlay = document.getElementById(`detail-fullbg-overlay-${itemId}`);
+  const sidebar = document.getElementById("sidebar");
+  const topbar = document.getElementById("topbar");
+  if (!bg || !overlay) return;
+  const isOn = bg.style.opacity === "1";
+  bg.style.opacity = isOn ? "0" : "1";
+  overlay.style.opacity = isOn ? "0" : "1";
+  if (btn) btn.style.color = isOn ? "var(--muted)" : "var(--accent, #e05724)";
+  // Blend the sidebar AND topbar into the backdrop too (Plex's own background doesn't have a
+  // hard edge anywhere) — made transparent only while this is on, restored the moment it's
+  // turned off or the detail page closes, so it never accidentally stays see-through
+  // elsewhere in the app.
+  if (sidebar) sidebar.style.background = isOn ? "" : "transparent";
+  if (topbar) topbar.style.background = isOn ? "" : "transparent";
+  // Sidebar labels and the Video/Ljud/Undertexter labels normally use a muted gray — against
+  // the busier backdrop image that's harder to read, so switch them to plain white while it's
+  // showing, back to normal the moment it's off.
+  document.querySelectorAll("#sidebar .sb-item, #sidebar .sb-section-title").forEach(el => el.style.color = isOn ? "" : "#fff");
+  document.querySelectorAll(`#detail-techinfo-${itemId} .techinfo-label`).forEach(el => el.style.color = isOn ? "var(--muted)" : "#fff");
+  document.querySelectorAll(".detail-director-line, .detail-meta-item, .detail-page-overview").forEach(el => el.style.color = isOn ? "" : "#fff");
+  // Remembered across navigation/refresh — this was the one thing missing before: toggling it
+  // on, then switching movies or hitting F5, silently reset back to off every time.
+  if (!skipSave) localStorage.setItem("sv_detail_bg_shown", isOn ? "0" : "1");
+}
+
 async function openDetail(id, fromRouter) {
   document.querySelectorAll(".section").forEach(s => s.classList.remove("active"));
+  document.getElementById("sidebar")?.style.removeProperty("background");
+  document.getElementById("topbar")?.style.removeProperty("background");
   const sec = document.getElementById("sec-detail") || (() => {
     const s = document.createElement("section");
     s.id = "sec-detail"; s.className = "section";
@@ -2432,12 +2801,34 @@ async function openDetail(id, fromRouter) {
     const watchedLabel = watchedMin >= 60 ? `${Math.floor(watchedMin/60)}h ${watchedMin%60}m` : `${watchedMin}m`;
     const playLabel = pct > 5 && pct < 95 ? `▶ Fortsätt (${watchedLabel})` : "▶ Spela";
     const runtime = details.runtime ? `${Math.floor(details.runtime/60)}h ${details.runtime%60}m` : "";
-    const genresHtml = (details.genres||[]).map(g => `<span class="detail-genre">${esc(g)}</span>`).join("");
+    const genresHtml = (details.genres||[]).slice(0, 3).join(", ") + (details.genres?.length > 3 ? ", och mer" : "");
     const directors = (details.crew||[]).filter(c => c.job === "Director").map(c => esc(c.name)).join(", ");
     const castHtml = (details.cast||[]).length ? `
       <div class="detail-section">
         <h3 class="detail-section-title">Skådespelare</h3>
         ${buildCastScroll(details.cast, "cast-movie-${id}")}
+      </div>` : "";
+    const reviewsHtml = (details.reviews||[]).length ? `
+      <div class="detail-section">
+        <h3 class="detail-section-title">Betyg och recensioner</h3>
+        <div class="cast-scroll-wrap">
+          <button class="cast-scroll-btn left" onclick="document.getElementById('reviews-scroll-${id}').scrollBy({left:-320,behavior:'smooth'})">‹</button>
+          <div class="cast-scroll" id="reviews-scroll-${id}">
+            ${details.reviews.map(r => `
+              <div style="background:var(--card2);border-radius:10px;padding:14px;width:260px;flex-shrink:0">
+                <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+                  ${r.avatar ? `<img src="${r.avatar}" style="width:36px;height:36px;border-radius:50%;object-fit:cover">` : `<div style="width:36px;height:36px;border-radius:50%;background:var(--border);display:flex;align-items:center;justify-content:center">👤</div>`}
+                  <div>
+                    <div style="font-size:13px;font-weight:600">${esc(r.author||"Anonym")}</div>
+                    <div style="font-size:11px;color:var(--muted)">${r.date ? new Date(r.date).toLocaleDateString("sv-SE") : ""}</div>
+                  </div>
+                </div>
+                ${r.rating ? `<div style="color:#f5c518;font-size:13px;margin-bottom:6px">${"★".repeat(Math.round(r.rating/2))}${"☆".repeat(5-Math.round(r.rating/2))}</div>` : ""}
+                <div style="font-size:13px;color:var(--text);line-height:1.4">${esc(r.content||"")}</div>
+              </div>`).join("")}
+          </div>
+          <button class="cast-scroll-btn right" onclick="document.getElementById('reviews-scroll-${id}').scrollBy({left:320,behavior:'smooth'})">›</button>
+        </div>
       </div>` : "";
     let episodesHtml = "";
     if (item.type === "tvshow" && item.episodes?.length) {
@@ -2450,66 +2841,121 @@ async function openDetail(id, fromRouter) {
           </div>`;
         }).join("")}</div></div>`;
     }
+    // "Visa bakgrund" — off by default (plain dark page), toggling shows the backdrop as a
+    // full-page fixed background behind everything, not just a bounded strip at the top.
     sec.innerHTML = `
       <div class="detail-page">
-        <div class="detail-hero" ${item.backdrop_url ? `style="background-image:url('${item.backdrop_url}')"` : ""}>
-          <div class="detail-hero-overlay"></div>
-          <button class="detail-back" onclick="closeDetail()">← Tillbaka</button>
+        ${item.backdrop_url ? `<div id="detail-fullbg-${item.id}" style="position:fixed;inset:0;z-index:-1;background-size:cover;background-position:70% 25%;opacity:0;transition:opacity .3s;background-image:url('${item.backdrop_url}');filter:saturate(30%) brightness(0.75)"></div>
+        <div id="detail-fullbg-overlay-${item.id}" style="position:fixed;inset:0;z-index:-1;background:rgba(0,0,0,0.5);opacity:0;transition:opacity .3s"></div>` : ""}
+        <div class="detail-hero-bar" style="display:flex !important;align-items:center !important;justify-content:space-between !important;padding:14px 20px !important;position:relative !important;z-index:50 !important;background:transparent !important;margin:0 !important">
+          <button class="detail-back" onclick="closeDetail()" style="position:static !important;background:var(--card2, #1a1a28);color:var(--text, #fff);border:1px solid var(--border, #333);padding:8px 16px;border-radius:8px;cursor:pointer;font-size:14px;top:auto !important;left:auto !important">← Tillbaka</button>
+          ${item.backdrop_url ? `<button onclick="toggleDetailBackground('${item.id}', this)" title="Visa bakgrund" style="position:static !important;display:flex;align-items:center;gap:6px;background:var(--card2, #1a1a28);color:var(--muted);border:1px solid var(--border, #333);padding:6px 12px;border-radius:8px;cursor:pointer;font-size:13px;top:auto !important;right:auto !important">🖼 Visa bakgrund</button>` : ""}
         </div>
-        <div class="detail-content">
+        <div class="detail-content" style="position:relative !important;z-index:2;padding-top:115px !important;margin-top:0 !important">
           <div class="detail-main">
-            <div class="detail-poster-col">
-              ${item.poster_url ? `<img class="detail-poster" src="${item.poster_url}" alt="">` : `<div class="detail-poster-ph">${item.type==="tvshow"?"📺":"🎬"}</div>`}
+            <div class="detail-poster-col" style="overflow:visible !important;height:auto !important;max-height:none !important">
+              ${item.poster_url ? `<img class="detail-poster" src="${item.poster_url}" alt="" style="max-width:230px;width:100%;height:auto !important;max-height:none !important;object-fit:contain">` : `<div class="detail-poster-ph" style="max-width:230px">${item.type==="tvshow"?"📺":"🎬"}</div>`}
             </div>
             <div class="detail-info-col">
               <h1 class="detail-page-title">${esc(item.title)}</h1>
-              <div class="detail-meta-row">
+              ${directors ? `<div class="detail-director-line" style="color:var(--muted);font-size:13px;margin-top:2px">Directed by ${directors}</div>` : ""}
+              <div class="detail-meta-row" style="margin-top:8px">
                 ${item.rating ? `<span class="detail-rating">⭐ ${parseFloat(item.rating).toFixed(1)}</span>` : ""}
                 ${item.year ? `<span class="detail-meta-item">${item.year}</span>` : ""}
                 ${runtime ? `<span class="detail-meta-item">${runtime}</span>` : ""}
-                ${directors ? `<span class="detail-meta-item">🎬 ${directors}</span>` : ""}
+                ${genresHtml ? `<span class="detail-meta-item">${esc(genresHtml)}</span>` : ""}
               </div>
-              ${genresHtml ? `<div class="detail-genres">${genresHtml}</div>` : ""}
               ${(details.overview || item.overview) ? `<p class="detail-page-overview">${esc(details.overview || item.overview)}</p>` : ""}
-              <div class="detail-actions">
-                <button class="btn-play" onclick='playItem("${item.id}","${esc(item.title)}")'>${playLabel}</button>
-                <button class="btn-fav" onclick="toggleFav('${item.id}',this)">♡ Favorit</button>
-                ${currentUser?.role === "admin" ? `<button class="btn-fav" onclick='openFixMeta("${item.id}","${esc(item.title)}","${item.type==="tvshow"?"tv":"movie"}")'>🔍 Fixa info</button>` : ""}
-                ${currentUser?.role === "admin" ? `<button class="btn-fav" onclick='openEditMedia("${item.id}")'>✏ Redigera</button>` : ""}
-                <button class="btn-fav" onclick='openSubtitles("${item.id}","${esc(item.title)}")'>🔤 Undertexter</button>
-                <button class="btn-fav" id="trailer-btn-${item.id}" onclick='toggleTrailer("${item.id}")'>▶ Se trailer</button>
-                ${currentUser?.role === "admin" ? `<button class="btn-fav" onclick='openMediaInfo("${item.id}")'>ℹ Filinfo</button>` : ""}
+              <div class="detail-actions" style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">
+                <button class="btn-play" onclick='playItem("${item.id}","${esc(item.title)}")' style="display:flex;align-items:center;gap:8px;padding:10px 20px">${playLabel}</button>
+                <span id="like-btn-${item.id}">${pillBtn("👍", "Gillar", `toggleFav('${item.id}',this)`, `like-btn-inner-${item.id}`, "Ger dig rekommendationer baserat på det du gillar")}</span>
                 ${progress?.completed
-                  ? `<button class="btn-fav" id="watched-btn-${item.id}" onclick="markUnwatched('${item.id}')">↺ Osedd</button>`
-                  : `<button class="btn-fav" id="watched-btn-${item.id}" onclick="markWatched('${item.id}', ${Math.floor(progress?.duration||0)})">✓ Sedd</button>`}
-              </div>
-              <div class="wtw-section">
-                <div class="wtw-title">Var kan du se den?</div>
-                <div style="margin-bottom:14px">
-                  <div style="font-size:11px;color:var(--muted);margin-bottom:6px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">${window._serverName || "StreamVault"}</div>
-                  <span class="wtw-pill stream">✓ ${esc((allLibraries.find(l => l.id === item.library_id)||{}).name || "Ditt bibliotek")}</span>
+                  ? pillBtn("↺", "Osedd", `markUnwatched('${item.id}')`, `watched-btn-${item.id}`, "Markera som sedd eller osedd")
+                  : pillBtn("✓", "Sedd", `markWatched('${item.id}', ${Math.floor(progress?.duration||0)})`, `watched-btn-${item.id}`, "Markera som sedd eller osedd")}
+                ${pillBtn("🎬", "Trailer", `toggleTrailer("${item.id}")`, `trailer-btn-${item.id}`, "Se trailer")}
+                <div style="position:relative">
+                  <button onclick="toggleDetailMoreMenu('${item.id}')" title="Mer" style="width:38px;height:38px;border-radius:50%;background:var(--card2, #1a1a28);border:1px solid var(--border, #333);color:var(--text, #fff);font-size:16px;cursor:pointer">⋯</button>
+                  <div id="detail-more-menu-${item.id}" style="display:none;position:absolute;top:44px;left:0;background:var(--surface, #141420);border:1px solid var(--border, #333);border-radius:10px;padding:6px;z-index:10;min-width:170px;box-shadow:0 6px 20px rgba(0,0,0,0.4)">
+                    <div onclick='openSubtitles("${item.id}","${esc(item.title)}")' style="padding:8px 12px;cursor:pointer;font-size:13px;border-radius:6px;display:flex;align-items:center;gap:8px">🔤 Undertexter</div>
+                    ${currentUser?.role === "admin" ? `<div onclick='openFixMeta("${item.id}","${esc(item.title)}","${item.type==="tvshow"?"tv":"movie"}")' style="padding:8px 12px;cursor:pointer;font-size:13px;border-radius:6px;display:flex;align-items:center;gap:8px">🔍 Fixa info</div>` : ""}
+                    ${currentUser?.role === "admin" ? `<div onclick='openEditMedia("${item.id}")' style="padding:8px 12px;cursor:pointer;font-size:13px;border-radius:6px;display:flex;align-items:center;gap:8px">✏ Redigera</div>` : ""}
+                    ${currentUser?.role === "admin" ? `<div onclick='openMediaInfo("${item.id}")' style="padding:8px 12px;cursor:pointer;font-size:13px;border-radius:6px;display:flex;align-items:center;gap:8px">ℹ Filinfo</div>` : ""}
+                  </div>
                 </div>
-                <div id="wtw-${id}">
-                  ${item.tmdb_id && item.type === "movie" ? `<div style="font-size:11px;color:var(--muted);margin-bottom:4px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">Fler sätt att se den på</div><span style="font-size:13px;color:var(--muted)">Hämtar streaming...</span>` : ""}
-                </div>
               </div>
+              <div id="detail-techinfo-${item.id}"></div>
             </div>
           </div>
           ${castHtml}
+          ${reviewsHtml}
+          ${item.tmdb_id ? `<div class="detail-section" id="extras-${id}"></div>` : ""}
           ${episodesHtml}
+          ${item.tmdb_id && item.type === "movie" ? `<div class="wtw-section" style="padding:0 20px 20px">
+            <div id="wtw-${id}"><span style="font-size:13px;color:var(--muted)">Hämtar streaming...</span></div>
+          </div>` : ""}
           ${item.tmdb_id ? `<div class="detail-section" id="related-${id}"></div>` : ""}
         </div>
       </div>`;
+    loadDetailTechInfo(item.id, item.title);
+    loadLikeStatus(item.id);
+    if (item.backdrop_url && localStorage.getItem("sv_detail_bg_shown") === "1") {
+      // Restore the person's last choice — was silently forgotten before, resetting to off
+      // on every new movie or page refresh regardless of what they'd picked.
+      const btn = sec.querySelector('[title="Visa bakgrund"]');
+      toggleDetailBackground(item.id, btn, true);
+    }
     if (item.tmdb_id && item.type === "movie") {
       API.get("/watch-providers/" + item.tmdb_id).then(data => {
         const el = document.getElementById("wtw-" + id);
         if (!el) return;
-        const flat = new Set((data.flatrate||[]).map(p => p.provider_name));
-        const providers = [...new Set([...(data.flatrate||[]),...(data.rent||[])].map(p => p.provider_name))];
-        const providerHtml = providers.length
-          ? `<div style="font-size:11px;color:var(--muted);margin-bottom:4px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">Fler sätt att se den på</div>` + providers.map(n => `<span class="wtw-pill ${flat.has(n)?"stream":"rent"}">${esc(n)}</span>`).join("")
-          : "";
-        el.innerHTML = providerHtml;
+        window._wtwData = window._wtwData || {};
+        window._wtwData[id] = data;
+        const all = [
+          ...(data.flatrate||[]).map(p => ({ ...p, kind: "Streaming" })),
+          ...(data.rent||[]).map(p => ({ ...p, kind: "Hyr" })),
+          ...(data.buy||[]).map(p => ({ ...p, kind: "Köp" }))
+        ];
+        if (!all.length) { el.innerHTML = ""; return; }
+        const featured = all[0];
+        const rest = all.length - 1;
+        el.innerHTML = `
+          <div style="font-size:11px;color:var(--muted);margin-bottom:4px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">Fler sätt att se den på</div>
+          <div style="display:flex;gap:10px;flex-wrap:wrap">
+            <div style="background:var(--card2);border-radius:8px;padding:10px 14px;display:flex;align-items:center;gap:10px;min-width:160px">
+              ${featured.logo ? `<img src="${featured.logo}" style="width:36px;height:36px;border-radius:6px;object-fit:cover">` : `<div style="width:36px;height:36px;border-radius:6px;background:var(--border)"></div>`}
+              <div>
+                <div style="font-size:13px;font-weight:600">${esc(featured.name)}</div>
+                <div style="font-size:11px;color:var(--muted)">${esc(featured.kind)}</div>
+              </div>
+            </div>
+            ${rest > 0 ? `<div onclick="openWatchProvidersModal('${id}')" style="background:var(--card2);border-radius:8px;padding:10px 14px;display:flex;align-items:center;gap:10px;cursor:pointer;min-width:120px">
+              <span style="font-size:20px">☰</span>
+              <span style="font-size:13px;color:var(--muted)">+${rest} mer</span>
+            </div>` : ""}
+          </div>`;
+      }).catch(()=>{});
+    }
+    if (item.tmdb_id) {
+      API.get("/media/" + id + "/extras").then(data => {
+        const el = document.getElementById("extras-" + id);
+        if (!el || !data.extras || !data.extras.length) return;
+        el.innerHTML = `
+          <h3 class="detail-section-title">Extramaterial</h3>
+          <div class="cast-scroll-wrap">
+            <button class="cast-scroll-btn left" onclick="document.getElementById('extras-scroll-${id}').scrollBy({left:-300,behavior:'smooth'})">‹</button>
+            <div class="cast-scroll" id="extras-scroll-${id}">
+              ${data.extras.map(v => `
+                <div style="width:220px;flex-shrink:0;cursor:pointer" onclick='openTrailerModal("${v.key}","${esc(v.name).replace(/"/g,"&quot;")}")'>
+                  <div style="position:relative;border-radius:8px;overflow:hidden">
+                    <img src="${v.thumbnail}" style="width:100%;aspect-ratio:16/9;object-fit:cover;display:block">
+                    <span style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.25);font-size:28px;color:#fff">▶</span>
+                  </div>
+                  <div style="font-size:13px;font-weight:600;margin-top:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(v.name)}</div>
+                  <div style="font-size:11px;color:var(--muted)">${esc(v.type)}</div>
+                </div>`).join("")}
+            </div>
+            <button class="cast-scroll-btn right" onclick="document.getElementById('extras-scroll-${id}').scrollBy({left:300,behavior:'smooth'})">›</button>
+          </div>`;
       }).catch(()=>{});
     }
     if (item.tmdb_id) {
@@ -2523,7 +2969,8 @@ async function openDetail(id, fromRouter) {
             <button class="cast-scroll-btn left" onclick="document.getElementById('related-scroll-${id}').scrollBy({left:-300,behavior:'smooth'})">‹</button>
             <div class="cast-scroll" id="related-scroll-${id}">
               ${data.items.map(r => `
-                <div class="mcard" style="width:140px;flex-shrink:0" onclick="openDetail('${r.id}')">
+                <div class="mcard" style="width:140px;flex-shrink:0;position:relative" onclick='${r.owned ? `openDetail("${r.id}")` : `openTmdbDetail(${r.tmdb_id}, "${r.type === "tvshow" ? "tv" : "movie"}")`}'>
+                  ${r.owned ? `<span style="position:absolute;top:6px;right:6px;background:rgba(46,204,113,0.9);color:#fff;font-size:10px;padding:2px 6px;border-radius:4px;z-index:2">✓ I biblioteket</span>` : ""}
                   ${r.poster_url
                     ? `<img class="mcard-poster" src="${r.poster_url}" alt="" loading="lazy">`
                     : `<div class="mcard-poster-ph"><span>${r.type==="tvshow"?"📺":"🎬"}</span><span>${esc((r.title||"").slice(0,14))}</span></div>`}
@@ -2795,13 +3242,16 @@ async function openMediaInfo(id) {
     const v = item.video;
     const audioHtml = (item.audio||[]).map((a,i) => `
       <div style="background:var(--card2);border-radius:8px;padding:12px;margin-bottom:8px">
-        <div style="font-weight:600;font-size:13px;margin-bottom:6px">🔊 Spår ${i+1} – ${a.language?.toUpperCase()||"UND"} ${a.title?"· "+esc(a.title):""}</div>
-        ${infoRow("Codec",a.codec)} ${infoRow("Kanaler",a.channel_layout||a.channels)} ${infoRow("Bitrate",a.bitrate)}
+        <div style="font-weight:600;font-size:13px;margin-bottom:6px">🔊 Spår ${i+1} – ${esc(a.display_title||"")}</div>
+        ${infoRow("Codec",a.codec)} ${infoRow("Kanaler",a.channels)} ${infoRow("Kanallayout",a.channel_layout)} ${infoRow("Bitrate",a.bitrate)}
+        ${infoRow("Samplingsfrekvens",a.sampling_rate)} ${infoRow("Språk",a.language?.toUpperCase())} ${infoRow("Språktagg",a.language_tag)}
+        ${a.title ? infoRow("Titel",a.title) : ""}
       </div>`).join("") || "<p style='color:var(--muted);font-size:13px'>Inga ljudspår hittades</p>";
     const subHtml = (item.subtitles||[]).length ? (item.subtitles||[]).map((s,i) => `
       <div style="background:var(--card2);border-radius:8px;padding:12px;margin-bottom:8px">
-        <div style="font-weight:600;font-size:13px;margin-bottom:6px">💬 Spår ${i+1} – ${s.language?.toUpperCase()||"UND"} ${s.title?"· "+esc(s.title):""} ${s.forced?"[Tvingad]":""} ${s.default?"[Standard]":""}</div>
-        ${infoRow("Format",s.codec)}
+        <div style="font-weight:600;font-size:13px;margin-bottom:6px">💬 Spår ${i+1} – ${esc(s.display_title||"")} ${s.default?"[Standard]":""}</div>
+        ${infoRow("Format",s.codec)} ${infoRow("Tvingad",s.forced?"Ja":"Nej")} ${infoRow("Språk",s.language?.toUpperCase())} ${infoRow("Språktagg",s.language_tag)}
+        ${s.title ? infoRow("Titel",s.title) : ""}
       </div>`).join("")
     : "<p style='color:var(--muted);font-size:13px'>Inga undertextspår</p>";
     modal.innerHTML = `
@@ -2821,7 +3271,15 @@ async function openMediaInfo(id) {
           </div>
           <div>
             <div class="info-section-title">Video</div>
-            ${infoRow("Codec",v?.codec)} ${infoRow("Profil",v?.profile)} ${infoRow("Upplösning",v?.width&&v?.height?v.width+"x"+v.height:"–")} ${infoRow("Bildhastighet",v?.fps?v.fps+"fps":"–")} ${infoRow("Bitdjup",v?.bit_depth?v.bit_depth+" bit":"–")}
+            ${v ? esc(v.display_title||"") ? `<div style="font-size:12px;color:var(--accent,#e05724);margin-bottom:8px;font-weight:600">${esc(v.display_title)}</div>` : "" : ""}
+            ${infoRow("Codec",v?.codec)} ${infoRow("Profil",v?.profile)} ${infoRow("Nivå",v?.level)}
+            ${infoRow("Upplösning",v?.resolution_label)} ${infoRow("Bredd",v?.width)} ${infoRow("Höjd",v?.height)}
+            ${infoRow("Kodad bredd",v?.coded_width)} ${infoRow("Kodad höjd",v?.coded_height)}
+            ${infoRow("Bildförhållande",v?.aspect_ratio)} ${infoRow("Bildhastighet",v?.fps?v.fps+" fps":"–")}
+            ${infoRow("Bitrate",v?.bitrate)} ${infoRow("Bitdjup",v?.bit_depth?v.bit_depth+" bit":"–")}
+            ${infoRow("Färgrymd",v?.color_space)} ${infoRow("Färgomfång",v?.color_range)} ${infoRow("Färgöverföring",v?.color_transfer)} ${infoRow("Färgprimärer",v?.color_primaries)}
+            ${infoRow("Chroma-plats",v?.chroma_location)} ${infoRow("Chroma-subsampling",v?.chroma_subsampling)}
+            ${infoRow("Referensbilder",v?.ref_frames)} ${infoRow("Språk",v?.language?.toUpperCase())}
           </div>
           <div><div class="info-section-title">Ljud</div>${audioHtml}</div>
           <div><div class="info-section-title">Undertexter</div>${subHtml}</div>
@@ -2829,11 +3287,33 @@ async function openMediaInfo(id) {
             <div class="info-section-title">Container</div>
             ${infoRow("Format",item.container?.format)} ${infoRow("Bitrate",item.container?.bitrate)}
           </div>
+          <div style="text-align:center">
+            <a href="#" onclick="event.preventDefault(); showRawFileInfo('${id}')" style="color:var(--accent,#e05724);font-size:12px;text-decoration:none">Visa rådata (JSON)</a>
+          </div>
         </div>
       </div>`;
     document.body.appendChild(modal);
     modal.addEventListener("click", e => { if (e.target === modal) modal.remove(); });
   } catch(e) { toast("Kunde inte hämta info: " + e.message, "error"); }
+}
+
+async function showRawFileInfo(id) {
+  try {
+    const raw = await API.get("/media/" + id + "/fileinfo/raw");
+    const modal = document.createElement("div");
+    modal.id = "raw-fileinfo-modal";
+    modal.style.cssText = "position:fixed;inset:0;z-index:600;background:rgba(0,0,0,0.9);display:flex;align-items:center;justify-content:center;padding:24px";
+    modal.innerHTML = `
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:14px;width:100%;max-width:800px;max-height:85vh;display:flex;flex-direction:column;overflow:hidden">
+        <div style="padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px">
+          <span style="font-weight:700">Rådata (ffprobe)</span>
+          <button onclick="document.getElementById('raw-fileinfo-modal').remove()" style="margin-left:auto;background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer">✕</button>
+        </div>
+        <pre style="padding:16px;overflow:auto;font-size:11px;color:var(--text);margin:0;white-space:pre-wrap;word-break:break-all">${esc(JSON.stringify(raw, null, 2))}</pre>
+      </div>`;
+    document.body.appendChild(modal);
+    modal.addEventListener("click", e => { if (e.target === modal) modal.remove(); });
+  } catch(e) { toast("Kunde inte hämta rådata: " + e.message, "error"); }
 }
 
 function infoRow(label, value) {
@@ -2879,11 +3359,33 @@ document.getElementById("detail-overlay")?.addEventListener("click", e => {
 
 async function toggleFav(id, btn) {
   try {
-    await API.post("/favorites/" + id, {});
-    btn.textContent = "♥ Tillagd";
-    btn.style.color = "var(--accent2)";
-    toast("Tillagd i favoriter!", "success");
+    const data = await API.post("/favorites/" + id, {});
+    if (data.liked) {
+      btn.innerHTML = "👍 Gillad";
+      btn.style.color = "var(--accent2, #e05724)";
+      btn.style.borderColor = "var(--accent2, #e05724)";
+      toast("Tillagd bland gillade!", "success");
+    } else {
+      btn.innerHTML = "👍 Gillar";
+      btn.style.color = "";
+      btn.style.borderColor = "";
+      toast("Borttagen", "info");
+    }
   } catch { toast("Fel vid sparande", "error"); }
+}
+
+async function loadLikeStatus(itemId) {
+  const wrap = document.getElementById(`like-btn-${itemId}`);
+  const btn = document.getElementById(`like-btn-inner-${itemId}`);
+  if (!wrap || !btn) return;
+  try {
+    const data = await API.get(`/favorites/${itemId}/status`);
+    if (data.liked) {
+      btn.innerHTML = "👍 Gillad";
+      btn.style.color = "var(--accent2, #e05724)";
+      btn.style.borderColor = "var(--accent2, #e05724)";
+    }
+  } catch {}
 }
 
 // ── PLAYBACK ──────────────────────────────────────────────────────────────────
@@ -3275,7 +3777,7 @@ async function playItem(id, title) {
         API.post("/media/" + id + "/progress", {
           position: Math.floor(pos),
           duration: Math.floor(dur),
-          completed: pct > 0.9 ? 1 : 0
+          completed: pct > ((window._watchedThresholdPct || 90) / 100) ? 1 : 0
         }).catch(() => {});
       }
     });
@@ -4900,6 +5402,7 @@ function closePlayer() {
   // keeps running/counting on the server after the player is closed, wasting CPU forever.
   // Not applicable to a live IPTV channel — there's no server-side transcode job for it.
   if (currentItemId && !window._iptvPlaying) API.post("/dash/" + currentItemId + "/stop").catch(() => {});
+  if (currentItemId && !window._iptvPlaying) API.post("/media/" + currentItemId + "/stop").catch(() => {});
   window._iptvPlaying = false;
   nowPlayingId = null;
   currentItemId = null;
@@ -5038,6 +5541,117 @@ function applyTheme(themeName) {
   const topbar = document.getElementById("topbar");
   if (topbar) { topbar.style.background = theme.vars["--surface"]; topbar.style.borderColor = theme.vars["--border"]; }
   window._currentTheme = themeName;
+}
+
+async function toggleUserWebhookEnabled(userId, enabled) {
+  try {
+    await API.patch("/users/" + userId + "/webhook", { webhook_enabled: enabled });
+    const input = document.getElementById("webhook-url-input-" + userId);
+    if (input) input.disabled = !enabled;
+    toast(enabled ? "✓ Webhook aktiverad" : "Webhook avstängd", "success");
+  } catch(e) {
+    toast("Fel: " + e.message, "error");
+    const cb = document.getElementById("webhook-enabled-" + userId);
+    if (cb) cb.checked = !enabled;
+  }
+}
+
+async function saveUserWebhook(userId) {
+  const input = document.getElementById("webhook-url-input-" + userId);
+  const url = input?.value.trim() || "";
+  try {
+    await API.patch("/users/" + userId + "/webhook", { webhook_url: url });
+    toast(url ? "✓ Webhook sparad" : "Webhook borttagen", "success");
+  } catch(e) {
+    toast("Fel: " + e.message, "error");
+  }
+}
+
+function showWebhookHelp() {
+  const overlay = document.createElement("div");
+  overlay.id = "webhook-help-modal";
+  overlay.style.cssText = "position:fixed;inset:0;z-index:600;background:rgba(0,0,0,0.85);display:flex;align-items:center;justify-content:center;padding:20px";
+  overlay.addEventListener("click", e => { if (e.target === overlay) overlay.remove(); });
+  overlay.innerHTML = `
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:14px;width:100%;max-width:560px;max-height:85vh;overflow-y:auto">
+      <div style="padding:16px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center">
+        <span style="font-weight:700">Hur webhooks fungerar</span>
+        <button onclick="document.getElementById('webhook-help-modal').remove()" style="margin-left:auto;background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer">✕</button>
+      </div>
+      <div style="padding:20px;font-size:13px;line-height:1.6;color:var(--text)">
+        <p>En webhook är bara en webbadress som StreamVault skickar ett litet meddelande till, automatiskt, när du börjar eller slutar titta på något. Något annat system lyssnar på den adressen och kan sen göra vad du vill — dimma lampor, stänga persienner, vad som helst.</p>
+
+        <p style="margin-top:14px">StreamVault vet ingenting om just din utrustning (Hue, IKEA Trådfri, Home Assistant, eller något helt annat) — den skickar bara meddelandet. <b>Något annat</b> behöver ta emot det och bestämma vad som ska hända. Nedan är två vanliga, gratis vägar in, beroende på vad du redan har.</p>
+
+        <p style="margin-top:16px"><b>🅰 Har du bara smarta lampor (Hue, Trådfri, etc) och inget annat?</b><br>
+        Då är <b>IFTTT</b> (ifttt.com, gratis app) den enklaste vägen — den kan prata direkt med de flesta lampmärken, utan att du behöver installera något extra hemma.</p>
+        <ol style="margin:8px 0 0 18px;padding:0">
+          <li>Skapa ett konto på ifttt.com</li>
+          <li>Skapa en ny "Applet": som utlösare (<i>"If This"</i>), välj tjänsten <b>Webhooks</b></li>
+          <li>IFTTT ger dig en unik webbadress — klistra in den här i StreamVault</li>
+          <li>Som åtgärd (<i>"Then That"</i>), välj din lamp-tjänst (t.ex. Philips Hue) och vad som ska hända</li>
+        </ol>
+
+        <p style="margin-top:16px"><b>🅱 Har du (eller vill sätta upp) Home Assistant?</b><br>
+        Ger mer kontroll och stödjer nästan allt smart hem-relaterat, men kräver lite mer teknisk uppsättning initialt.</p>
+        <ol style="margin:8px 0 0 18px;padding:0">
+          <li>Inställningar → Automationer → Skapa automation</li>
+          <li>Som utlösare, välj <b>Webhook</b> — den ger dig en unik adress</li>
+          <li>Klistra in den adressen här i StreamVault</li>
+          <li>Bygg vidare med vilken åtgärd du vill (dimma, stänga av, m.m.)</li>
+        </ol>
+
+        <p style="margin-top:16px"><b>Vad skickas?</b><br>
+        Ett litet JSON-meddelande, ungefär så här:</p>
+        <pre style="background:var(--card2);border-radius:8px;padding:12px;font-size:11px;overflow-x:auto;margin-top:6px">{
+  "event": "started",
+  "username": "Pilen",
+  "title": "Bad Boys: Ride or Die",
+  "timestamp": "2026-08-13T20:15:00.000Z"
+}</pre>
+        <p style="margin-top:8px"><code>event</code> är antingen <code>"started"</code> eller <code>"stopped"</code>.</p>
+
+        <p style="margin-top:14px"><b>Bra att veta:</b></p>
+        <ul style="margin:4px 0 0 18px;padding:0">
+          <li>Funktionen är avstängd som standard — ingenting skickas förrän du aktivt kryssar i rutan ovan</li>
+          <li>Bara start och stopp skickas — inte paus/återuppta. Pausar du för att gå på toa och fortsätter sen, skickas inget nytt förrän du helt stänger spelaren</li>
+          <li>Fungerar bara med tjänster som kan ta emot en webbadress som "webhook" — vilket både IFTTT och Home Assistant gör, men även många andra (Zapier, Make/Integromat, egna skript, m.fl.)</li>
+        </ul>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+}
+
+async function loadStreamingServicesList(userId, currentPrefs) {
+  const el = document.getElementById(`streaming-services-list-${userId}`);
+  if (!el) return;
+  try {
+    const data = await API.get("/watch-providers/all");
+    const prefs = new Set(currentPrefs || []);
+    el.innerHTML = data.providers.map(p => `
+      <label style="display:flex;align-items:center;gap:10px;padding:6px 8px;cursor:pointer;font-size:13px">
+        <input type="checkbox" value="${esc(p.name)}" ${prefs.has(p.name) ? "checked" : ""}>
+        ${p.logo ? `<img src="${p.logo}" style="width:24px;height:24px;border-radius:4px;object-fit:cover">` : `<span style="width:24px"></span>`}
+        <span>${esc(p.name)}</span>
+      </label>`).join("");
+  } catch(e) {
+    el.innerHTML = `<div style="color:var(--danger);font-size:13px;padding:10px">Kunde inte hämta listan: ${esc(e.message)}</div>`;
+  }
+}
+
+async function saveStreamingServices(userId) {
+  const checked = [...document.querySelectorAll(`#streaming-services-list-${userId} input:checked`)].map(c => c.value);
+  try {
+    await API.patch(`/users/${userId}/preferred-providers`, { providers: checked });
+    toast(checked.length ? `✓ ${checked.length} tjänster sparade` : "✓ Sparat (visar alla tjänster igen)", "success");
+  } catch(e) {
+    toast("Fel: " + e.message, "error");
+  }
+}
+
+async function clearStreamingServices(userId) {
+  document.querySelectorAll(`#streaming-services-list-${userId} input`).forEach(c => c.checked = false);
+  await saveStreamingServices(userId);
 }
 
 async function saveUserTheme(userId, themeName) {
@@ -5639,6 +6253,33 @@ function switchSettingsTab(tabId) {
   loadSettings();
 }
 
+async function backfillGenres() {
+  toast("⏳ Hämtar genrer, kan ta en stund...", "info");
+  try {
+    const data = await API.post("/admin/backfill-genres", {});
+    toast(`✓ ${data.updated} av ${data.checked} titlar uppdaterade med genrer`, "success");
+  } catch(e) {
+    toast("Fel: " + e.message, "error");
+  }
+}
+
+async function saveLibraryTuning() {
+  try {
+    await API.patch("/config", {
+      periodic_scan_enabled: document.getElementById("periodic-scan-enabled")?.checked || false,
+      periodic_scan_interval_hours: parseInt(document.getElementById("periodic-scan-interval")?.value) || 12,
+      scan_low_priority: document.getElementById("scan-low-priority")?.checked || false,
+      continue_watching_max_weeks: parseInt(document.getElementById("cw-max-weeks")?.value) ?? 16,
+      continue_watching_max_items: parseInt(document.getElementById("cw-max-items")?.value) ?? 20,
+      watched_threshold_pct: parseInt(document.getElementById("watched-threshold")?.value) || 90
+    });
+    window._watchedThresholdPct = parseInt(document.getElementById("watched-threshold")?.value) || 90;
+    toast("✓ Sparat", "success");
+  } catch(e) {
+    toast("Fel: " + e.message, "error");
+  }
+}
+
 async function loadSettings() {
   if (currentUser.role !== "admin") {
     // Non-admin users see their own profile page instead
@@ -5815,9 +6456,57 @@ async function loadSettings() {
           <button class="s-btn primary" onclick="rescan()">↻ Skanna efter nya filer</button>
           <button class="s-btn" onclick="updateCollections()">🎬 Uppdatera samlingar</button>
           <button class="s-btn" onclick="fullRescan()" style="border-color:#e74c3c;color:#e74c3c;">🗑 Rensa och skanna om allt</button>
+          <button class="s-btn" onclick="backfillGenres()">🎭 Hämta genrer för befintliga titlar</button>
         </div>
         <div id="scan-progress-info" style="font-size:12px;color:var(--muted);margin-top:8px;">${scanStatus.scanning ? scanProgressText(scanStatus.progress) : ""}</div>
         <div style="font-size:12px;color:var(--muted);margin-top:4px;">👁 Filbevakning aktiv · <span id="next-scan-label">Beräknar...</span></div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-section-title">Skanning</div>
+        <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:14px;margin-bottom:10px">
+          <input type="checkbox" id="periodic-scan-enabled" ${cfg.periodic_scan_enabled ? "checked" : ""} onchange="saveLibraryTuning()">
+          <span>Kör en schemalagd säkerhetsskanning, utöver filbevakningen</span>
+        </label>
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;margin-left:28px">
+          <span style="font-size:13px;color:var(--muted)">Intervall:</span>
+          <select id="periodic-scan-interval" class="s-input" style="max-width:140px" onchange="saveLibraryTuning()">
+            <option value="6" ${cfg.periodic_scan_interval_hours==6?"selected":""}>Var 6:e timme</option>
+            <option value="12" ${!cfg.periodic_scan_interval_hours||cfg.periodic_scan_interval_hours==12?"selected":""}>Var 12:e timme</option>
+            <option value="24" ${cfg.periodic_scan_interval_hours==24?"selected":""}>Var 24:e timme</option>
+          </select>
+        </div>
+        <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:14px">
+          <input type="checkbox" id="scan-low-priority" ${cfg.scan_low_priority ? "checked" : ""} onchange="saveLibraryTuning()">
+          <span>Kör skanning med lägre prioritet (stör pågående uppspelning mindre)</span>
+        </label>
+        <div style="font-size:11px;color:var(--muted);margin-top:4px;margin-left:28px">Endast Windows. Sänker serverns processprioritet under en skanning, återställs efteråt.</div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-section-title">Fortsätt titta</div>
+        <div style="display:flex;gap:16px;flex-wrap:wrap">
+          <div>
+            <label style="font-size:13px;color:var(--muted)">Ta bort objekt efter (veckor)</label><br>
+            <input type="number" id="cw-max-weeks" class="s-input" value="${cfg.continue_watching_max_weeks ?? 16}" style="width:80px" onchange="saveLibraryTuning()">
+          </div>
+          <div>
+            <label style="font-size:13px;color:var(--muted)">Max antal objekt</label><br>
+            <input type="number" id="cw-max-items" class="s-input" value="${cfg.continue_watching_max_items ?? 20}" style="width:80px" onchange="saveLibraryTuning()">
+          </div>
+        </div>
+        <div style="font-size:11px;color:var(--muted);margin-top:8px">Media som inte setts på så här många veckor visas inte längre i Fortsätt titta — förutom om en ny episod nyligen lagts till (t.ex. en säsongspremiär), då visas den ändå.</div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-section-title">Uppspelning</div>
+        <label style="font-size:13px;color:var(--muted)">Gräns för när något räknas som "sett"</label><br>
+        <select id="watched-threshold" class="s-input" style="max-width:160px" onchange="saveLibraryTuning()">
+          <option value="80" ${cfg.watched_threshold_pct==80?"selected":""}>80%</option>
+          <option value="90" ${!cfg.watched_threshold_pct||cfg.watched_threshold_pct==90?"selected":""}>90%</option>
+          <option value="95" ${cfg.watched_threshold_pct==95?"selected":""}>95%</option>
+        </select>
+        <div style="font-size:11px;color:var(--muted);margin-top:6px">Vid vilken spelningsprocent en video markeras som sedd.</div>
       </div>
 
       <div class="settings-section" id="downloads-section">
@@ -6185,6 +6874,30 @@ async function renderUserPage(user) {
             </div>`).join("")}
         </div>
       </div>
+      <div class="settings-section">
+        <div class="settings-section-title">Streamingtjänster</div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:10px">Välj de tjänster du använder. "Fler sätt att se den på" visar bara ditt val, istället för alla tjänster som finns.</div>
+        <div id="streaming-services-list-${user.id}" style="max-height:280px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:8px"><div style="color:var(--muted);font-size:13px;padding:10px">Laddar...</div></div>
+        <div style="display:flex;gap:8px;margin-top:10px">
+          <button class="s-btn primary" onclick="saveStreamingServices('${user.id}')">Spara</button>
+          <button class="s-btn" onclick="clearStreamingServices('${user.id}')">Visa alla igen (rensa val)</button>
+        </div>
+      </div>
+      <div class="settings-section">
+        <div class="settings-section-title" style="display:flex;align-items:center;gap:8px">
+          Smarta hem (webhook)
+          <span onclick="showWebhookHelp()" style="cursor:pointer;width:18px;height:18px;border-radius:50%;background:var(--card2);border:1px solid var(--border);display:inline-flex;align-items:center;justify-content:center;font-size:12px;color:var(--muted)">?</span>
+        </div>
+        <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:13px;margin-bottom:10px">
+          <input type="checkbox" id="webhook-enabled-${user.id}" ${user.webhook_enabled ? "checked" : ""} onchange="toggleUserWebhookEnabled('${user.id}', this.checked)">
+          <span>Aktivera webhook för mitt konto</span>
+        </label>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:10px">Av som standard. Låter t.ex. Home Assistant eller IFTTT reagera på när du börjar/slutar titta — se "?" ovan för hur man kommer igång.</div>
+        <div style="display:flex;gap:8px">
+          <input type="text" id="webhook-url-input-${user.id}" class="s-input" placeholder="https://din-hemautomation.se/webhook/..." value="${esc(user.webhook_url||"")}" style="flex:1" ${!user.webhook_enabled ? "disabled" : ""}>
+          <button class="s-btn primary" onclick="saveUserWebhook('${user.id}')">Spara</button>
+        </div>
+      </div>
       ${currentUser.role === "admin" && user.role !== "admin" ? `<div class="settings-section">
         <div class="settings-section-title">Biblioteksbehörigheter</div>
         <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Välj vilka bibliotek användaren har tillgång till.</div>
@@ -6239,6 +6952,7 @@ async function renderUserPage(user) {
   if (currentUser.role === "admin" && user.role !== "admin") {
     loadLibraryAccessUI(user);
   }
+  loadStreamingServicesList(user.id, user.preferred_watch_providers);
 }
 
 async function loadLibraryAccessUI(user) {
