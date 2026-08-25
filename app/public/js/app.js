@@ -15,6 +15,7 @@ let allLibraries = [];
 
 // ── INIT ──────────────────────────────────────────────────────────────────────
 window.addEventListener("DOMContentLoaded", async () => {
+  applyLoginScreenTranslations();
   const token = localStorage.getItem("sv_token");
   if (token) {
     const user = JSON.parse(localStorage.getItem("sv_user") || "null");
@@ -37,6 +38,7 @@ window.addEventListener("DOMContentLoaded", async () => {
           currentUser = Object.assign({}, currentUser, fresh, { id: fresh._id });
           localStorage.setItem("sv_user", JSON.stringify(currentUser));
           if (fresh.theme) applyTheme(fresh.theme);
+          applyPostLoginTranslations();
         }
       }).catch(() => {});
       return;
@@ -245,6 +247,7 @@ async function showApp() {
   document.getElementById("main-app").style.display = "flex";
   document.getElementById("userAvatar").textContent = (currentUser.username || "?")[0].toUpperCase();
   document.getElementById("userName").textContent = currentUser.username;
+  applyPostLoginTranslations();
   await loadSidebarLibraries();
   const path = window.location.pathname;
   if (path && path !== "/" && path !== "/index.html") {
@@ -286,6 +289,470 @@ async function checkPendingOcrRequests() {
   } catch {}
 }
 
+// ── I18N ──────────────────────────────────────────────────────────────────────
+// First pass: sidebar + movie/show detail pages only. Everything else (settings, admin
+// panel, modals) still hardcoded Swedish for now — a deliberate, staged rollout rather than
+// translating everything at once, since that would be much harder to review and test.
+const I18N = {
+  sv: {
+    "sidebar.collections": "Samlingar",
+    "sidebar.other": "ÖVRIGT",
+    "sidebar.explore_movies": "Utforska Filmtrailers",
+    "sidebar.explore_tv": "Utforska Serietrailers",
+    "sidebar.iptv": "IPTV",
+    "sidebar.back": "Tillbaka",
+    "sidebar.settings": "INSTÄLLNINGAR",
+    "home.recommends": "StreamVault rekommenderar",
+    "home.more_info": "Mer info",
+    "home.continue_watching": "Fortsätt titta",
+    "home.recently_added_movies": "Nyligen tillagda filmer",
+    "home.recently_added_shows": "Nyligen tillagda TV-serier",
+    "detail.back": "Tillbaka",
+    "detail.show_background": "Visa bakgrund",
+    "detail.hide_background": "Dölj bakgrund",
+    "detail.play": "Spela",
+    "detail.continue": "Fortsätt",
+    "detail.like": "Gillar",
+    "detail.liked": "Gillad",
+    "detail.like_tooltip": "Ger dig rekommendationer baserat på det du gillar",
+    "detail.watched": "Sedd",
+    "detail.unwatched": "Osedd",
+    "detail.watched_tooltip": "Markera som sedd eller osedd",
+    "detail.trailer": "Trailer",
+    "detail.trailer_tooltip": "Se trailer",
+    "detail.more": "Mer",
+    "detail.fix_info": "Fixa info",
+    "detail.edit": "Redigera",
+    "detail.subtitles_menu": "Undertexter",
+    "detail.fileinfo": "Filinfo",
+    "detail.directed_by": "Directed by",
+    "detail.video": "Video",
+    "detail.audio": "Ljud",
+    "detail.subtitles": "Undertexter",
+    "detail.choose_subtitle": "Välj undertext",
+    "detail.cast": "Skådespelare",
+    "detail.cast_crew": "Skådespelare & Medverkande",
+    "detail.reviews": "Betyg och recensioner",
+    "detail.extras": "Extramaterial",
+    "detail.seasons": "Säsonger",
+    "detail.episodes": "avsnitt",
+    "detail.where_to_watch": "Var kan du se den?",
+    "detail.more_ways_to_watch": "Fler sätt att se den på",
+    "detail.similar_movies": "Liknande filmer",
+    "detail.similar_shows": "Liknande serier",
+    "detail.in_library": "I biblioteket",
+    "detail.not_found": "Hittades inte",
+    "detail.anonymous": "Anonym",
+    "detail.episodes_label": "Avsnitt",
+    "detail.loading_streaming": "Hämtar streaming...",
+    "detail.and_more": ", och mer",
+    "detail.available_to_stream": "Tillgängligt att streama",
+    "detail.rent": "Hyra",
+    "detail.buy": "Köpa",
+    "detail.streaming_label": "Streaming",
+    "detail.done": "Klar",
+    "profile.back": "← Tillbaka",
+    "profile.role_admin": "Admin",
+    "profile.role_user": "Användare",
+    "profile.user_info": "Användarinformation",
+    "profile.last_login": "Senast inloggad:",
+    "profile.never": "Aldrig",
+    "profile.created": "Skapad:",
+    "profile.unknown": "Okänt",
+    "profile.appearance": "Utseende",
+    "profile.theme_desc_self": "Välj tema — sparas på ditt konto och gäller på alla enheter du loggar in på.",
+    "profile.theme_desc_other": "Välj tema för den här användaren.",
+    "profile.streaming_services": "Streamingtjänster",
+    "profile.streaming_services_desc": "Välj de tjänster du använder. \"Fler sätt att se den på\" visar bara ditt val, istället för alla tjänster som finns.",
+    "profile.loading": "Laddar...",
+    "profile.save": "Spara",
+    "profile.show_all_again": "Visa alla igen (rensa val)",
+    "profile.smart_home": "Smarta hem (webhook)",
+    "profile.enable_webhook": "Aktivera webhook för mitt konto",
+    "profile.webhook_desc": "Av som standard. Låter t.ex. Home Assistant eller IFTTT reagera på när du börjar/slutar titta — se \"?\" ovan för hur man kommer igång.",
+    "profile.language_setting": "Språkinställning",
+    "profile.language_desc": "Välj språk för undertexter och sökning. Åsidosätter serverns globala inställning.",
+    "profile.use_server_setting": "🌐 Använd serverns inställning",
+    "profile.save_language": "Spara språk",
+    "profile.subtitle_priority": "Undertextspråk (prioritetsordning)",
+    "profile.subtitle_priority_desc": "För hushåll med fler än en nationalitet — lägg till flera språk i den ordning du vill att servern ska leta efter undertexter i. Första träffen vinner. Tomt = använd bara språkinställningen ovan, sen den vanliga eng→sv-kedjan.",
+    "profile.add": "+ Lägg till",
+    "profile.save_priority": "Spara prioritetsordning",
+    "profile.change_password": "Byt lösenord",
+    "profile.new_password": "Nytt lösenord",
+    "profile.confirm_password": "Bekräfta lösenord",
+    "profile.save_password": "Spara lösenord",
+    "theme.standard": "Standard (mörk)",
+    "theme.plexlik": "Plex-liknande (mörk, guld)",
+    "theme.midnatt": "Midnattsblå (mörk)",
+    "theme.skog": "Skog (mörk, grön)",
+    "theme.ljus": "Ljus",
+    "theme.ljusvarm": "Ljus (varm)",
+    "static.login_sub": "Din personliga mediaserver",
+    "static.username": "Användarnamn",
+    "static.password": "Lösenord",
+    "static.login_btn": "Logga in",
+    "static.default_username": "Användare",
+    "static.menu_settings": "⚙️ Inställningar",
+    "static.menu_profile": "👤 Min profil",
+    "static.menu_logout": "🚪 Logga ut",
+    "static.search_placeholder": "🔍 Sök filmer, serier, skådespelare...",
+    "static.back10": "⏮ 10s",
+    "static.fwd10": "10s ⏭",
+    "toast.added_to_liked": "Tillagd bland gillade!",
+    "toast.removed": "Borttagen",
+    "toast.save_error": "Fel vid sparande",
+    "toast.marked_watched": "Markerad som sedd ✓",
+    "toast.marked_unwatched": "Markerad som osedd ↺",
+    "toast.save_failed": "Kunde inte spara",
+    "resume.question": "Du har sett {label} av den här. Vill du fortsätta där du slutade, eller börja om?",
+    "resume.continue": "▶ Fortsätt ({label})",
+    "resume.restart": "↻ Börja om från början",
+    "resume.cancel": "Avbryt",
+    "explore.title": "🧭 Utforska trailers",
+    "explore.movies_tab": "🎬 Filmer",
+    "explore.tv_tab": "📺 Serier",
+    "explore.all_genres": "Alla genrer",
+    "explore.all_years": "Alla år",
+    "explore.no_results": "Inga träffar med det här filtret",
+    "explore.prev": "‹ Föregående",
+    "explore.next": "Nästa ›",
+    "explore.page_of": "Sida {page} av {total}",
+    "explore.cat_popular": "Populära",
+    "explore.cat_top_rated": "Topplistan",
+    "explore.cat_now_playing": "Nu på bio",
+    "explore.cat_upcoming": "Kommande",
+    "explore.cat_on_the_air": "Sänds nu",
+    "explore.cat_airing_today": "Sänds idag",
+    "detail.created_by": "Skapad av",
+    "detail.not_available_streaming_se": "Ej tillgänglig på streaming i Sverige",
+    "home.you_liked": "Du gillade {names} — du kanske även gillar detta"
+  },
+  en: {
+    "sidebar.collections": "Collections",
+    "sidebar.other": "OTHER",
+    "sidebar.explore_movies": "Explore Movie Trailers",
+    "sidebar.explore_tv": "Explore TV Trailers",
+    "sidebar.iptv": "IPTV",
+    "sidebar.back": "Back",
+    "sidebar.settings": "SETTINGS",
+    "home.recommends": "StreamVault recommends",
+    "home.more_info": "More Info",
+    "home.continue_watching": "Continue Watching",
+    "home.recently_added_movies": "Recently Added Movies",
+    "home.recently_added_shows": "Recently Added TV Shows",
+    "detail.back": "Back",
+    "detail.show_background": "Show Background",
+    "detail.hide_background": "Hide Background",
+    "detail.play": "Play",
+    "detail.continue": "Continue",
+    "detail.like": "Like",
+    "detail.liked": "Liked",
+    "detail.like_tooltip": "Gives you recommendations based on what you like",
+    "detail.watched": "Watched",
+    "detail.unwatched": "Unwatched",
+    "detail.watched_tooltip": "Mark as watched or unwatched",
+    "detail.trailer": "Trailer",
+    "detail.trailer_tooltip": "Watch trailer",
+    "detail.more": "More",
+    "detail.fix_info": "Fix Info",
+    "detail.edit": "Edit",
+    "detail.subtitles_menu": "Subtitles",
+    "detail.fileinfo": "File Info",
+    "detail.directed_by": "Directed by",
+    "detail.video": "Video",
+    "detail.audio": "Audio",
+    "detail.subtitles": "Subtitles",
+    "detail.choose_subtitle": "Choose subtitle",
+    "detail.cast": "Cast",
+    "detail.cast_crew": "Cast & Crew",
+    "detail.reviews": "Ratings and Reviews",
+    "detail.extras": "Extras",
+    "detail.seasons": "Seasons",
+    "detail.episodes": "episodes",
+    "detail.where_to_watch": "Where to watch",
+    "detail.more_ways_to_watch": "More ways to watch",
+    "detail.similar_movies": "Similar Movies",
+    "detail.similar_shows": "Similar Shows",
+    "detail.in_library": "In Library",
+    "detail.not_found": "Not found",
+    "detail.anonymous": "Anonymous",
+    "detail.episodes_label": "Episodes",
+    "detail.loading_streaming": "Loading streaming info...",
+    "detail.and_more": ", and more",
+    "detail.available_to_stream": "Available to Stream",
+    "detail.rent": "Rent",
+    "detail.buy": "Buy",
+    "detail.streaming_label": "Streaming",
+    "detail.done": "Done",
+    "profile.back": "← Back",
+    "profile.role_admin": "Admin",
+    "profile.role_user": "User",
+    "profile.user_info": "User Info",
+    "profile.last_login": "Last login:",
+    "profile.never": "Never",
+    "profile.created": "Created:",
+    "profile.unknown": "Unknown",
+    "profile.appearance": "Appearance",
+    "profile.theme_desc_self": "Choose a theme — saved to your account and applies on every device you log in on.",
+    "profile.theme_desc_other": "Choose a theme for this user.",
+    "profile.streaming_services": "Streaming Services",
+    "profile.streaming_services_desc": "Choose the services you use. \"More ways to watch\" will only show your picks, instead of every available service.",
+    "profile.loading": "Loading...",
+    "profile.save": "Save",
+    "profile.show_all_again": "Show all again (clear selection)",
+    "profile.smart_home": "Smart Home (webhook)",
+    "profile.enable_webhook": "Enable webhook for my account",
+    "profile.webhook_desc": "Off by default. Lets e.g. Home Assistant or IFTTT react when you start/stop watching — see \"?\" above to get started.",
+    "profile.language_setting": "Language",
+    "profile.language_desc": "Choose the language for subtitles and search. Overrides the server's global setting.",
+    "profile.use_server_setting": "🌐 Use server setting",
+    "profile.save_language": "Save Language",
+    "profile.subtitle_priority": "Subtitle Languages (priority order)",
+    "profile.subtitle_priority_desc": "For households with more than one nationality — add several languages in the order the server should look for subtitles in. First match wins. Empty = just use the language setting above, then the usual English→Swedish chain.",
+    "profile.add": "+ Add",
+    "profile.save_priority": "Save Priority Order",
+    "profile.change_password": "Change Password",
+    "profile.new_password": "New password",
+    "profile.confirm_password": "Confirm password",
+    "profile.save_password": "Save Password",
+    "theme.standard": "Standard (Dark)",
+    "theme.plexlik": "Plex-like (Dark, Gold)",
+    "theme.midnatt": "Midnight Blue (Dark)",
+    "theme.skog": "Forest (Dark, Green)",
+    "theme.ljus": "Light",
+    "theme.ljusvarm": "Light (Warm)",
+    "static.login_sub": "Your personal media server",
+    "static.username": "Username",
+    "static.password": "Password",
+    "static.login_btn": "Log In",
+    "static.default_username": "User",
+    "static.menu_settings": "⚙️ Settings",
+    "static.menu_profile": "👤 My Profile",
+    "static.menu_logout": "🚪 Log Out",
+    "static.search_placeholder": "🔍 Search movies, shows, cast...",
+    "static.back10": "⏮ 10s",
+    "static.fwd10": "10s ⏭",
+    "toast.added_to_liked": "Added to your liked list!",
+    "toast.removed": "Removed",
+    "toast.save_error": "Error saving",
+    "toast.marked_watched": "Marked as watched ✓",
+    "toast.marked_unwatched": "Marked as unwatched ↺",
+    "toast.save_failed": "Could not save",
+    "resume.question": "You have watched {label} of this. Do you want to continue where you left off, or start over?",
+    "resume.continue": "▶ Continue ({label})",
+    "resume.restart": "↻ Start Over",
+    "resume.cancel": "Cancel",
+    "explore.title": "🧭 Explore Trailers",
+    "explore.movies_tab": "🎬 Movies",
+    "explore.tv_tab": "📺 TV Shows",
+    "explore.all_genres": "All Genres",
+    "explore.all_years": "All Years",
+    "explore.no_results": "No results with this filter",
+    "explore.prev": "‹ Previous",
+    "explore.next": "Next ›",
+    "explore.page_of": "Page {page} of {total}",
+    "explore.cat_popular": "Popular",
+    "explore.cat_top_rated": "Top Rated",
+    "explore.cat_now_playing": "Now Playing",
+    "explore.cat_upcoming": "Upcoming",
+    "explore.cat_on_the_air": "On The Air",
+    "explore.cat_airing_today": "Airing Today",
+    "detail.created_by": "Created by",
+    "detail.not_available_streaming_se": "Not available for streaming in Sweden",
+    "home.you_liked": "You liked {names} — you might also like this"
+  },
+  // Best-effort machine-assisted translation, not reviewed by a native Finnish speaker —
+  // worth having someone fluent check this over before treating it as final.
+  fi: {
+    "sidebar.collections": "Kokoelmat",
+    "sidebar.other": "MUUT",
+    "sidebar.explore_movies": "Selaa elokuvatrailereita",
+    "sidebar.explore_tv": "Selaa sarjatrailereita",
+    "sidebar.iptv": "IPTV",
+    "sidebar.back": "Takaisin",
+    "sidebar.settings": "ASETUKSET",
+    "home.recommends": "StreamVault suosittelee",
+    "home.more_info": "Lisätietoja",
+    "home.continue_watching": "Jatka katselua",
+    "home.recently_added_movies": "Äskettäin lisätyt elokuvat",
+    "home.recently_added_shows": "Äskettäin lisätyt sarjat",
+    "detail.back": "Takaisin",
+    "detail.show_background": "Näytä tausta",
+    "detail.hide_background": "Piilota tausta",
+    "detail.play": "Toista",
+    "detail.continue": "Jatka",
+    "detail.like": "Tykkää",
+    "detail.liked": "Tykätty",
+    "detail.like_tooltip": "Antaa suosituksia tykkäämiesi perusteella",
+    "detail.watched": "Katsottu",
+    "detail.unwatched": "Katsomaton",
+    "detail.watched_tooltip": "Merkitse katsotuksi tai katsomattomaksi",
+    "detail.trailer": "Traileri",
+    "detail.trailer_tooltip": "Katso traileri",
+    "detail.more": "Lisää",
+    "detail.fix_info": "Korjaa tiedot",
+    "detail.edit": "Muokkaa",
+    "detail.subtitles_menu": "Tekstitykset",
+    "detail.fileinfo": "Tiedostotiedot",
+    "detail.directed_by": "Ohjaaja",
+    "detail.video": "Video",
+    "detail.audio": "Ääni",
+    "detail.subtitles": "Tekstitykset",
+    "detail.choose_subtitle": "Valitse tekstitys",
+    "detail.cast": "Näyttelijät",
+    "detail.cast_crew": "Näyttelijät ja tekijät",
+    "detail.reviews": "Arvostelut",
+    "detail.extras": "Lisämateriaali",
+    "detail.seasons": "Kaudet",
+    "detail.episodes": "jaksoa",
+    "detail.episodes_label": "Jaksot",
+    "detail.where_to_watch": "Mistä katsoa",
+    "detail.more_ways_to_watch": "Muita tapoja katsoa",
+    "detail.similar_movies": "Samankaltaiset elokuvat",
+    "detail.similar_shows": "Samankaltaiset sarjat",
+    "detail.in_library": "Kirjastossa",
+    "detail.not_found": "Ei löytynyt",
+    "detail.anonymous": "Anonyymi",
+    "detail.loading_streaming": "Haetaan suoratoistoa...",
+    "detail.and_more": ", ja muuta",
+    "detail.available_to_stream": "Saatavilla suoratoistona",
+    "detail.rent": "Vuokraa",
+    "detail.buy": "Osta",
+    "detail.streaming_label": "Suoratoisto",
+    "detail.done": "Valmis",
+    "profile.back": "← Takaisin",
+    "profile.role_admin": "Ylläpitäjä",
+    "profile.role_user": "Käyttäjä",
+    "profile.user_info": "Käyttäjätiedot",
+    "profile.last_login": "Viimeksi kirjautunut:",
+    "profile.never": "Ei koskaan",
+    "profile.created": "Luotu:",
+    "profile.unknown": "Tuntematon",
+    "profile.appearance": "Ulkoasu",
+    "profile.theme_desc_self": "Valitse teema — tallennetaan tilillesi ja koskee kaikkia laitteita, joilla kirjaudut sisään.",
+    "profile.theme_desc_other": "Valitse teema tälle käyttäjälle.",
+    "profile.streaming_services": "Suoratoistopalvelut",
+    "profile.streaming_services_desc": "Valitse käyttämäsi palvelut. \"Muita tapoja katsoa\" näyttää vain valintasi, kaikkien palveluiden sijaan.",
+    "profile.loading": "Ladataan...",
+    "profile.save": "Tallenna",
+    "profile.show_all_again": "Näytä kaikki uudelleen (tyhjennä valinta)",
+    "profile.smart_home": "Älykoti (webhook)",
+    "profile.enable_webhook": "Ota webhook käyttöön tililläni",
+    "profile.webhook_desc": "Pois päältä oletuksena. Antaa esim. Home Assistantin tai IFTTT:n reagoida kun aloitat/lopetat katselun — katso \"?\" yllä aloittaaksesi.",
+    "profile.language_setting": "Kieliasetus",
+    "profile.language_desc": "Valitse kieli tekstityksille ja haulle. Ohittaa palvelimen yleisasetuksen.",
+    "profile.use_server_setting": "🌐 Käytä palvelimen asetusta",
+    "profile.save_language": "Tallenna kieli",
+    "profile.subtitle_priority": "Tekstityskielet (tärkeysjärjestys)",
+    "profile.subtitle_priority_desc": "Useamman kansallisuuden talouksille — lisää useita kieliä siinä järjestyksessä, jossa palvelimen tulisi etsiä tekstityksiä. Ensimmäinen osuma voittaa. Tyhjä = käytä vain yllä olevaa kieliasetusta, sitten tavallista englanti→suomi-ketjua.",
+    "profile.add": "+ Lisää",
+    "profile.save_priority": "Tallenna järjestys",
+    "profile.change_password": "Vaihda salasana",
+    "profile.new_password": "Uusi salasana",
+    "profile.confirm_password": "Vahvista salasana",
+    "profile.save_password": "Tallenna salasana",
+    "theme.standard": "Perus (tumma)",
+    "theme.plexlik": "Plex-tyylinen (tumma, kulta)",
+    "theme.midnatt": "Yönsininen (tumma)",
+    "theme.skog": "Metsä (tumma, vihreä)",
+    "theme.ljus": "Vaalea",
+    "theme.ljusvarm": "Vaalea (lämmin)",
+    "static.login_sub": "Oma henkilökohtainen mediapalvelimesi",
+    "static.username": "Käyttäjätunnus",
+    "static.password": "Salasana",
+    "static.login_btn": "Kirjaudu sisään",
+    "static.default_username": "Käyttäjä",
+    "static.menu_settings": "⚙️ Asetukset",
+    "static.menu_profile": "👤 Oma profiili",
+    "static.menu_logout": "🚪 Kirjaudu ulos",
+    "static.search_placeholder": "🔍 Hae elokuvia, sarjoja, näyttelijöitä...",
+    "static.back10": "⏮ 10s",
+    "static.fwd10": "10s ⏭",
+    "toast.added_to_liked": "Lisätty tykättyihin!",
+    "toast.removed": "Poistettu",
+    "toast.save_error": "Virhe tallennuksessa",
+    "toast.marked_watched": "Merkitty katsotuksi ✓",
+    "toast.marked_unwatched": "Merkitty katsomattomaksi ↺",
+    "toast.save_failed": "Tallennus epäonnistui",
+    "resume.question": "Olet katsonut tästä {label}. Haluatko jatkaa siitä mihin jäit, vai aloittaa alusta?",
+    "resume.continue": "▶ Jatka ({label})",
+    "resume.restart": "↻ Aloita alusta",
+    "resume.cancel": "Peruuta",
+    "explore.title": "🧭 Selaa trailereita",
+    "explore.movies_tab": "🎬 Elokuvat",
+    "explore.tv_tab": "📺 Sarjat",
+    "explore.all_genres": "Kaikki genret",
+    "explore.all_years": "Kaikki vuodet",
+    "explore.no_results": "Ei tuloksia tällä suodattimella",
+    "explore.prev": "‹ Edellinen",
+    "explore.next": "Seuraava ›",
+    "explore.page_of": "Sivu {page} / {total}",
+    "explore.cat_popular": "Suositut",
+    "explore.cat_top_rated": "Parhaiten arvostellut",
+    "explore.cat_now_playing": "Nyt elokuvateattereissa",
+    "explore.cat_upcoming": "Tulevat",
+    "explore.cat_on_the_air": "Käynnissä",
+    "explore.cat_airing_today": "Tänään",
+    "detail.created_by": "Luonut",
+    "detail.not_available_streaming_se": "Ei saatavilla suoratoistona Ruotsissa",
+    "home.you_liked": "Pidit näistä: {names} — saatat pitää myös tästä"
+  }
+};
+function t(key) {
+  const raw = (currentUser?.language || "").toLowerCase();
+  const lang = raw.startsWith("en") ? "en" : raw.startsWith("fi") ? "fi" : "sv";
+  return I18N[lang][key] || I18N.sv[key] || key;
+}
+
+// Login screen renders before any user is authenticated, so there's no currentUser.language
+// to go on yet — the browser's own language is the only signal available at that point, same
+// principle as any site showing a guess-language landing page before you've told it anything.
+function applyLoginScreenTranslations() {
+  const raw = navigator.language.toLowerCase();
+  const lang = raw.startsWith("en") ? "en" : raw.startsWith("fi") ? "fi" : "sv";
+  const tr = (key) => I18N[lang][key] || I18N.sv[key] || key;
+  const sub = document.getElementById("login-sub-text");
+  const userInput = document.getElementById("l-user");
+  const passInput = document.getElementById("l-pass");
+  const loginBtn = document.getElementById("login-btn-text");
+  if (sub) sub.textContent = tr("static.login_sub");
+  if (userInput) userInput.placeholder = tr("static.username");
+  if (passInput) passInput.placeholder = tr("static.password");
+  if (loginBtn) loginBtn.textContent = tr("static.login_btn");
+}
+
+// Static HTML elements that never get rebuilt dynamically once the app is running (sidebar
+// user menu, topbar search box, player skip buttons) — called once the logged-in user's
+// language is actually known, and again any time it changes (e.g. saving a new language on
+// the profile page) since these elements otherwise sit untouched for the rest of the session.
+function applyPostLoginTranslations() {
+  const userNameEl = document.getElementById("userName");
+  const menuSettings = document.getElementById("um-settings");
+  const menuProfile = document.getElementById("um-profile");
+  const menuLogout = document.getElementById("um-logout");
+  const searchInput = document.getElementById("topbar-search-input");
+  const back10 = document.getElementById("ctrl-back10");
+  const fwd10 = document.getElementById("ctrl-fwd10");
+  if (userNameEl && !currentUser?.username) userNameEl.textContent = t("static.default_username");
+  if (menuSettings) menuSettings.textContent = t("static.menu_settings");
+  if (menuProfile) menuProfile.textContent = t("static.menu_profile");
+  if (menuLogout) menuLogout.textContent = t("static.menu_logout");
+  if (searchInput) searchInput.placeholder = t("static.search_placeholder");
+  if (back10) back10.textContent = t("static.back10");
+  if (fwd10) fwd10.textContent = t("static.fwd10");
+}
+
+// Shows the admin-set translated name for the user's current language when one exists (e.g.
+// name_en, name_fi — generic by design so adding another language later doesn't need a new
+// field or UI pattern, just another admin input following the same lib.name_<code> shape),
+// otherwise falls back to the library's regular name.
+function libDisplayName(lib) {
+  const raw = (currentUser?.language || "").toLowerCase();
+  const langCode = raw.startsWith("en") ? "en" : raw.startsWith("fi") ? "fi" : null;
+  return (langCode && lib["name_" + langCode]) ? lib["name_" + langCode] : lib.name;
+}
+
 async function loadSidebarLibraries() {
   try {
     const libs = await API.get("/libraries");
@@ -296,33 +763,33 @@ async function loadSidebarLibraries() {
     const nonMusicLibs = libs.filter(l => l.type !== "music");
     const musicLibs = libs.filter(l => l.type === "music");
     container.innerHTML = nonMusicLibs.map(lib => `
-      <div class="sb-item" id="sb-lib-${lib.id}" onclick="switchToLibrary('${lib.id}', '${lib.name.replace(/'/g, "\'")}', '${lib.type}')">
+      <div class="sb-item" id="sb-lib-${lib.id}" onclick="switchToLibrary('${lib.id}', '${libDisplayName(lib).replace(/'/g, "\'")}', '${lib.type}')">
         <span class="sb-icon">${icons[lib.type] || "📁"}</span>
-        <span>${esc(lib.name)}</span>
+        <span>${esc(libDisplayName(lib))}</span>
       </div>
     `).join("") + `
       <div class="sb-item" id="sb-collections" onclick="switchSection('collections')">
         <span class="sb-icon">🎬</span>
-        <span>Samlingar</span>
+        <span>${t("sidebar.collections")}</span>
       </div>
-      <div class="sb-sep">ÖVRIGT</div>
+      <div class="sb-sep">${t("sidebar.other")}</div>
       <div style="height:1px;background:var(--border);margin:0 18px 4px"></div>
       <div class="sb-item" id="sb-explore-movie" onclick="openExploreMovies()">
         <span class="sb-icon">🎬</span>
-        <span>Utforska Filmtrailers</span>
+        <span>${t("sidebar.explore_movies")}</span>
       </div>
       <div class="sb-item" id="sb-explore-tv" onclick="openExploreTV()">
         <span class="sb-icon">📺</span>
-        <span>Utforska Serietrailers</span>
+        <span>${t("sidebar.explore_tv")}</span>
       </div>
       <div class="sb-item" id="sb-iptv" onclick="loadIptv()" style="${window._iptvEnabled && (!currentUser?.library_ids?.length || currentUser.library_ids.includes("iptv")) ? "" : "display:none"}">
         <span class="sb-icon">📡</span>
-        <span>IPTV</span>
+        <span>${t("sidebar.iptv")}</span>
       </div>` +
     musicLibs.map(lib => `
-      <div class="sb-item" id="sb-lib-${lib.id}" onclick="switchToLibrary('${lib.id}', '${lib.name.replace(/'/g, "\'")}', '${lib.type}')">
+      <div class="sb-item" id="sb-lib-${lib.id}" onclick="switchToLibrary('${lib.id}', '${libDisplayName(lib).replace(/'/g, "\'")}', '${lib.type}')">
         <span class="sb-icon">🎵</span>
-        <span>${esc(lib.name)}</span>
+        <span>${esc(libDisplayName(lib))}</span>
       </div>`).join("");
   } catch {}
 }
@@ -814,8 +1281,8 @@ async function parseIptvPlaylist() {
 let _exploreState = { mediaType: "movie", category: "popular", genre: "", year: "", page: 1 };
 let _movieGenres = null;
 let _tvGenres = null;
-const EXPLORE_MOVIE_CATEGORIES = [["popular","Populära"],["top_rated","Topplistan"],["now_playing","Nu på bio"],["upcoming","Kommande"]];
-const EXPLORE_TV_CATEGORIES = [["popular","Populära"],["top_rated","Topplistan"],["on_the_air","Sänds nu"],["airing_today","Sänds idag"]];
+const EXPLORE_MOVIE_CATEGORIES = [["popular","explore.cat_popular"],["top_rated","explore.cat_top_rated"],["now_playing","explore.cat_now_playing"],["upcoming","explore.cat_upcoming"]];
+const EXPLORE_TV_CATEGORIES = [["popular","explore.cat_popular"],["top_rated","explore.cat_top_rated"],["on_the_air","explore.cat_on_the_air"],["airing_today","explore.cat_airing_today"]];
 
 async function loadExplore() {
   const sec = document.getElementById("sec-explore");
@@ -861,23 +1328,23 @@ function renderExploreShell(sec) {
   const genres = _exploreState.mediaType === "tv" ? (_tvGenres||[]) : (_movieGenres||[]);
   sec.innerHTML = `
     <div class="grid-wrap">
-      <h2 style="margin-bottom:14px">🧭 Utforska trailers</h2>
+      <h2 style="margin-bottom:14px">${t("explore.title")}</h2>
       <div style="display:flex;gap:6px;margin-bottom:12px">
-        <button class="btn-fav" id="explore-type-movie" onclick="setExploreMediaType('movie')" style="${_exploreState.mediaType==='movie'?"background:var(--accent);color:#fff":""}">🎬 Filmer</button>
-        <button class="btn-fav" id="explore-type-tv" onclick="setExploreMediaType('tv')" style="${_exploreState.mediaType==='tv'?"background:var(--accent);color:#fff":""}">📺 Serier</button>
+        <button class="btn-fav" id="explore-type-movie" onclick="setExploreMediaType('movie')" style="${_exploreState.mediaType==='movie'?"background:var(--accent);color:#fff":""}">${t("explore.movies_tab")}</button>
+        <button class="btn-fav" id="explore-type-tv" onclick="setExploreMediaType('tv')" style="${_exploreState.mediaType==='tv'?"background:var(--accent);color:#fff":""}">${t("explore.tv_tab")}</button>
       </div>
       <div class="filter-bar" style="flex-wrap:wrap;gap:8px">
         <div style="display:flex;gap:6px;flex-wrap:wrap" id="explore-category-tabs">
-          ${categories.map(([key,label]) => `
-            <button class="btn-fav explore-cat-btn" data-cat="${key}" onclick="setExploreCategory('${key}')" style="${_exploreState.category===key?"background:var(--accent);color:#fff":""}">${label}</button>
+          ${categories.map(([key,labelKey]) => `
+            <button class="btn-fav explore-cat-btn" data-cat="${key}" onclick="setExploreCategory('${key}')" style="${_exploreState.category===key?"background:var(--accent);color:#fff":""}">${t(labelKey)}</button>
           `).join("")}
         </div>
         <select class="filter-select" id="explore-genre" onchange="setExploreGenre(this.value)">
-          <option value="">Alla genrer</option>
+          <option value="">${t("explore.all_genres")}</option>
           ${genres.map(g => `<option value="${g.id}" ${String(_exploreState.genre)===String(g.id)?"selected":""}>${esc(g.name)}</option>`).join("")}
         </select>
         <select class="filter-select" id="explore-year" onchange="setExploreYear(this.value)">
-          <option value="">Alla år</option>
+          <option value="">${t("explore.all_years")}</option>
           ${Array.from({length: currentYear-1919}, (_,i) => currentYear-i).map(y => `<option value="${y}" ${String(_exploreState.year)===String(y)?"selected":""}>${y}</option>`).join("")}
         </select>
       </div>
@@ -927,13 +1394,13 @@ async function loadExploreResults() {
     const data = await API.get(endpoint + "?" + params.toString());
     grid.innerHTML = data.items.length
       ? data.items.map(item => buildExploreCard(item, _exploreState.mediaType)).join("")
-      : `<p style="color:var(--muted)">Inga träffar med det här filtret</p>`;
+      : `<p style="color:var(--muted)">${t("explore.no_results")}</p>`;
     if (pagination) {
       const totalPages = Math.min(data.totalPages || 1, 500); // TMDB itself caps at 500 pages
       pagination.innerHTML = `
-        <button class="btn-fav" ${_exploreState.page<=1?"disabled":""} onclick="setExplorePage(${_exploreState.page-1})">‹ Föregående</button>
-        <span style="color:var(--muted);font-size:13px">Sida ${data.page} av ${totalPages}</span>
-        <button class="btn-fav" ${_exploreState.page>=totalPages?"disabled":""} onclick="setExplorePage(${_exploreState.page+1})">Nästa ›</button>`;
+        <button class="btn-fav" ${_exploreState.page<=1?"disabled":""} onclick="setExplorePage(${_exploreState.page-1})">${t("explore.prev")}</button>
+        <span style="color:var(--muted);font-size:13px">${t("explore.page_of").replace("{page}", data.page).replace("{total}", totalPages)}</span>
+        <button class="btn-fav" ${_exploreState.page>=totalPages?"disabled":""} onclick="setExplorePage(${_exploreState.page+1})">${t("explore.next")}</button>`;
     }
   } catch(e) {
     grid.innerHTML = `<p style="color:var(--danger)">Fel: ${esc(e.message)}</p>`;
@@ -950,7 +1417,7 @@ function buildExploreCard(item, mediaType) {
         ? `<img class="mcard-poster" src="${item.poster_url}" alt="" loading="lazy">`
         : `<div class="mcard-poster-ph"><span>${mediaType==="tv"?"📺":"🎬"}</span><span>${esc((item.title||"").slice(0,14))}</span></div>`}
       <div class="mcard-overlay"><span class="mcard-play">▶</span></div>
-      ${item.owned ? `<div style="position:absolute;top:6px;right:6px;background:#2ecc71;color:#fff;font-size:10px;padding:2px 6px;border-radius:4px;font-weight:600">I biblioteket</div>` : ""}
+      ${item.owned ? `<div style="position:absolute;top:6px;right:6px;background:#2ecc71;color:#fff;font-size:10px;padding:2px 6px;border-radius:4px;font-weight:600">${t("detail.in_library")}</div>` : ""}
     </div>
     <div class="mcard-info">
       <div class="mcard-title">${esc(item.title||"")}</div>
@@ -1728,7 +2195,7 @@ async function openEpisodeDetail(episodeId, fromRouter) {
         </div>
         ${(window._currentSeasonCast || []).length ? `<div class="detail-content">
           <div class="detail-section">
-            <h3 class="detail-section-title">Skådespelare</h3>
+            <h3 class="detail-section-title">${t("detail.cast")}</h3>
             ${buildCastScroll(window._currentSeasonCast, `cast-ep-${ep.id}`)}
           </div>
         </div>` : ""}
@@ -1787,7 +2254,7 @@ async function loadHome() {
       API.get("/recently-added?type=movie"),
       API.get("/recently-added?type=tvshow"),
       API.get("/ongoing-shows"),
-      API.get("/recommendations").catch(() => ({ items: [] }))
+      API.get("/recommendations").catch(() => ({ movies: { items: [] }, tvshows: { items: [] } }))
     ]);
     allLibraries = libs;
     let html = "";
@@ -1804,33 +2271,31 @@ async function loadHome() {
         const today = new Date();
         const seed = today.getFullYear() * 10000 + (today.getMonth()+1) * 100 + today.getDate();
         const idx = seed % allMovies.length;
-        html += buildHero(allMovies[idx]);
+        const heroItem = allMovies[idx];
+        // The library-contents list only ever has the STORED overview (scanned once, always
+        // in the server's own default language) — unlike the detail page, which does a live,
+        // per-user-language fetch. Same fix here, just scoped to the one hero movie instead
+        // of the whole list, so this doesn't cost anything for the common case where the
+        // user's language already matches the server's.
+        const userLang = (currentUser?.language || "").toLowerCase();
+        if (userLang && !userLang.startsWith("sv")) {
+          try {
+            const heroDetails = await API.get(`/media/${heroItem.id}/details`);
+            if (heroDetails?.overview) heroItem.overview = heroDetails.overview;
+          } catch(e) {}
+        }
+        html += buildHero(heroItem);
       }
     }
 
-    if (continueW?.length) html += buildRow("Fortsätt titta", continueW);
-    if (recs?.items?.length) {
-      html += `
-        <div class="row-section">
-          <div class="row-header"><span class="row-title">Du gillade ${esc(recs.sourceTitle)} — du kanske även gillar detta</span></div>
-          <div class="cast-scroll-wrap">
-            <button class="cast-scroll-btn left" onclick="document.getElementById('recs-scroll').scrollBy({left:-300,behavior:'smooth'})">‹</button>
-            <div class="cast-scroll" id="recs-scroll">
-              ${recs.items.map(r => `
-                <div class="mcard" style="width:140px;flex-shrink:0;position:relative" onclick='${r.owned ? `openDetail("${r.id}")` : `openTmdbDetail(${r.tmdb_id}, "${r.type === "tvshow" ? "tv" : "movie"}")`}'>
-                  ${r.owned ? `<span style="position:absolute;top:6px;right:6px;background:rgba(46,204,113,0.9);color:#fff;font-size:10px;padding:2px 6px;border-radius:4px;z-index:2">✓ I biblioteket</span>` : ""}
-                  ${r.poster_url
-                    ? `<img class="mcard-poster" src="${r.poster_url}" alt="" loading="lazy">`
-                    : `<div class="mcard-poster-ph"><span>${r.type==="tvshow"?"📺":"🎬"}</span><span>${esc((r.title||"").slice(0,14))}</span></div>`}
-                  <div class="mcard-info"><div class="mcard-title">${esc(r.title||"")}</div></div>
-                </div>`).join("")}
-            </div>
-            <button class="cast-scroll-btn right" onclick="document.getElementById('recs-scroll').scrollBy({left:300,behavior:'smooth'})">›</button>
-          </div>
-        </div>`;
-    }
-    if (recentMovies?.length) html += buildRow("Nyligen tillagda filmer", recentMovies.slice(0, 16));
-    if (recentShows?.length) html += buildRow("Nyligen tillagda TV-serier", recentShows.slice(0, 16));
+    if (continueW?.length) html += buildRow(t("home.continue_watching"), continueW);
+    // Movies and TV shows each get their own independent recommendation row — liking a show
+    // no longer silently replaces a movie-based row (or vice versa), since each is generated
+    // from that type's own liked titles only.
+    html += buildRecommendationRow(recs?.movies, "recs-movies-scroll");
+    html += buildRecommendationRow(recs?.tvshows, "recs-tvshows-scroll");
+    if (recentMovies?.length) html += buildRow(t("home.recently_added_movies"), recentMovies.slice(0, 16));
+    if (recentShows?.length) html += buildRow(t("home.recently_added_shows"), recentShows.slice(0, 16));
 
     sec.innerHTML = html || `<div class="empty"><div class="empty-icon">🎬</div><h3>Biblioteket är tomt</h3><p>Lägg till mediabibliotek under Inställningar → Bibliotek</p></div>`;
   } catch (e) {
@@ -2221,7 +2686,7 @@ function buildHero(item) {
   return `<div class="hero">
     <div class="hero-bg" ${bg}></div>
     <div class="hero-content">
-      <div class="hero-badge">${navigator.language.startsWith("sv") ? "StreamVault rekommenderar" : navigator.language.startsWith("no") ? "StreamVault anbefaler" : navigator.language.startsWith("da") ? "StreamVault anbefaler" : navigator.language.startsWith("fi") ? "StreamVault suosittelee" : navigator.language.startsWith("de") ? "StreamVault empfiehlt" : "StreamVault recommends"}</div>
+      <div class="hero-badge">${t("home.recommends")}</div>
       <div class="hero-title" style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;text-overflow:ellipsis">${esc(item.title)}</div>
       <div class="hero-meta">
         ${item.rating ? `<span class="hero-rating">⭐ ${parseFloat(item.rating).toFixed(1)}</span>` : ""}
@@ -2229,8 +2694,8 @@ function buildHero(item) {
       </div>
       ${item.overview ? `<div class="hero-overview">${esc(item.overview)}</div>` : ""}
       <div class="hero-actions">
-        <button class="btn-play" onclick='playItem("${item.id}","${esc(item.title)}")'>▶ Spela</button>
-        <button class="btn-info" onclick='openDetail("${item.id}")'>ℹ Mer info</button>
+        <button class="btn-play" onclick='playItem("${item.id}","${esc(item.title)}")'>▶ ${t("detail.play")}</button>
+        <button class="btn-info" onclick='openDetail("${item.id}")'>ℹ ${t("home.more_info")}</button>
       </div>
     </div>
   </div>`;
@@ -2242,6 +2707,32 @@ function buildRow(title, items) {
     <div class="row-header"><span class="row-title">${esc(title)}</span><span class="row-count">${items.length}</span></div>
     <div class="row-scroll">${items.map(i => buildCard(i)).join("")}</div>
   </div>`;
+}
+
+// Same idea as buildRow but for a "you liked X, you might also like this" recommendation
+// set — handles unowned items (no local id yet) with the same "I biblioteket" badge pattern
+// used elsewhere, and simply renders nothing if there's no source title for this type yet.
+function buildRecommendationRow(rec, scrollId) {
+  if (!rec?.items?.length) return "";
+  const names = (rec.sourceTitles || []).slice(0, 3).join(", ") + (rec.sourceTitles?.length > 3 ? " m.fl." : "");
+  return `
+    <div class="row-section">
+      <div class="row-header"><span class="row-title">${t("home.you_liked").replace("{names}", esc(names))}</span></div>
+      <div class="cast-scroll-wrap">
+        <button class="cast-scroll-btn left" onclick="document.getElementById('${scrollId}').scrollBy({left:-300,behavior:'smooth'})">‹</button>
+        <div class="cast-scroll" id="${scrollId}">
+          ${rec.items.map(r => `
+            <div class="mcard" style="width:140px;flex-shrink:0;position:relative" onclick='${r.owned ? `openDetail("${r.id}")` : `openTmdbDetail(${r.tmdb_id}, "${r.type === "tvshow" ? "tv" : "movie"}")`}'>
+              ${r.owned ? `<span style="position:absolute;top:6px;right:6px;background:rgba(46,204,113,0.9);color:#fff;font-size:10px;padding:2px 6px;border-radius:4px;z-index:2">✓ I biblioteket</span>` : ""}
+              ${r.poster_url
+                ? `<img class="mcard-poster" src="${r.poster_url}" alt="" loading="lazy">`
+                : `<div class="mcard-poster-ph"><span>${r.type==="tvshow"?"📺":"🎬"}</span><span>${esc((r.title||"").slice(0,14))}</span></div>`}
+              <div class="mcard-info"><div class="mcard-title">${esc(r.title||"")}</div></div>
+            </div>`).join("")}
+        </div>
+        <button class="cast-scroll-btn right" onclick="document.getElementById('${scrollId}').scrollBy({left:300,behavior:'smooth'})">›</button>
+      </div>
+    </div>`;
 }
 
 function buildCard(item, wide = false) {
@@ -2288,16 +2779,16 @@ async function openShowDetail(id, fromRouter) {
       navigateToPath(`/serier/${item.slug}`, item.title);
     }
     const seasons = seasonsData.seasons || [];
-    const genresHtml = (details.genres||[]).slice(0, 3).join(", ") + (details.genres?.length > 3 ? ", och mer" : "");
+    const genresHtml = (details.genres||[]).slice(0, 3).join(", ") + (details.genres?.length > 3 ? t("detail.and_more") : "");
     const directors = (details.crew||[]).filter(c => ["Creator","Director"].includes(c.job)).map(c => esc(c.name)).join(", ");
     const castHtml = (details.cast||[]).length ? `
       <div class="detail-section">
-        <h3 class="detail-section-title">Skådespelare</h3>
+        <h3 class="detail-section-title">${t("detail.cast")}</h3>
         ${buildCastScroll(details.cast, "cast-show-${id}")}
       </div>` : "";
     const reviewsHtml = (details.reviews||[]).length ? `
       <div class="detail-section">
-        <h3 class="detail-section-title">Betyg och recensioner</h3>
+        <h3 class="detail-section-title">${t("detail.reviews")}</h3>
         <div class="cast-scroll-wrap">
           <button class="cast-scroll-btn left" onclick="document.getElementById('reviews-scroll-${id}').scrollBy({left:-320,behavior:'smooth'})">‹</button>
           <div class="cast-scroll" id="reviews-scroll-${id}">
@@ -2306,7 +2797,7 @@ async function openShowDetail(id, fromRouter) {
                 <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
                   ${r.avatar ? `<img src="${r.avatar}" style="width:36px;height:36px;border-radius:50%;object-fit:cover">` : `<div style="width:36px;height:36px;border-radius:50%;background:var(--border);display:flex;align-items:center;justify-content:center">👤</div>`}
                   <div>
-                    <div style="font-size:13px;font-weight:600">${esc(r.author||"Anonym")}</div>
+                    <div style="font-size:13px;font-weight:600">${esc(r.author||t("detail.anonymous"))}</div>
                     <div style="font-size:11px;color:var(--muted)">${r.date ? new Date(r.date).toLocaleDateString("sv-SE") : ""}</div>
                   </div>
                 </div>
@@ -2319,7 +2810,7 @@ async function openShowDetail(id, fromRouter) {
       </div>` : "";
     const seasonsHtml = seasons.length ? `
       <div class="detail-section">
-        <h3 class="detail-section-title">Säsonger</h3>
+        <h3 class="detail-section-title">${t("detail.seasons")}</h3>
         <div class="row-scroll">
           ${seasons.map(s => `
             <div class="mcard" onclick="openSeason('${id}', ${s.season})">
@@ -2331,7 +2822,7 @@ async function openShowDetail(id, fromRouter) {
               </div>
               <div class="mcard-info">
                 <div class="mcard-title">${esc(s.name)}</div>
-                <div class="mcard-meta">${s.episode_count} avsnitt${s.air_date ? " · " + s.air_date.slice(0,4) : ""}</div>
+                <div class="mcard-meta">${s.episode_count} ${t("detail.episodes")}${s.air_date ? " · " + s.air_date.slice(0,4) : ""}</div>
               </div>
             </div>`).join("")}
         </div>
@@ -2341,8 +2832,8 @@ async function openShowDetail(id, fromRouter) {
         ${item.backdrop_url ? `<div id="detail-fullbg-${item.id}" style="position:fixed;inset:0;z-index:-1;background-size:cover;background-position:70% 25%;opacity:0;transition:opacity .3s;background-image:url('${item.backdrop_url}');filter:saturate(30%) brightness(0.75)"></div>
         <div id="detail-fullbg-overlay-${item.id}" style="position:fixed;inset:0;z-index:-1;background:rgba(0,0,0,0.5);opacity:0;transition:opacity .3s"></div>` : ""}
         <div class="detail-hero-bar" style="display:flex !important;align-items:center !important;justify-content:space-between !important;padding:14px 20px !important;position:relative !important;z-index:50 !important;background:transparent !important;margin:0 !important">
-          <button class="detail-back" onclick="closeDetail()" style="position:static !important;background:var(--card2, #1a1a28);color:var(--text, #fff);border:1px solid var(--border, #333);padding:8px 16px;border-radius:8px;cursor:pointer;font-size:14px;top:auto !important;left:auto !important">← Tillbaka</button>
-          ${item.backdrop_url ? `<button onclick="toggleDetailBackground('${item.id}', this)" title="Visa bakgrund" style="position:static !important;display:flex;align-items:center;gap:6px;background:var(--card2, #1a1a28);color:var(--muted);border:1px solid var(--border, #333);padding:6px 12px;border-radius:8px;cursor:pointer;font-size:13px;top:auto !important;right:auto !important">🖼 Visa bakgrund</button>` : ""}
+          <button class="detail-back" onclick="closeDetail()" style="position:static !important;background:var(--card2, #1a1a28);color:var(--text, #fff);border:1px solid var(--border, #333);padding:8px 16px;border-radius:8px;cursor:pointer;font-size:14px;top:auto !important;left:auto !important">← ${t("detail.back")}</button>
+          ${item.backdrop_url ? `<button id="show-bg-btn-${item.id}" onclick="toggleDetailBackground('${item.id}', this)" title="${t("detail.show_background")}" style="position:static !important;display:flex;align-items:center;gap:6px;background:var(--card2, #1a1a28);color:var(--muted);border:1px solid var(--border, #333);padding:6px 12px;border-radius:8px;cursor:pointer;font-size:13px;top:auto !important;right:auto !important">🖼 ${t("detail.show_background")}</button>` : ""}
         </div>
         <div class="detail-content" style="position:relative !important;z-index:2;padding-top:115px !important;margin-top:0 !important">
           <div class="detail-main">
@@ -2358,16 +2849,16 @@ async function openShowDetail(id, fromRouter) {
               </div>
               ${item.overview ? `<p class="detail-page-overview">${esc(item.overview)}</p>` : ""}
               <div class="detail-actions" style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">
-                <span id="like-btn-${item.id}">${pillBtn("👍", "Gillar", `toggleFav('${item.id}',this)`, `like-btn-inner-${item.id}`, "Ger dig rekommendationer baserat på det du gillar")}</span>
+                <span id="like-btn-${item.id}">${pillBtn("👍", t("detail.like"), `toggleFav("${item.id}",this)`, `like-btn-inner-${item.id}`, t("detail.like_tooltip"))}</span>
                 ${progress?.completed
-                  ? pillBtn("↺", "Osedd", `markUnwatched('${item.id}')`, `watched-btn-${item.id}`, "Markera som sedd eller osedd")
-                  : pillBtn("✓", "Sedd", `markWatched('${item.id}', 0)`, `watched-btn-${item.id}`, "Markera som sedd eller osedd")}
-                ${pillBtn("🎬", "Trailer", `toggleTrailer("${item.id}")`, `trailer-btn-${item.id}`, "Se trailer")}
+                  ? pillBtn("↺", t("detail.unwatched"), `markUnwatched("${item.id}")`, `watched-btn-${item.id}`, t("detail.watched_tooltip"))
+                  : pillBtn("✓", t("detail.watched"), `markWatched("${item.id}", 0)`, `watched-btn-${item.id}`, t("detail.watched_tooltip"))}
+                ${pillBtn("🎬", t("detail.trailer"), `toggleTrailer("${item.id}")`, `trailer-btn-${item.id}`, t("detail.trailer_tooltip"))}
                 <div style="position:relative">
-                  <button onclick="toggleDetailMoreMenu('${item.id}')" title="Mer" style="width:38px;height:38px;border-radius:50%;background:var(--card2, #1a1a28);border:1px solid var(--border, #333);color:var(--text, #fff);font-size:16px;cursor:pointer">⋯</button>
+                  <button onclick="toggleDetailMoreMenu('${item.id}')" title="${t("detail.more")}" style="width:38px;height:38px;border-radius:50%;background:var(--card2, #1a1a28);border:1px solid var(--border, #333);color:var(--text, #fff);font-size:16px;cursor:pointer">⋯</button>
                   <div id="detail-more-menu-${item.id}" style="display:none;position:absolute;top:44px;left:0;background:var(--surface, #141420);border:1px solid var(--border);border-radius:10px;padding:6px;z-index:10;min-width:170px;box-shadow:0 6px 20px rgba(0,0,0,0.4)">
-                    ${currentUser?.role === "admin" ? `<div onclick='openFixMeta("${item.id}","${esc(item.title)}","tv")' style="padding:8px 12px;cursor:pointer;font-size:13px;border-radius:6px;display:flex;align-items:center;gap:8px">🔍 Fixa info</div>` : ""}
-                    ${currentUser?.role === "admin" ? `<div onclick='openEditMedia("${item.id}")' style="padding:8px 12px;cursor:pointer;font-size:13px;border-radius:6px;display:flex;align-items:center;gap:8px">✏ Redigera</div>` : ""}
+                    ${currentUser?.role === "admin" ? `<div onclick='openFixMeta("${item.id}","${esc(item.title)}","tv")' style="padding:8px 12px;cursor:pointer;font-size:13px;border-radius:6px;display:flex;align-items:center;gap:8px">🔍 ${t("detail.fix_info")}</div>` : ""}
+                    ${currentUser?.role === "admin" ? `<div onclick='openEditMedia("${item.id}")' style="padding:8px 12px;cursor:pointer;font-size:13px;border-radius:6px;display:flex;align-items:center;gap:8px">✏ ${t("detail.edit")}</div>` : ""}
                   </div>
                 </div>
               </div>
@@ -2385,7 +2876,7 @@ async function openShowDetail(id, fromRouter) {
       </div>`;
     loadLikeStatus(item.id);
     if (item.backdrop_url && localStorage.getItem("sv_detail_bg_shown") === "1") {
-      const btn = sec.querySelector('[title="Visa bakgrund"]');
+      const btn = document.getElementById(`show-bg-btn-${item.id}`);
       toggleDetailBackground(item.id, btn, true);
     }
     if (item.tmdb_id) {
@@ -2393,7 +2884,7 @@ async function openShowDetail(id, fromRouter) {
         const el = document.getElementById("extras-" + id);
         if (!el || !data.extras || !data.extras.length) return;
         el.innerHTML = `
-          <h3 class="detail-section-title">Extramaterial</h3>
+          <h3 class="detail-section-title">${t("detail.extras")}</h3>
           <div class="cast-scroll-wrap">
             <button class="cast-scroll-btn left" onclick="document.getElementById('extras-scroll-${id}').scrollBy({left:-300,behavior:'smooth'})">‹</button>
             <div class="cast-scroll" id="extras-scroll-${id}">
@@ -2418,15 +2909,15 @@ async function openShowDetail(id, fromRouter) {
         window._wtwData = window._wtwData || {};
         window._wtwData[id] = data;
         const all = [
-          ...(data.flatrate||[]).map(p => ({ ...p, kind: "Streaming" })),
-          ...(data.rent||[]).map(p => ({ ...p, kind: "Hyr" })),
-          ...(data.buy||[]).map(p => ({ ...p, kind: "Köp" }))
+          ...(data.flatrate||[]).map(p => ({ ...p, kind: t("detail.streaming_label") })),
+          ...(data.rent||[]).map(p => ({ ...p, kind: t("detail.rent") })),
+          ...(data.buy||[]).map(p => ({ ...p, kind: t("detail.buy") }))
         ];
         if (!all.length) { el.innerHTML = ""; return; }
         const featured = all[0];
         const rest = all.length - 1;
         el.innerHTML = `
-          <div style="font-size:11px;color:var(--muted);margin-bottom:4px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">Fler sätt att se den på</div>
+          <div style="font-size:11px;color:var(--muted);margin-bottom:4px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">${t("detail.more_ways_to_watch")}</div>
           <div style="display:flex;gap:10px;flex-wrap:wrap">
             <div style="background:var(--card2);border-radius:8px;padding:10px 14px;display:flex;align-items:center;gap:10px;min-width:160px">
               ${featured.logo ? `<img src="${featured.logo}" style="width:36px;height:36px;border-radius:6px;object-fit:cover">` : `<div style="width:36px;height:36px;border-radius:6px;background:var(--border)"></div>`}
@@ -2447,7 +2938,7 @@ async function openShowDetail(id, fromRouter) {
         const el = document.getElementById("related-" + id);
         if (!el || !data.items || !data.items.length) return;
         el.innerHTML = `
-          <h3 class="detail-section-title">Liknande serier</h3>
+          <h3 class="detail-section-title">${t("detail.similar_shows")}</h3>
           <div class="cast-scroll-wrap">
             <button class="cast-scroll-btn left" onclick="document.getElementById('related-scroll-${id}').scrollBy({left:-300,behavior:'smooth'})">‹</button>
             <div class="cast-scroll" id="related-scroll-${id}">
@@ -2492,7 +2983,7 @@ async function openSeason(showId, seasonNum, fromRouter) {
     window._currentSeasonCast = cast;
     const castHtml = cast.length ? `
       <div class="detail-section">
-        <h3 class="detail-section-title">Skådespelare</h3>
+        <h3 class="detail-section-title">${t("detail.cast")}</h3>
         ${buildCastScroll(cast, "cast-season-${showId}-${seasonNum}")}
       </div>` : "";
     const episodesHtml = `
@@ -2554,10 +3045,10 @@ async function openTmdbDetail(tmdbId, kind) {
     const runtime = item.runtime ? `${Math.floor(item.runtime/60)}h ${item.runtime%60}m` : "";
     const genresHtml = (item.genres||[]).map(g => `<span class="detail-genre">${esc(g)}</span>`).join("");
     const directors = (item.crew||[]).map(c => esc(c.name)).join(", ");
-    const directorLabel = kind === "tv" ? "Skapad av" : "🎬";
+    const directorLabel = kind === "tv" ? t("detail.created_by") : "🎬";
     const castHtml = (item.cast||[]).length ? `
       <div class="detail-section">
-        <h3 class="detail-section-title">Skådespelare</h3>
+        <h3 class="detail-section-title">${t("detail.cast")}</h3>
         <div class="cast-scroll">
           ${(item.cast||[]).map(p => `
             <div class="cast-card" onclick="openPersonDetail(${p.id})">
@@ -2569,7 +3060,7 @@ async function openTmdbDetail(tmdbId, kind) {
       </div>` : "";
     const reviewsHtml = (item.reviews||[]).length ? `
       <div class="detail-section">
-        <h3 class="detail-section-title">Betyg och recensioner</h3>
+        <h3 class="detail-section-title">${t("detail.reviews")}</h3>
         <div class="cast-scroll-wrap">
           <button class="cast-scroll-btn left" onclick="document.getElementById('reviews-scroll-tmdb-${tmdbId}').scrollBy({left:-320,behavior:'smooth'})">‹</button>
           <div class="cast-scroll" id="reviews-scroll-tmdb-${tmdbId}">
@@ -2611,10 +3102,10 @@ async function openTmdbDetail(tmdbId, kind) {
               ${genresHtml ? `<div class="detail-genres">${genresHtml}</div>` : ""}
               ${item.overview ? `<p class="detail-page-overview">${esc(item.overview)}</p>` : ""}
               <div class="detail-actions">
-                <button class="btn-fav" id="trailer-btn-tmdb-${tmdbId}" onclick='toggleTrailerByTmdb(${tmdbId}, "${kind}")'>▶ Se trailer</button>
+                <button class="btn-fav" id="trailer-btn-tmdb-${tmdbId}" onclick='toggleTrailerByTmdb(${tmdbId}, "${kind}")'>▶ ${t("detail.trailer_tooltip")}</button>
               </div>
               <div class="wtw-section">
-                <div class="wtw-title">Var kan du se den?</div>
+                <div class="wtw-title">${t("detail.where_to_watch")}</div>
                 <div class="wtw-providers" id="wtw-tmdb-${tmdbId}"><span style="font-size:13px;color:var(--muted)">Hämtar...</span></div>
               </div>
             </div>
@@ -2629,11 +3120,11 @@ async function openTmdbDetail(tmdbId, kind) {
       window._wtwData = window._wtwData || {};
       window._wtwData["tmdb-" + tmdbId] = data;
       const all = [
-        ...(data.flatrate||[]).map(p => ({ ...p, kind: "Streaming" })),
-        ...(data.rent||[]).map(p => ({ ...p, kind: "Hyr" })),
-        ...(data.buy||[]).map(p => ({ ...p, kind: "Köp" }))
+        ...(data.flatrate||[]).map(p => ({ ...p, kind: t("detail.streaming_label") })),
+        ...(data.rent||[]).map(p => ({ ...p, kind: t("detail.rent") })),
+        ...(data.buy||[]).map(p => ({ ...p, kind: t("detail.buy") }))
       ];
-      if (!all.length) { el.innerHTML = `<span style="font-size:13px;color:var(--muted)">Ej tillgänglig på streaming i Sverige</span>`; return; }
+      if (!all.length) { el.innerHTML = `<span style="font-size:13px;color:var(--muted)">${t("detail.not_available_streaming_se")}</span>`; return; }
       const featured = all[0];
       const rest = all.length - 1;
       el.innerHTML = `
@@ -2687,11 +3178,11 @@ async function loadDetailTechInfo(itemId, itemTitle) {
     const info = await API.get(`/media/${itemId}/techinfo`);
     el.innerHTML = `
       <div style="margin-top:14px;font-size:13px">
-        ${info.video ? `<div style="display:flex;gap:10px;margin-bottom:4px"><span class="techinfo-label" style="color:var(--muted);width:80px;flex-shrink:0">Video</span><span>${esc(info.video)}</span></div>` : ""}
-        ${info.audio ? `<div style="display:flex;gap:10px;margin-bottom:4px"><span class="techinfo-label" style="color:var(--muted);width:80px;flex-shrink:0">Ljud</span><span>${esc(info.audio)}</span></div>` : ""}
+        ${info.video ? `<div style="display:flex;gap:10px;margin-bottom:4px"><span class="techinfo-label" style="color:var(--muted);width:80px;flex-shrink:0">${t("detail.video")}</span><span>${esc(info.video)}</span></div>` : ""}
+        ${info.audio ? `<div style="display:flex;gap:10px;margin-bottom:4px"><span class="techinfo-label" style="color:var(--muted);width:80px;flex-shrink:0">${t("detail.audio")}</span><span>${esc(info.audio)}</span></div>` : ""}
         <div style="display:flex;gap:10px;align-items:center">
-          <span class="techinfo-label" style="color:var(--muted);width:80px;flex-shrink:0">Undertexter</span>
-          <button onclick='openSubtitles("${itemId}","${esc(itemTitle||"")}")' style="background:none;border:none;color:var(--accent, #e05724);font-size:13px;cursor:pointer;display:flex;align-items:center;gap:4px;padding:0">🔤 Välj undertext ▾</button>
+          <span class="techinfo-label" style="color:var(--muted);width:80px;flex-shrink:0">${t("detail.subtitles")}</span>
+          <button onclick='openSubtitles("${itemId}","${esc(itemTitle||"")}")' style="background:none;border:none;color:var(--accent, #e05724);font-size:13px;cursor:pointer;display:flex;align-items:center;gap:4px;padding:0">🔤 ${t("detail.choose_subtitle")} ▾</button>
         </div>
       </div>`;
   } catch(e) {
@@ -2720,12 +3211,12 @@ function openWatchProvidersModal(itemId) {
   overlay.innerHTML = `
     <div style="background:var(--surface, #141420);border:1px solid var(--border);border-radius:14px;width:100%;max-width:420px;max-height:80vh;overflow-y:auto">
       <div style="padding:16px 20px">
-        ${section("Tillgängligt att streama", data.flatrate || [])}
-        ${section("Hyra", data.rent || [])}
-        ${section("Köpa", data.buy || [])}
+        ${section(t("detail.available_to_stream"), data.flatrate || [])}
+        ${section(t("detail.rent"), data.rent || [])}
+        ${section(t("detail.buy"), data.buy || [])}
       </div>
       <div style="padding:12px 20px;border-top:1px solid var(--border);display:flex;justify-content:flex-end">
-        <button onclick="document.getElementById('wtw-modal-overlay').remove()" style="background:var(--accent,#e05724);color:#fff;border:none;padding:8px 20px;border-radius:8px;font-size:14px;cursor:pointer">Klar</button>
+        <button onclick="document.getElementById('wtw-modal-overlay').remove()" style="background:var(--accent,#e05724);color:#fff;border:none;padding:8px 20px;border-radius:8px;font-size:14px;cursor:pointer">${t("detail.done")}</button>
       </div>
     </div>`;
   document.body.appendChild(overlay);
@@ -2756,7 +3247,12 @@ function toggleDetailBackground(itemId, btn, skipSave) {
   const isOn = bg.style.opacity === "1";
   bg.style.opacity = isOn ? "0" : "1";
   overlay.style.opacity = isOn ? "0" : "1";
-  if (btn) btn.style.color = isOn ? "var(--muted)" : "var(--accent, #e05724)";
+  if (btn) {
+    btn.style.color = isOn ? "var(--muted)" : "var(--accent, #e05724)";
+    const label = isOn ? t("detail.show_background") : t("detail.hide_background");
+    btn.innerHTML = `🖼 ${label}`;
+    btn.title = label;
+  }
   // Blend the sidebar AND topbar into the backdrop too (Plex's own background doesn't have a
   // hard edge anywhere) — made transparent only while this is on, restored the moment it's
   // turned off or the detail page closes, so it never accidentally stays see-through
@@ -2799,18 +3295,19 @@ async function openDetail(id, fromRouter) {
     const pct = progress?.duration ? Math.round((progress.position / progress.duration) * 100) : 0;
     const watchedMin = Math.floor((progress?.position || 0) / 60);
     const watchedLabel = watchedMin >= 60 ? `${Math.floor(watchedMin/60)}h ${watchedMin%60}m` : `${watchedMin}m`;
-    const playLabel = pct > 5 && pct < 95 ? `▶ Fortsätt (${watchedLabel})` : "▶ Spela";
+    const playLabel = pct > 5 && pct < 95 ? `▶ ${t("detail.continue")} (${watchedLabel})` : `▶ ${t("detail.play")}`;
+    const playBtnState = pct > 5 && pct < 95 ? "continue" : "play";
     const runtime = details.runtime ? `${Math.floor(details.runtime/60)}h ${details.runtime%60}m` : "";
-    const genresHtml = (details.genres||[]).slice(0, 3).join(", ") + (details.genres?.length > 3 ? ", och mer" : "");
+    const genresHtml = (details.genres||[]).slice(0, 3).join(", ") + (details.genres?.length > 3 ? t("detail.and_more") : "");
     const directors = (details.crew||[]).filter(c => c.job === "Director").map(c => esc(c.name)).join(", ");
     const castHtml = (details.cast||[]).length ? `
       <div class="detail-section">
-        <h3 class="detail-section-title">Skådespelare</h3>
+        <h3 class="detail-section-title">${t("detail.cast")}</h3>
         ${buildCastScroll(details.cast, "cast-movie-${id}")}
       </div>` : "";
     const reviewsHtml = (details.reviews||[]).length ? `
       <div class="detail-section">
-        <h3 class="detail-section-title">Betyg och recensioner</h3>
+        <h3 class="detail-section-title">${t("detail.reviews")}</h3>
         <div class="cast-scroll-wrap">
           <button class="cast-scroll-btn left" onclick="document.getElementById('reviews-scroll-${id}').scrollBy({left:-320,behavior:'smooth'})">‹</button>
           <div class="cast-scroll" id="reviews-scroll-${id}">
@@ -2819,7 +3316,7 @@ async function openDetail(id, fromRouter) {
                 <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
                   ${r.avatar ? `<img src="${r.avatar}" style="width:36px;height:36px;border-radius:50%;object-fit:cover">` : `<div style="width:36px;height:36px;border-radius:50%;background:var(--border);display:flex;align-items:center;justify-content:center">👤</div>`}
                   <div>
-                    <div style="font-size:13px;font-weight:600">${esc(r.author||"Anonym")}</div>
+                    <div style="font-size:13px;font-weight:600">${esc(r.author||t("detail.anonymous"))}</div>
                     <div style="font-size:11px;color:var(--muted)">${r.date ? new Date(r.date).toLocaleDateString("sv-SE") : ""}</div>
                   </div>
                 </div>
@@ -2833,9 +3330,9 @@ async function openDetail(id, fromRouter) {
     let episodesHtml = "";
     if (item.type === "tvshow" && item.episodes?.length) {
       episodesHtml = `<div class="detail-section">
-        <h3 class="detail-section-title">Avsnitt (${item.episodes.length})</h3>
+        <h3 class="detail-section-title">${t("detail.episodes_label")} (${item.episodes.length})</h3>
         <div class="episode-list">${item.episodes.map(ep => {
-          const label = ep.season && ep.episode ? `S${String(ep.season).padStart(2,"0")} E${String(ep.episode).padStart(2,"0")}` : "Avsnitt";
+          const label = ep.season && ep.episode ? `S${String(ep.season).padStart(2,"0")} E${String(ep.episode).padStart(2,"0")}` : t("detail.episodes_label");
           return `<div class="ep-item" onclick='playItem("${ep.id}","${esc(item.title)} · ${label}")'>
             <span class="ep-num">${label}</span><span class="ep-name">${esc(ep.title||"")}</span><span>▶</span>
           </div>`;
@@ -2848,8 +3345,8 @@ async function openDetail(id, fromRouter) {
         ${item.backdrop_url ? `<div id="detail-fullbg-${item.id}" style="position:fixed;inset:0;z-index:-1;background-size:cover;background-position:70% 25%;opacity:0;transition:opacity .3s;background-image:url('${item.backdrop_url}');filter:saturate(30%) brightness(0.75)"></div>
         <div id="detail-fullbg-overlay-${item.id}" style="position:fixed;inset:0;z-index:-1;background:rgba(0,0,0,0.5);opacity:0;transition:opacity .3s"></div>` : ""}
         <div class="detail-hero-bar" style="display:flex !important;align-items:center !important;justify-content:space-between !important;padding:14px 20px !important;position:relative !important;z-index:50 !important;background:transparent !important;margin:0 !important">
-          <button class="detail-back" onclick="closeDetail()" style="position:static !important;background:var(--card2, #1a1a28);color:var(--text, #fff);border:1px solid var(--border, #333);padding:8px 16px;border-radius:8px;cursor:pointer;font-size:14px;top:auto !important;left:auto !important">← Tillbaka</button>
-          ${item.backdrop_url ? `<button onclick="toggleDetailBackground('${item.id}', this)" title="Visa bakgrund" style="position:static !important;display:flex;align-items:center;gap:6px;background:var(--card2, #1a1a28);color:var(--muted);border:1px solid var(--border, #333);padding:6px 12px;border-radius:8px;cursor:pointer;font-size:13px;top:auto !important;right:auto !important">🖼 Visa bakgrund</button>` : ""}
+          <button class="detail-back" onclick="closeDetail()" style="position:static !important;background:var(--card2, #1a1a28);color:var(--text, #fff);border:1px solid var(--border, #333);padding:8px 16px;border-radius:8px;cursor:pointer;font-size:14px;top:auto !important;left:auto !important">← ${t("detail.back")}</button>
+          ${item.backdrop_url ? `<button id="show-bg-btn-${item.id}" onclick="toggleDetailBackground('${item.id}', this)" title="${t("detail.show_background")}" style="position:static !important;display:flex;align-items:center;gap:6px;background:var(--card2, #1a1a28);color:var(--muted);border:1px solid var(--border, #333);padding:6px 12px;border-radius:8px;cursor:pointer;font-size:13px;top:auto !important;right:auto !important">🖼 ${t("detail.show_background")}</button>` : ""}
         </div>
         <div class="detail-content" style="position:relative !important;z-index:2;padding-top:115px !important;margin-top:0 !important">
           <div class="detail-main">
@@ -2858,7 +3355,7 @@ async function openDetail(id, fromRouter) {
             </div>
             <div class="detail-info-col">
               <h1 class="detail-page-title">${esc(item.title)}</h1>
-              ${directors ? `<div class="detail-director-line" style="color:var(--muted);font-size:13px;margin-top:2px">Directed by ${directors}</div>` : ""}
+              ${directors ? `<div class="detail-director-line" style="color:var(--muted);font-size:13px;margin-top:2px">${t("detail.directed_by")} ${directors}</div>` : ""}
               <div class="detail-meta-row" style="margin-top:8px">
                 ${item.rating ? `<span class="detail-rating">⭐ ${parseFloat(item.rating).toFixed(1)}</span>` : ""}
                 ${item.year ? `<span class="detail-meta-item">${item.year}</span>` : ""}
@@ -2867,19 +3364,19 @@ async function openDetail(id, fromRouter) {
               </div>
               ${(details.overview || item.overview) ? `<p class="detail-page-overview">${esc(details.overview || item.overview)}</p>` : ""}
               <div class="detail-actions" style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">
-                <button class="btn-play" onclick='playItem("${item.id}","${esc(item.title)}")' style="display:flex;align-items:center;gap:8px;padding:10px 20px">${playLabel}</button>
-                <span id="like-btn-${item.id}">${pillBtn("👍", "Gillar", `toggleFav('${item.id}',this)`, `like-btn-inner-${item.id}`, "Ger dig rekommendationer baserat på det du gillar")}</span>
+                <button class="btn-play" data-state="${playBtnState}" onclick='playItem("${item.id}","${esc(item.title)}")' style="display:flex;align-items:center;gap:8px;padding:10px 20px">${playLabel}</button>
+                <span id="like-btn-${item.id}">${pillBtn("👍", t("detail.like"), `toggleFav("${item.id}",this)`, `like-btn-inner-${item.id}`, t("detail.like_tooltip"))}</span>
                 ${progress?.completed
-                  ? pillBtn("↺", "Osedd", `markUnwatched('${item.id}')`, `watched-btn-${item.id}`, "Markera som sedd eller osedd")
-                  : pillBtn("✓", "Sedd", `markWatched('${item.id}', ${Math.floor(progress?.duration||0)})`, `watched-btn-${item.id}`, "Markera som sedd eller osedd")}
-                ${pillBtn("🎬", "Trailer", `toggleTrailer("${item.id}")`, `trailer-btn-${item.id}`, "Se trailer")}
+                  ? pillBtn("↺", t("detail.unwatched"), `markUnwatched("${item.id}")`, `watched-btn-${item.id}`, t("detail.watched_tooltip"))
+                  : pillBtn("✓", t("detail.watched"), `markWatched("${item.id}", ${Math.floor(progress?.duration||0)})`, `watched-btn-${item.id}`, t("detail.watched_tooltip"))}
+                ${pillBtn("🎬", t("detail.trailer"), `toggleTrailer("${item.id}")`, `trailer-btn-${item.id}`, t("detail.trailer_tooltip"))}
                 <div style="position:relative">
-                  <button onclick="toggleDetailMoreMenu('${item.id}')" title="Mer" style="width:38px;height:38px;border-radius:50%;background:var(--card2, #1a1a28);border:1px solid var(--border, #333);color:var(--text, #fff);font-size:16px;cursor:pointer">⋯</button>
+                  <button onclick="toggleDetailMoreMenu('${item.id}')" title="${t("detail.more")}" style="width:38px;height:38px;border-radius:50%;background:var(--card2, #1a1a28);border:1px solid var(--border, #333);color:var(--text, #fff);font-size:16px;cursor:pointer">⋯</button>
                   <div id="detail-more-menu-${item.id}" style="display:none;position:absolute;top:44px;left:0;background:var(--surface, #141420);border:1px solid var(--border, #333);border-radius:10px;padding:6px;z-index:10;min-width:170px;box-shadow:0 6px 20px rgba(0,0,0,0.4)">
-                    <div onclick='openSubtitles("${item.id}","${esc(item.title)}")' style="padding:8px 12px;cursor:pointer;font-size:13px;border-radius:6px;display:flex;align-items:center;gap:8px">🔤 Undertexter</div>
-                    ${currentUser?.role === "admin" ? `<div onclick='openFixMeta("${item.id}","${esc(item.title)}","${item.type==="tvshow"?"tv":"movie"}")' style="padding:8px 12px;cursor:pointer;font-size:13px;border-radius:6px;display:flex;align-items:center;gap:8px">🔍 Fixa info</div>` : ""}
-                    ${currentUser?.role === "admin" ? `<div onclick='openEditMedia("${item.id}")' style="padding:8px 12px;cursor:pointer;font-size:13px;border-radius:6px;display:flex;align-items:center;gap:8px">✏ Redigera</div>` : ""}
-                    ${currentUser?.role === "admin" ? `<div onclick='openMediaInfo("${item.id}")' style="padding:8px 12px;cursor:pointer;font-size:13px;border-radius:6px;display:flex;align-items:center;gap:8px">ℹ Filinfo</div>` : ""}
+                    <div onclick='openSubtitles("${item.id}","${esc(item.title)}")' style="padding:8px 12px;cursor:pointer;font-size:13px;border-radius:6px;display:flex;align-items:center;gap:8px">🔤 ${t("detail.subtitles_menu")}</div>
+                    ${currentUser?.role === "admin" ? `<div onclick='openFixMeta("${item.id}","${esc(item.title)}","${item.type==="tvshow"?"tv":"movie"}")' style="padding:8px 12px;cursor:pointer;font-size:13px;border-radius:6px;display:flex;align-items:center;gap:8px">🔍 ${t("detail.fix_info")}</div>` : ""}
+                    ${currentUser?.role === "admin" ? `<div onclick='openEditMedia("${item.id}")' style="padding:8px 12px;cursor:pointer;font-size:13px;border-radius:6px;display:flex;align-items:center;gap:8px">✏ ${t("detail.edit")}</div>` : ""}
+                    ${currentUser?.role === "admin" ? `<div onclick='openMediaInfo("${item.id}")' style="padding:8px 12px;cursor:pointer;font-size:13px;border-radius:6px;display:flex;align-items:center;gap:8px">ℹ ${t("detail.fileinfo")}</div>` : ""}
                   </div>
                 </div>
               </div>
@@ -2891,7 +3388,7 @@ async function openDetail(id, fromRouter) {
           ${item.tmdb_id ? `<div class="detail-section" id="extras-${id}"></div>` : ""}
           ${episodesHtml}
           ${item.tmdb_id && item.type === "movie" ? `<div class="wtw-section" style="padding:0 20px 20px">
-            <div id="wtw-${id}"><span style="font-size:13px;color:var(--muted)">Hämtar streaming...</span></div>
+            <div id="wtw-${id}"><span style="font-size:13px;color:var(--muted)">${t("detail.loading_streaming")}</span></div>
           </div>` : ""}
           ${item.tmdb_id ? `<div class="detail-section" id="related-${id}"></div>` : ""}
         </div>
@@ -2901,7 +3398,7 @@ async function openDetail(id, fromRouter) {
     if (item.backdrop_url && localStorage.getItem("sv_detail_bg_shown") === "1") {
       // Restore the person's last choice — was silently forgotten before, resetting to off
       // on every new movie or page refresh regardless of what they'd picked.
-      const btn = sec.querySelector('[title="Visa bakgrund"]');
+      const btn = document.getElementById(`show-bg-btn-${item.id}`);
       toggleDetailBackground(item.id, btn, true);
     }
     if (item.tmdb_id && item.type === "movie") {
@@ -2911,15 +3408,15 @@ async function openDetail(id, fromRouter) {
         window._wtwData = window._wtwData || {};
         window._wtwData[id] = data;
         const all = [
-          ...(data.flatrate||[]).map(p => ({ ...p, kind: "Streaming" })),
-          ...(data.rent||[]).map(p => ({ ...p, kind: "Hyr" })),
-          ...(data.buy||[]).map(p => ({ ...p, kind: "Köp" }))
+          ...(data.flatrate||[]).map(p => ({ ...p, kind: t("detail.streaming_label") })),
+          ...(data.rent||[]).map(p => ({ ...p, kind: t("detail.rent") })),
+          ...(data.buy||[]).map(p => ({ ...p, kind: t("detail.buy") }))
         ];
         if (!all.length) { el.innerHTML = ""; return; }
         const featured = all[0];
         const rest = all.length - 1;
         el.innerHTML = `
-          <div style="font-size:11px;color:var(--muted);margin-bottom:4px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">Fler sätt att se den på</div>
+          <div style="font-size:11px;color:var(--muted);margin-bottom:4px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">${t("detail.more_ways_to_watch")}</div>
           <div style="display:flex;gap:10px;flex-wrap:wrap">
             <div style="background:var(--card2);border-radius:8px;padding:10px 14px;display:flex;align-items:center;gap:10px;min-width:160px">
               ${featured.logo ? `<img src="${featured.logo}" style="width:36px;height:36px;border-radius:6px;object-fit:cover">` : `<div style="width:36px;height:36px;border-radius:6px;background:var(--border)"></div>`}
@@ -2940,7 +3437,7 @@ async function openDetail(id, fromRouter) {
         const el = document.getElementById("extras-" + id);
         if (!el || !data.extras || !data.extras.length) return;
         el.innerHTML = `
-          <h3 class="detail-section-title">Extramaterial</h3>
+          <h3 class="detail-section-title">${t("detail.extras")}</h3>
           <div class="cast-scroll-wrap">
             <button class="cast-scroll-btn left" onclick="document.getElementById('extras-scroll-${id}').scrollBy({left:-300,behavior:'smooth'})">‹</button>
             <div class="cast-scroll" id="extras-scroll-${id}">
@@ -2962,7 +3459,7 @@ async function openDetail(id, fromRouter) {
       API.get("/media/" + id + "/related").then(data => {
         const el = document.getElementById("related-" + id);
         if (!el || !data.items || !data.items.length) return;
-        const label = item.type === "tvshow" ? "Liknande serier" : "Liknande filmer";
+        const label = item.type === "tvshow" ? t("detail.similar_shows") : t("detail.similar_movies");
         el.innerHTML = `
           <h3 class="detail-section-title">${label}</h3>
           <div class="cast-scroll-wrap">
@@ -3328,12 +3825,12 @@ async function markWatched(id, duration) {
     await API.post("/media/" + id + "/progress", { position: duration || 0, duration: duration || 0, completed: 1 });
     const btn = document.getElementById("watched-btn-" + id);
     if (btn) {
-      btn.textContent = "↺ Markera som osedd";
+      btn.innerHTML = `↺ ${t("detail.unwatched")}`;
       btn.onclick = () => markUnwatched(id);
     }
-    toast("Markerad som sedd ✓", "success");
+    toast(t("toast.marked_watched"), "success");
     loadHome(); // Refresh cards
-  } catch { toast("Kunde inte spara", "error"); }
+  } catch { toast(t("toast.save_failed"), "error"); }
 }
 
 async function markUnwatched(id) {
@@ -3341,17 +3838,20 @@ async function markUnwatched(id) {
     await API.post("/media/" + id + "/progress", { position: 0, duration: 0, completed: 0 });
     const btn = document.getElementById("watched-btn-" + id);
     if (btn) {
-      btn.textContent = "✓ Markera som sedd";
+      btn.innerHTML = `✓ ${t("detail.watched")}`;
       btn.onclick = () => markWatched(id, 0);
     }
-    // Update play button label to remove % indicator
+    // Update play button label to remove % indicator — checks a data attribute rather than
+    // matching translated text, since comparing against a hardcoded Swedish substring would
+    // silently fail to reset the button on any other language.
     const playBtn = document.querySelector(".btn-play");
-    if (playBtn && playBtn.textContent.includes("Fortsätt")) {
-      playBtn.textContent = "▶ Spela";
+    if (playBtn && playBtn.dataset.state === "continue") {
+      playBtn.textContent = `▶ ${t("detail.play")}`;
+      playBtn.dataset.state = "play";
     }
-    toast("Markerad som osedd ↺", "success");
+    toast(t("toast.marked_unwatched"), "success");
     loadHome(); // Refresh cards
-  } catch { toast("Kunde inte spara", "error"); }
+  } catch { toast(t("toast.save_failed"), "error"); }
 }
 document.getElementById("detail-overlay")?.addEventListener("click", e => {
   if (e.target === document.getElementById("detail-overlay")) closeDetail();
@@ -3361,17 +3861,17 @@ async function toggleFav(id, btn) {
   try {
     const data = await API.post("/favorites/" + id, {});
     if (data.liked) {
-      btn.innerHTML = "👍 Gillad";
+      btn.innerHTML = `👍 ${t("detail.liked")}`;
       btn.style.color = "var(--accent2, #e05724)";
       btn.style.borderColor = "var(--accent2, #e05724)";
-      toast("Tillagd bland gillade!", "success");
+      toast(t("toast.added_to_liked"), "success");
     } else {
-      btn.innerHTML = "👍 Gillar";
+      btn.innerHTML = `👍 ${t("detail.like")}`;
       btn.style.color = "";
       btn.style.borderColor = "";
-      toast("Borttagen", "info");
+      toast(t("toast.removed"), "info");
     }
-  } catch { toast("Fel vid sparande", "error"); }
+  } catch { toast(t("toast.save_error"), "error"); }
 }
 
 async function loadLikeStatus(itemId) {
@@ -3381,7 +3881,7 @@ async function loadLikeStatus(itemId) {
   try {
     const data = await API.get(`/favorites/${itemId}/status`);
     if (data.liked) {
-      btn.innerHTML = "👍 Gillad";
+      btn.innerHTML = `👍 ${t("detail.liked")}`;
       btn.style.color = "var(--accent2, #e05724)";
       btn.style.borderColor = "var(--accent2, #e05724)";
     }
@@ -3468,15 +3968,20 @@ function askResumeChoice(savedSec) {
     const overlay = document.createElement("div");
     overlay.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:10000;display:flex;align-items:center;justify-content:center";
     overlay.innerHTML = `
-      <div style="background:var(--card2);border:1px solid var(--border);border-radius:12px;padding:24px;max-width:340px;width:90%;text-align:center">
-        <div style="font-size:15px;margin-bottom:20px">Du har sett ${label} av den här. Vill du fortsätta där du slutade, eller börja om?</div>
+      <div style="background:var(--card2);border:1px solid var(--border);border-radius:12px;padding:24px;max-width:340px;width:90%;text-align:center;position:relative">
+        <button id="resume-close-btn" style="position:absolute;top:10px;right:10px;background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer;line-height:1;padding:4px" title="${t("resume.cancel")}">✕</button>
+        <div style="font-size:15px;margin-bottom:20px">${t("resume.question").replace("{label}", label)}</div>
         <div style="display:flex;flex-direction:column;gap:8px">
-          <button id="resume-continue-btn" class="s-btn primary">▶ Fortsätt (${label})</button>
-          <button id="resume-restart-btn" class="s-btn">↻ Börja om från början</button>
+          <button id="resume-continue-btn" class="s-btn primary">${t("resume.continue").replace("{label}", label)}</button>
+          <button id="resume-restart-btn" class="s-btn">${t("resume.restart")}</button>
         </div>
       </div>`;
     document.body.appendChild(overlay);
     function cleanup(sec) { overlay.remove(); resolve(sec); }
+    // null is a distinct "cancelled, don't play at all" signal — separate from 0, which
+    // means "play from the start" (a real, valid choice, not a cancellation).
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) cleanup(null); });
+    overlay.querySelector("#resume-close-btn").onclick = () => cleanup(null);
     overlay.querySelector("#resume-continue-btn").onclick = () => cleanup(savedSec);
     overlay.querySelector("#resume-restart-btn").onclick = () => cleanup(0);
   });
@@ -3515,6 +4020,7 @@ async function playItem(id, title) {
   const notDone = !hasDur || (progress.position / progress.duration) < 0.95;
   const savedResumeSec = (progress?.position > 10 && notDone) ? Math.floor(progress.position) : 0;
   const resumeSec = savedResumeSec > 0 ? await askResumeChoice(savedResumeSec) : 0;
+  if (resumeSec === null) return; // person closed the popup instead of choosing — don't start playback at all
 
   try {
     // Ask server: direct play or HLS?
@@ -4879,6 +5385,7 @@ async function saveUserLanguage(userId) {
     if (currentUser && (userId === currentUser._id || userId === currentUser.id)) {
       currentUser.language = language || null;
       localStorage.setItem("sv_user", JSON.stringify(currentUser));
+      applyPostLoginTranslations();
     }
     if (result?.needsOcrLanguage) {
       if (currentUser?.role === "admin") {
@@ -6519,12 +7026,14 @@ async function loadSettings() {
         <div class="user-list" id="lib-list">
           ${libs.map(l => {
             const icons = { movies:"🎬", tvshows:"📺", music:"🎵" };
-            return `<div class="user-row">
-              <span style="font-size:20px">${icons[l.type] || "📁"}</span>
-              <div class="user-info"><div class="user-name">${esc(l.name)}</div><div class="user-role">${esc(l.path)}</div></div>
-              <button class="s-btn" onclick="rescanOneLibrary('${l.id}','${esc(l.name)}')" title="Skanna efter nya filer i just detta bibliotek">↻ Skanna</button>
-              <button class="s-btn" onclick="fullRescanOneLibrary('${l.id}','${esc(l.name)}')" style="border-color:#e74c3c;color:#e74c3c" title="Rensa och skanna om bara detta bibliotek från grunden">🗑 Rensa om</button>
-              <button class="s-btn danger" onclick="removeLib('${l.id}')">Ta bort</button>
+            return `<div class="user-row" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+              <span style="font-size:20px;flex-shrink:0">${icons[l.type] || "📁"}</span>
+              <div class="user-info" style="flex-shrink:0"><div class="user-name">${esc(l.name)}</div><div class="user-role">${esc(l.path)}</div></div>
+              <input class="s-input" id="lib-name-en-${l.id}" placeholder="Engelskt namn (valfritt)" value="${esc(l.name_en||"")}" style="width:150px;font-size:12px;flex-shrink:0" onblur="saveLibraryNameEn('${l.id}')">
+              <input class="s-input" id="lib-name-fi-${l.id}" placeholder="Finskt namn (valfritt)" value="${esc(l.name_fi||"")}" style="width:150px;font-size:12px;flex-shrink:0" onblur="saveLibraryNameFi('${l.id}')">
+              <button class="s-btn" style="flex-shrink:0" onclick="rescanOneLibrary('${l.id}','${esc(l.name)}')" title="Skanna efter nya filer i just detta bibliotek">↻ Skanna</button>
+              <button class="s-btn" style="border-color:#e74c3c;color:#e74c3c;flex-shrink:0" onclick="fullRescanOneLibrary('${l.id}','${esc(l.name)}')" title="Rensa och skanna om bara detta bibliotek från grunden">🗑 Rensa om</button>
+              <button class="s-btn danger" style="flex-shrink:0" onclick="removeLib('${l.id}')">Ta bort</button>
             </div>`;
           }).join("") || "<p style='color:var(--muted);font-size:14px'>Inga bibliotek tillagda.</p>"}
         </div>
@@ -6847,55 +7356,55 @@ async function renderUserPage(user) {
   const main = document.getElementById("sec-settings");
   main.innerHTML = `
     <div style="max-width:600px;margin:0 auto;padding:24px">
-      <button class="s-btn" onclick="switchSection('settings')" style="margin-bottom:20px">← Tillbaka</button>
+      <button class="s-btn" onclick="switchSection('settings')" style="margin-bottom:20px">${t("profile.back")}</button>
       <div style="display:flex;align-items:center;gap:16px;margin-bottom:24px">
         <div class="user-av" style="width:56px;height:56px;font-size:24px">${(user.username||"?")[0].toUpperCase()}</div>
         <div>
           <div style="font-size:20px;font-weight:600">${esc(user.username)}</div>
-          <span class="user-badge ${user.role === "admin" ? "badge-admin" : "badge-user"}">${user.role === "admin" ? "Admin" : "Användare"}</span>
+          <span class="user-badge ${user.role === "admin" ? "badge-admin" : "badge-user"}">${user.role === "admin" ? t("profile.role_admin") : t("profile.role_user")}</span>
         </div>
       </div>
       <div class="settings-section">
-        <div class="settings-section-title">Användarinformation</div>
-        <div style="font-size:13px;color:var(--muted)">Senast inloggad: ${user.last_login ? new Date(user.last_login).toLocaleDateString("sv-SE") : "Aldrig"}</div>
-        <div style="font-size:13px;color:var(--muted);margin-top:4px">Skapad: ${user.created_at ? new Date(user.created_at).toLocaleDateString("sv-SE") : "Okänt"}</div>
+        <div class="settings-section-title">${t("profile.user_info")}</div>
+        <div style="font-size:13px;color:var(--muted)">${t("profile.last_login")} ${user.last_login ? new Date(user.last_login).toLocaleDateString("sv-SE") : t("profile.never")}</div>
+        <div style="font-size:13px;color:var(--muted);margin-top:4px">${t("profile.created")} ${user.created_at ? new Date(user.created_at).toLocaleDateString("sv-SE") : t("profile.unknown")}</div>
       </div>
       <div class="settings-section">
-        <div class="settings-section-title">Utseende</div>
-        <div style="font-size:12px;color:var(--muted);margin-bottom:10px">${(user.id === currentUser?.id || user._id === currentUser?.id) ? "Välj tema — sparas på ditt konto och gäller på alla enheter du loggar in på." : "Välj tema för den här användaren."}</div>
+        <div class="settings-section-title">${t("profile.appearance")}</div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:10px">${(user.id === currentUser?.id || user._id === currentUser?.id) ? t("profile.theme_desc_self") : t("profile.theme_desc_other")}</div>
         <div style="display:flex;flex-wrap:wrap;gap:10px">
-          ${Object.entries(THEMES).map(([key, t]) => `
+          ${Object.entries(THEMES).map(([key, theme]) => `
             <div onclick="saveUserTheme('${user.id}', '${key}')" style="cursor:pointer;width:120px;border-radius:10px;overflow:hidden;border:2px solid ${(user.theme||"standard")===key ? "var(--accent)" : "var(--border)"}">
-              <div style="height:50px;background:${t.vars["--bg"]};display:flex;align-items:center;justify-content:center">
-                <span style="width:16px;height:16px;border-radius:50%;background:${t.vars["--accent"]}"></span>
-                <span style="width:24px;height:10px;border-radius:3px;background:${t.vars["--card2"]};margin-left:6px"></span>
+              <div style="height:50px;background:${theme.vars["--bg"]};display:flex;align-items:center;justify-content:center">
+                <span style="width:16px;height:16px;border-radius:50%;background:${theme.vars["--accent"]}"></span>
+                <span style="width:24px;height:10px;border-radius:3px;background:${theme.vars["--card2"]};margin-left:6px"></span>
               </div>
-              <div style="padding:6px 8px;font-size:11px;background:var(--card2);color:var(--text)">${esc(t.label)}</div>
+              <div style="padding:6px 8px;font-size:11px;background:var(--card2);color:var(--text)">${t("theme." + key)}</div>
             </div>`).join("")}
         </div>
       </div>
       <div class="settings-section">
-        <div class="settings-section-title">Streamingtjänster</div>
-        <div style="font-size:12px;color:var(--muted);margin-bottom:10px">Välj de tjänster du använder. "Fler sätt att se den på" visar bara ditt val, istället för alla tjänster som finns.</div>
-        <div id="streaming-services-list-${user.id}" style="max-height:280px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:8px"><div style="color:var(--muted);font-size:13px;padding:10px">Laddar...</div></div>
+        <div class="settings-section-title">${t("profile.streaming_services")}</div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:10px">${t("profile.streaming_services_desc")}</div>
+        <div id="streaming-services-list-${user.id}" style="max-height:280px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:8px"><div style="color:var(--muted);font-size:13px;padding:10px">${t("profile.loading")}</div></div>
         <div style="display:flex;gap:8px;margin-top:10px">
-          <button class="s-btn primary" onclick="saveStreamingServices('${user.id}')">Spara</button>
-          <button class="s-btn" onclick="clearStreamingServices('${user.id}')">Visa alla igen (rensa val)</button>
+          <button class="s-btn primary" onclick="saveStreamingServices('${user.id}')">${t("profile.save")}</button>
+          <button class="s-btn" onclick="clearStreamingServices('${user.id}')">${t("profile.show_all_again")}</button>
         </div>
       </div>
       <div class="settings-section">
         <div class="settings-section-title" style="display:flex;align-items:center;gap:8px">
-          Smarta hem (webhook)
+          ${t("profile.smart_home")}
           <span onclick="showWebhookHelp()" style="cursor:pointer;width:18px;height:18px;border-radius:50%;background:var(--card2);border:1px solid var(--border);display:inline-flex;align-items:center;justify-content:center;font-size:12px;color:var(--muted)">?</span>
         </div>
         <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:13px;margin-bottom:10px">
           <input type="checkbox" id="webhook-enabled-${user.id}" ${user.webhook_enabled ? "checked" : ""} onchange="toggleUserWebhookEnabled('${user.id}', this.checked)">
-          <span>Aktivera webhook för mitt konto</span>
+          <span>${t("profile.enable_webhook")}</span>
         </label>
-        <div style="font-size:12px;color:var(--muted);margin-bottom:10px">Av som standard. Låter t.ex. Home Assistant eller IFTTT reagera på när du börjar/slutar titta — se "?" ovan för hur man kommer igång.</div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:10px">${t("profile.webhook_desc")}</div>
         <div style="display:flex;gap:8px">
           <input type="text" id="webhook-url-input-${user.id}" class="s-input" placeholder="https://din-hemautomation.se/webhook/..." value="${esc(user.webhook_url||"")}" style="flex:1" ${!user.webhook_enabled ? "disabled" : ""}>
-          <button class="s-btn primary" onclick="saveUserWebhook('${user.id}')">Spara</button>
+          <button class="s-btn primary" onclick="saveUserWebhook('${user.id}')">${t("profile.save")}</button>
         </div>
       </div>
       ${currentUser.role === "admin" && user.role !== "admin" ? `<div class="settings-section">
@@ -6905,10 +7414,10 @@ async function renderUserPage(user) {
         <button class="s-btn primary" style="margin-top:12px" onclick="saveLibraryAccess('${user.id}')">Spara behörigheter</button>
       </div>` : ""}
       <div class="settings-section">
-        <div class="settings-section-title">Språkinställning</div>
-        <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Välj språk för undertexter och sökning. Åsidosätter serverns globala inställning.</div>
+        <div class="settings-section-title">${t("profile.language_setting")}</div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:8px">${t("profile.language_desc")}</div>
         <select class="s-input" id="up-language" style="cursor:pointer">
-          <option value="" ${!user.language?'selected':''}>🌐 Använd serverns inställning</option>
+          <option value="" ${!user.language?'selected':''}>${t("profile.use_server_setting")}</option>
           <option value="en-US" ${user.language==='en-US'?'selected':''}>🇺🇸 English</option>
           <option value="sv-SE" ${user.language==='sv-SE'?'selected':''}>🇸🇪 Svenska</option>
           <option value="no-NO" ${user.language==='no-NO'?'selected':''}>🇳🇴 Norsk</option>
@@ -6919,28 +7428,28 @@ async function renderUserPage(user) {
           <option value="es-ES" ${user.language==='es-ES'?'selected':''}>🇪🇸 Español</option>
           <option value="nl-NL" ${user.language==='nl-NL'?'selected':''}>🇳🇱 Nederlands</option>
         </select>
-        <button class="s-btn s-btn-primary" style="margin-top:10px" onclick="saveUserLanguage('${user.id}')">Spara språk</button>
+        <button class="s-btn s-btn-primary" style="margin-top:10px" onclick="saveUserLanguage('${user.id}')">${t("profile.save_language")}</button>
       </div>
 
       <div class="settings-section">
-        <div class="settings-section-title">Undertextspråk (prioritetsordning)</div>
+        <div class="settings-section-title">${t("profile.subtitle_priority")}</div>
         <div style="font-size:12px;color:var(--muted);margin-bottom:10px">
-          För hushåll med fler än en nationalitet — lägg till flera språk i den ordning du vill att servern ska leta efter undertexter i. Första träffen vinner. Tomt = använd bara språkinställningen ovan, sen den vanliga eng→sv-kedjan.
+          ${t("profile.subtitle_priority_desc")}
         </div>
         <div id="sub-priority-list" style="display:flex;flex-direction:column;gap:6px;margin-bottom:10px"></div>
         <div style="display:flex;gap:8px">
           <select class="s-input" id="sub-priority-add-select" style="flex:1"></select>
-          <button class="btn-fav" style="font-size:12px" onclick="addSubtitlePriorityLang('${user.id}')">+ Lägg till</button>
+          <button class="btn-fav" style="font-size:12px" onclick="addSubtitlePriorityLang('${user.id}')">${t("profile.add")}</button>
         </div>
-        <button class="s-btn s-btn-primary" style="margin-top:10px" onclick="saveSubtitlePriority('${user.id}')">Spara prioritetsordning</button>
+        <button class="s-btn s-btn-primary" style="margin-top:10px" onclick="saveSubtitlePriority('${user.id}')">${t("profile.save_priority")}</button>
       </div>
 
       <div class="settings-section">
-        <div class="settings-section-title">Byt lösenord</div>
+        <div class="settings-section-title">${t("profile.change_password")}</div>
         <div style="display:flex;flex-direction:column;gap:10px;max-width:320px">
-          <input id="up-new-pw" type="password" placeholder="Nytt lösenord" class="s-input">
-          <input id="up-confirm-pw" type="password" placeholder="Bekräfta lösenord" class="s-input">
-          <button class="s-btn" onclick="changeUserPassword('${user.id}')">Spara lösenord</button>
+          <input id="up-new-pw" type="password" placeholder="${t("profile.new_password")}" class="s-input">
+          <input id="up-confirm-pw" type="password" placeholder="${t("profile.confirm_password")}" class="s-input">
+          <button class="s-btn" onclick="changeUserPassword('${user.id}')">${t("profile.save_password")}</button>
         </div>
       </div>
     </div>
@@ -7036,6 +7545,20 @@ async function addLib() {
   try { await API.post("/libraries", { name, type, path }); toast(`✓ ${name} tillagd!`, "success"); loadSettings(); }
   catch (e) { toast(e.message, "error"); }
 }
+
+async function saveLibraryTranslatedName(libId, langCode) {
+  const input = document.getElementById(`lib-name-${langCode}-${libId}`);
+  if (!input) return;
+  try {
+    await API.patch(`/libraries/${libId}`, { [`name_${langCode}`]: input.value.trim() });
+    toast("✓ Sparat", "success");
+    loadSidebarLibraries(); // refresh so the change shows immediately if you're viewing as a user of that language
+  } catch(e) {
+    toast("Fel: " + e.message, "error");
+  }
+}
+const saveLibraryNameEn = (libId) => saveLibraryTranslatedName(libId, "en");
+const saveLibraryNameFi = (libId) => saveLibraryTranslatedName(libId, "fi");
 
 async function removeLib(id) {
   if (!confirm("Ta bort biblioteket? Mediaobjekten tas bort från databasen men filerna på disk rörs inte.")) return;

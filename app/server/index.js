@@ -1206,6 +1206,21 @@ app.post("/api/libraries", requireAdmin, (req, res) => {
   res.json(lib);
 });
 
+// Accepts any name_<langCode> field generically (name_en, name_fi, etc.) — the display name
+// shown to users whose language matches that code, so e.g. "Filmer UHD" can show as "Movies
+// UHD" or "Elokuvat UHD" without renaming the library itself (which is also its folder path
+// reference, not just a label). Generic by design so adding another language later doesn't
+// need a backend change.
+app.patch("/api/libraries/:id", requireAdmin, (req, res) => {
+  const lib = config.libraries.find(l => l.id === req.params.id);
+  if (!lib) return res.status(404).json({ error: "Hittades inte" });
+  for (const key of Object.keys(req.body)) {
+    if (/^name_[a-z]{2}$/.test(key)) lib[key] = req.body[key] || null;
+  }
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
+  res.json(lib);
+});
+
 app.delete("/api/libraries/:id", requireAdmin, async (req, res) => {
   config.libraries = config.libraries.filter(l => l.id !== req.params.id);
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
@@ -2822,16 +2837,27 @@ app.post("/api/favorites/:id", requireAuth, async (req, res) => {
   try {
     const existing = await dbFindOne(db.favorites, { user_id: req.user._id, media_id: req.params.id });
     if (existing) {
-      await dbRemove(db.favorites, { _id: existing._id });
+      // {multi:true} matters here — the old version of this endpoint (before it was a real
+      // toggle) only ever inserted, so repeated clicks could leave several duplicate rows
+      // for the same title. Removing by _id alone would only clear one and leave the item
+      // looking permanently "liked". This clears every matching row in one go instead.
+      await dbRemove(db.favorites, { user_id: req.user._id, media_id: req.params.id }, { multi: true });
+      _recommendationCache.delete(`${req.user._id}:movie`);
+      _recommendationCache.delete(`${req.user._id}:tvshow`);
       return res.json({ ok: true, liked: false });
     }
     await dbInsert(db.favorites,{_id:uuidv4(),user_id:req.user._id,media_id:req.params.id,added_at:new Date().toISOString()});
+    // Cleared on every like/unlike rather than waiting out the 6-hour cache — otherwise a
+    // freshly liked title wouldn't influence the recommendation row until the cache expired,
+    // which would feel broken even though it's working as designed.
+    _recommendationCache.delete(`${req.user._id}:movie`);
+    _recommendationCache.delete(`${req.user._id}:tvshow`);
     res.json({ ok: true, liked: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 app.delete("/api/favorites/:id", requireAuth, async (req, res) => {
-  await dbRemove(db.favorites,{user_id:req.user._id,media_id:req.params.id});
+  await dbRemove(db.favorites,{user_id:req.user._id,media_id:req.params.id},{multi:true});
   res.json({ok:true});
 });
 
@@ -4609,31 +4635,77 @@ app.get("/api/tmdb/trailer-stream/:kind/:tmdb_id", requireAuth, async (req, res)
 // just keeps liking the same handful of things) and reuses the exact same TMDB
 // recommendations logic as the detail page's "Liknande filmer", so unowned suggestions show
 // up too with the same "I biblioteket" badge.
+// Cache keyed by "userId:type" — recomputing this means one TMDB call per sampled liked
+// title, so without caching it'd re-run in full on every single homepage load. 6 hours is
+// long enough that repeat visits in a day are cheap, short enough that liking something new
+// shows up reasonably soon.
+const _recommendationCache = new Map();
+const RECOMMENDATION_CACHE_MS = 6 * 60 * 60 * 1000;
+const RECOMMENDATION_SAMPLE_SIZE = 8; // caps TMDB calls regardless of how many titles someone has liked
+
+// Builds a "you liked X, Y, Z — you might like this" set for a specific media type. Rather
+// than picking one random liked title and asking TMDB what's similar to just that one, this
+// samples several liked titles, asks TMDB for recommendations against each, and tallies how
+// often each candidate shows up — a title recommended off the back of 5 different things you
+// liked is a much stronger signal than one that only matched a single title. Gets more
+// accurate over time as there's more liked history to draw the sample from.
+async function buildRecommendationSet(userId, mediaType) {
+  const cacheKey = `${userId}:${mediaType}`;
+  const cached = _recommendationCache.get(cacheKey);
+  if (cached && Date.now() - cached.time < RECOMMENDATION_CACHE_MS) return cached.data;
+
+  const likes = await dbFind(db.favorites, { user_id: userId });
+  if (!likes.length) return { sourceTitles: [], items: [] };
+  const likedItems = (await Promise.all(likes.map(l => dbFindOne(db.media, { _id: l.media_id }))))
+    .filter(i => i && i.type === mediaType && i.tmdb_id);
+  if (!likedItems.length) return { sourceTitles: [], items: [] };
+
+  // Shuffle then cap — keeps this bounded even with a huge liked list, and rotates which
+  // titles get sampled between cache refreshes rather than always using the same few.
+  const sample = [...likedItems].sort(() => Math.random() - 0.5).slice(0, RECOMMENDATION_SAMPLE_SIZE);
+  const kind = mediaType === "tvshow" ? "tv" : "movie";
+
+  const tally = new Map(); // tmdb_id -> { count, data }
+  await Promise.all(sample.map(async (item) => {
+    let data = await tmdbFetch(`/${kind}/${item.tmdb_id}/recommendations`);
+    let recs = data?.results || [];
+    if (!recs.length) {
+      data = await tmdbFetch(`/${kind}/${item.tmdb_id}/similar`);
+      recs = data?.results || [];
+    }
+    for (const c of recs.slice(0, 20)) {
+      if (!c.id) continue;
+      const existing = tally.get(c.id);
+      if (existing) existing.count++;
+      else tally.set(c.id, { count: 1, data: c });
+    }
+  }));
+
+  // Highest tally first (most titles it was recommended alongside), ties broken by TMDB's
+  // own popularity so the order isn't arbitrary within a tally group.
+  const ranked = [...tally.values()].sort((a, b) => b.count - a.count || (b.data.popularity||0) - (a.data.popularity||0));
+  const rankedTmdbIds = ranked.map(r => r.data.id);
+  const owned = await dbFind(db.media, { type: mediaType, tmdb_id: { $in: rankedTmdbIds } });
+  const ownedByTmdbId = new Map(owned.map(o => [o.tmdb_id, o]));
+  const items = ranked.slice(0, 20).map(({ data: c }) => {
+    const ownedItem = ownedByTmdbId.get(c.id);
+    return ownedItem
+      ? { id: ownedItem._id, tmdb_id: c.id, title: ownedItem.title, year: ownedItem.year, poster_url: ownedItem.poster_url, type: ownedItem.type, owned: true }
+      : { id: null, tmdb_id: c.id, title: c.title || c.name, year: (c.release_date || c.first_air_date || "").slice(0,4) || null, poster_url: c.poster_path ? `https://image.tmdb.org/t/p/w342${c.poster_path}` : null, type: mediaType, owned: false };
+  });
+
+  const result = { sourceTitles: sample.map(s => s.title), items };
+  _recommendationCache.set(cacheKey, { time: Date.now(), data: result });
+  return result;
+}
+
 app.get("/api/recommendations", requireAuth, async (req, res) => {
   try {
-    const likes = await dbFind(db.favorites, { user_id: req.user._id });
-    if (!likes.length) return res.json({ sourceTitle: null, items: [] });
-    const pick = likes[Math.floor(Math.random() * likes.length)];
-    const item = await dbFindOne(db.media, { _id: pick.media_id });
-    if (!item || !item.tmdb_id) return res.json({ sourceTitle: null, items: [] });
-
-    const kind = item.type === "tvshow" ? "tv" : "movie";
-    let data = await tmdbFetch(`/${kind}/${item.tmdb_id}/recommendations`);
-    let candidates = data?.results || [];
-    if (!candidates.length) {
-      data = await tmdbFetch(`/${kind}/${item.tmdb_id}/similar`);
-      candidates = data?.results || [];
-    }
-    const candidateTmdbIds = candidates.map(c => c.id).filter(Boolean);
-    const owned = await dbFind(db.media, { type: item.type, tmdb_id: { $in: candidateTmdbIds } });
-    const ownedByTmdbId = new Map(owned.map(o => [o.tmdb_id, o]));
-    const items = candidates.slice(0, 20).map(c => {
-      const ownedItem = ownedByTmdbId.get(c.id);
-      return ownedItem
-        ? { id: ownedItem._id, tmdb_id: c.id, title: ownedItem.title, year: ownedItem.year, poster_url: ownedItem.poster_url, type: ownedItem.type, owned: true }
-        : { id: null, tmdb_id: c.id, title: c.title || c.name, year: (c.release_date || c.first_air_date || "").slice(0,4) || null, poster_url: c.poster_path ? `https://image.tmdb.org/t/p/w342${c.poster_path}` : null, type: kind === "tv" ? "tvshow" : "movie", owned: false };
-    });
-    res.json({ sourceTitle: item.title, items });
+    const [movies, tvshows] = await Promise.all([
+      buildRecommendationSet(req.user._id, "movie"),
+      buildRecommendationSet(req.user._id, "tvshow")
+    ]);
+    res.json({ movies, tvshows });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -6703,17 +6775,32 @@ app.get("/api/media/:id/details", requireAuth, async (req, res) => {
     const runtime = data.runtime || (data.episode_run_time?.[0]) || null;
     // Real TMDB user reviews — genuine content/rating/date, but no like/reaction counts like
     // Plex shows, since those come from Plex's own community layer that we have no
-    // equivalent of. Reviews are almost always written in English regardless of what language
-    // was requested, so — same issue we've hit before with subtitles/videos — asking in the
-    // user's own language very often comes back completely empty even when reviews exist;
-    // falls back to an explicit English-language request when that happens.
+    // equivalent of. Reviews are very often missing when requested in less common languages
+    // — TMDB just returns an empty array rather than falling back itself — so this falls back
+    // to an explicit English request when that happens.
+    //
+    // Overview needed a stronger fix than "empty means missing": TMDB sometimes fills a
+    // missing translation slot with the movie's own ORIGINAL-language text instead of
+    // actually leaving it empty (e.g. a Swedish film's "fi-FI" overview can silently be the
+    // Swedish text). An empty check can't catch that — it isn't empty, just wrong — so for
+    // anyone whose language isn't Swedish or English, the English version is always fetched
+    // and preferred outright, rather than only used as a last resort.
     let reviewResults = data.reviews?.results || [];
-    if (!reviewResults.length && userLang !== "en-US" && userLang !== "en") {
+    let overview = data.overview || null;
+    const userLangBase = (userLang || "").slice(0, 2).toLowerCase();
+    // Only worth the extra check when the movie's own original language ISN'T what the user
+    // requested — that's the specific situation where TMDB can silently substitute its
+    // original-language text into a missing translation slot instead of leaving it empty.
+    const needsEnglishCheck = userLang !== "en-US" && userLang !== "en" && userLang !== "sv-SE" && userLang !== "sv"
+      && data.original_language && data.original_language !== userLangBase && data.original_language !== "en";
+    if ((!reviewResults.length || needsEnglishCheck) && userLang !== "en-US" && userLang !== "en") {
       const enData = await tmdbFetch(item.type === "tvshow" ? `/tv/${item.tmdb_id}?append_to_response=reviews` : `/movie/${item.tmdb_id}?append_to_response=reviews`, "en-US");
-      reviewResults = enData?.reviews?.results || [];
+      if (!reviewResults.length) reviewResults = enData?.reviews?.results || [];
+      if (needsEnglishCheck && enData?.overview) overview = enData.overview;
+      else if (!overview) overview = enData?.overview || null;
     }
     const reviews = mapTmdbReviews(reviewResults);
-    res.json({ cast, crew, genres, runtime, overview: data.overview || null, reviews });
+    res.json({ cast, crew, genres, runtime, overview, reviews });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -6952,6 +7039,8 @@ app.get("/api/tmdb/tv/:tmdb_id", requireAuth, async (req, res) => {
     // Reused for the English title/poster fallback AND, now, as the reviews source — TMDB
     // reviews are almost always English-only and come back empty otherwise, same issue
     // already handled for owned titles.
+    const userLangBase = (userLang || "").slice(0, 2).toLowerCase();
+    const needsEnglishCheck = userLang && userLang !== "en-US" && data.original_language && data.original_language !== userLangBase && data.original_language !== "en";
     const enData = (userLang && userLang !== "en-US")
       ? await tmdbFetch(`/tv/${req.params.tmdb_id}?append_to_response=reviews`, "en-US")
       : null;
@@ -6960,7 +7049,7 @@ app.get("/api/tmdb/tv/:tmdb_id", requireAuth, async (req, res) => {
       tmdb_id: data.id,
       title: enData?.name || data.name,
       year: data.first_air_date ? parseInt(data.first_air_date) : null,
-      overview: data.overview,
+      overview: (needsEnglishCheck && enData?.overview) ? enData.overview : (data.overview || enData?.overview || null),
       poster_url: (enData?.poster_path || data.poster_path) ? `https://image.tmdb.org/t/p/w500${enData?.poster_path || data.poster_path}` : null,
       backdrop_url: data.backdrop_path ? `https://image.tmdb.org/t/p/w1280${data.backdrop_path}` : null,
       rating: data.vote_average || null,
@@ -6983,6 +7072,8 @@ app.get("/api/tmdb/movie/:tmdb_id", requireAuth, async (req, res) => {
     const userLang = req.user?.language || null;
     const data = await tmdbFetch(`/movie/${req.params.tmdb_id}?append_to_response=credits,videos,reviews`, userLang);
     if (!data) return res.status(404).json({ error: "Hittades inte" });
+    const userLangBase = (userLang || "").slice(0, 2).toLowerCase();
+    const needsEnglishCheck = userLang && userLang !== "en-US" && data.original_language && data.original_language !== userLangBase && data.original_language !== "en";
     const enData = (userLang && userLang !== "en-US")
       ? await tmdbFetch(`/movie/${req.params.tmdb_id}?append_to_response=reviews`, "en-US")
       : null;
@@ -6991,7 +7082,7 @@ app.get("/api/tmdb/movie/:tmdb_id", requireAuth, async (req, res) => {
       tmdb_id: data.id,
       title: enData?.title || data.title,
       year: data.release_date ? parseInt(data.release_date) : null,
-      overview: data.overview,
+      overview: (needsEnglishCheck && enData?.overview) ? enData.overview : (data.overview || enData?.overview || null),
       poster_url: (enData?.poster_path || data.poster_path) ? `https://image.tmdb.org/t/p/w500${enData?.poster_path || data.poster_path}` : null,
       backdrop_url: data.backdrop_path ? `https://image.tmdb.org/t/p/w1280${data.backdrop_path}` : null,
       rating: data.vote_average || null,
