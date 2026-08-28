@@ -190,6 +190,11 @@ async function resolveAndRenderPath(path) {
     if (tmdbId) return openPersonDetail(tmdbId, true);
     return switchSection("home", true);
   }
+  if ((parts[0] === "titel-film" || parts[0] === "titel-serie") && parts[1]) {
+    const tmdbId = parts[1].slice(parts[1].lastIndexOf("-") + 1);
+    if (tmdbId) return openTmdbDetail(tmdbId, parts[0] === "titel-serie" ? "tv" : "movie", true);
+    return switchSection("home", true);
+  }
   if (parts[0] === "samlingar" && parts[1]) {
     // Format is "{slug}-{collectionId}" — the collection ID is TMDB's own numeric ID, so it
     // never contains a hyphen itself, making it safe to just take everything after the last one.
@@ -426,7 +431,47 @@ const I18N = {
     "explore.cat_airing_today": "Sänds idag",
     "detail.created_by": "Skapad av",
     "detail.not_available_streaming_se": "Ej tillgänglig på streaming i Sverige",
-    "home.you_liked": "Du gillade {names} — du kanske även gillar detta"
+    "home.you_liked": "Du gillade {names} — du kanske även gillar detta",
+    "filter.search_in": "Sök i {name}...",
+    "filter.search": "Sök...",
+    "filter.sort_az": "A–Ö",
+    "filter.sort_year": "År (nyast)",
+    "filter.sort_rating": "Betyg",
+    "filter.sort_genre": "Genre",
+    "filter.all_genres": "Alla genrer",
+    "filter.all_subtitle_langs": "Alla undertextspråk",
+    "filter.no_results": "Inga träffar",
+    "filter.count_movies": "titlar",
+    "filter.count_shows": "serier",
+    "filter.subtitle_tooltip": "Visa bara titlar med undertext på valt språk",
+    "filter.empty_library": "Tomt bibliotek",
+    "collections.none_found": "Inga samlingar hittades",
+    "collections.rescan_hint": "Skanna om biblioteket för att hitta filmserier",
+    "collections.count_label": "samlingar",
+    "collections.new": "Ny samling",
+    "collections.no_results": "Inga träffar",
+    "collections.movie_count": "filmer",
+    "detail.more_count": "+{n} mer",
+    "person.born": "Född",
+    "person.show_more": "Visa mer",
+    "person.in_your_library": "I ditt bibliotek",
+    "person.more_from": "Mer från {name}",
+    "person.movies_by": "Filmer med {name}",
+    "person.shows_by": "TV-serier med {name}",
+    "person.dept_acting": "Skådespelare",
+    "person.dept_directing": "Regi",
+    "person.dept_writing": "Manus",
+    "person.dept_production": "Produktion",
+    "person.dept_sound": "Ljud",
+    "person.dept_camera": "Foto",
+    "person.dept_editing": "Klippning",
+    "person.dept_art": "Scenografi",
+    "person.dept_costume": "Kostym & Smink",
+    "person.dept_crew": "Filmteam",
+    "collections.in_library_heading": "I ditt bibliotek ({count})",
+    "collections.missing_heading": "Saknas i ditt bibliotek ({count})",
+    "collections.x_of_y_in_library": "{have} av {total} filmer i ditt bibliotek",
+    "collections.edit": "✏️ Redigera samling"
   },
   en: {
     "sidebar.collections": "Collections",
@@ -560,7 +605,47 @@ const I18N = {
     "explore.cat_airing_today": "Airing Today",
     "detail.created_by": "Created by",
     "detail.not_available_streaming_se": "Not available for streaming in Sweden",
-    "home.you_liked": "You liked {names} — you might also like this"
+    "home.you_liked": "You liked {names} — you might also like this",
+    "filter.search_in": "Search in {name}...",
+    "filter.search": "Search...",
+    "filter.sort_az": "A–Z",
+    "filter.sort_year": "Year (newest)",
+    "filter.sort_rating": "Rating",
+    "filter.sort_genre": "Genre",
+    "filter.all_genres": "All Genres",
+    "filter.all_subtitle_langs": "All Subtitle Languages",
+    "filter.no_results": "No results",
+    "filter.count_movies": "titles",
+    "filter.count_shows": "shows",
+    "filter.subtitle_tooltip": "Only show titles with subtitles in the selected language",
+    "filter.empty_library": "Empty Library",
+    "collections.none_found": "No collections found",
+    "collections.rescan_hint": "Rescan the library to find movie franchises",
+    "collections.count_label": "collections",
+    "collections.new": "New Collection",
+    "collections.no_results": "No results",
+    "collections.movie_count": "movies",
+    "detail.more_count": "+{n} more",
+    "person.born": "Born",
+    "person.show_more": "Show more",
+    "person.in_your_library": "In Your Library",
+    "person.more_from": "More From {name}",
+    "person.movies_by": "Movies with {name}",
+    "person.shows_by": "TV Shows with {name}",
+    "person.dept_acting": "Acting",
+    "person.dept_directing": "Directing",
+    "person.dept_writing": "Writing",
+    "person.dept_production": "Production",
+    "person.dept_sound": "Sound",
+    "person.dept_camera": "Camera",
+    "person.dept_editing": "Editing",
+    "person.dept_art": "Art",
+    "person.dept_costume": "Costume & Make-Up",
+    "person.dept_crew": "Crew",
+    "collections.in_library_heading": "In Your Library ({count})",
+    "collections.missing_heading": "Missing From Your Library ({count})",
+    "collections.x_of_y_in_library": "{have} of {total} movies in your library",
+    "collections.edit": "✏️ Edit Collection"
   },
   // Best-effort machine-assisted translation, not reviewed by a native Finnish speaker —
   // worth having someone fluent check this over before treating it as final.
@@ -696,13 +781,83 @@ const I18N = {
     "explore.cat_airing_today": "Tänään",
     "detail.created_by": "Luonut",
     "detail.not_available_streaming_se": "Ei saatavilla suoratoistona Ruotsissa",
-    "home.you_liked": "Pidit näistä: {names} — saatat pitää myös tästä"
+    "home.you_liked": "Pidit näistä: {names} — saatat pitää myös tästä",
+    "filter.search_in": "Hae kohteesta {name}...",
+    "filter.search": "Hae...",
+    "filter.sort_az": "A–Ö",
+    "filter.sort_year": "Vuosi (uusin)",
+    "filter.sort_rating": "Arvostelu",
+    "filter.sort_genre": "Genre",
+    "filter.all_genres": "Kaikki genret",
+    "filter.all_subtitle_langs": "Kaikki tekstityskielet",
+    "filter.no_results": "Ei tuloksia",
+    "filter.count_movies": "nimikettä",
+    "filter.count_shows": "sarjaa",
+    "filter.subtitle_tooltip": "Näytä vain nimikkeet, joissa on tekstitys valitulla kielellä",
+    "filter.empty_library": "Tyhjä kirjasto",
+    "collections.none_found": "Kokoelmia ei löytynyt",
+    "collections.rescan_hint": "Skannaa kirjasto uudelleen löytääksesi elokuvasarjoja",
+    "collections.count_label": "kokoelmaa",
+    "collections.new": "Uusi kokoelma",
+    "collections.no_results": "Ei tuloksia",
+    "collections.movie_count": "elokuvaa",
+    "detail.more_count": "+{n} lisää",
+    "person.born": "Syntynyt",
+    "person.show_more": "Näytä lisää",
+    "person.in_your_library": "Kirjastossasi",
+    "person.more_from": "Lisää: {name}",
+    "person.movies_by": "Elokuvat: {name}",
+    "person.shows_by": "TV-sarjat: {name}",
+    "person.dept_acting": "Näytteleminen",
+    "person.dept_directing": "Ohjaus",
+    "person.dept_writing": "Käsikirjoitus",
+    "person.dept_production": "Tuotanto",
+    "person.dept_sound": "Ääni",
+    "person.dept_camera": "Kuvaus",
+    "person.dept_editing": "Leikkaus",
+    "person.dept_art": "Lavastus",
+    "person.dept_costume": "Puvustus & Maskeeraus",
+    "person.dept_crew": "Työryhmä",
+    "collections.in_library_heading": "Kirjastossasi ({count})",
+    "collections.missing_heading": "Puuttuu kirjastostasi ({count})",
+    "collections.x_of_y_in_library": "{have}/{total} elokuvaa kirjastossasi",
+    "collections.edit": "✏️ Muokkaa kokoelmaa"
   }
 };
 function t(key) {
   const raw = (currentUser?.language || "").toLowerCase();
   const lang = raw.startsWith("en") ? "en" : raw.startsWith("fi") ? "fi" : "sv";
   return I18N[lang][key] || I18N.sv[key] || key;
+}
+
+// Curated homepage links for the common streaming services — used instead of TMDB's shared
+// aggregator link, so tapping "Netflix" actually takes you to Netflix (where you'd search for
+// the title yourself) rather than every provider leading to the exact same generic page,
+// which defeated the point of showing distinct, chosen services in the first place. Falls
+// back to the TMDB link for anything not in this list, rather than nothing at all.
+const PROVIDER_HOMEPAGES = {
+  "Netflix": "https://www.netflix.com",
+  "Netflix basic with Ads": "https://www.netflix.com",
+  "Disney Plus": "https://www.disneyplus.com",
+  "Max": "https://www.max.com",
+  "HBO Max": "https://www.max.com",
+  "Viaplay": "https://viaplay.se",
+  "Amazon Prime Video": "https://www.primevideo.com",
+  "Apple TV Plus": "https://tv.apple.com",
+  "Apple TV": "https://tv.apple.com",
+  "SkyShowtime": "https://www.skyshowtime.com",
+  "SF Anytime": "https://www.sfanytime.com",
+  "Google Play Movies": "https://play.google.com/store/movies",
+  "YouTube": "https://www.youtube.com",
+  "Rakuten TV": "https://www.rakuten.tv",
+  "Blockbuster": "https://www.blockbuster.se",
+  "TV4 Play": "https://www.tv4play.se",
+  "Discovery Plus": "https://www.discoveryplus.com",
+  "Paramount Plus": "https://www.paramountplus.com",
+  "Crunchyroll": "https://www.crunchyroll.com"
+};
+function providerLink(providerName, fallbackLink) {
+  return PROVIDER_HOMEPAGES[providerName] || fallbackLink || null;
 }
 
 // Login screen renders before any user is authenticated, so there's no currentUser.language
@@ -813,15 +968,16 @@ function enterSettingsSidebarMode() {
   container.innerHTML = `
     <div class="sb-item" onclick="exitSettingsSidebarMode()">
       <span class="sb-icon">←</span>
-      <span>Tillbaka</span>
+      <span>${t("sidebar.back")}</span>
     </div>
-    <div class="sb-sep">INSTÄLLNINGAR</div>
+  ` + (currentUser?.role === "admin" ? `
+    <div class="sb-sep">${t("sidebar.settings")}</div>
     <div style="height:1px;background:var(--border);margin:0 18px 4px"></div>
-  ` + SETTINGS_TABS.map(t => `
-    <div class="sb-item${_settingsActiveTab === t.id ? " active" : ""}" id="sb-stab-${t.id}" onclick="switchSettingsTab('${t.id}')">
-      <span class="sb-icon">${t.icon}</span>
-      <span>${t.label}</span>
-    </div>`).join("");
+  ` + SETTINGS_TABS.map(tab => `
+    <div class="sb-item${_settingsActiveTab === tab.id ? " active" : ""}" id="sb-stab-${tab.id}" onclick="switchSettingsTab('${tab.id}')">
+      <span class="sb-icon">${tab.icon}</span>
+      <span>${tab.label}</span>
+    </div>`).join("") : "");
 }
 
 function exitSettingsSidebarMode() {
@@ -850,7 +1006,13 @@ function switchSection(name, fromRouter) {
   document.querySelectorAll(".section").forEach(s => s.classList.remove("active"));
   document.querySelectorAll(".sb-item").forEach(b => b.classList.remove("active"));
   document.getElementById("sidebar")?.style.removeProperty("background"); // undo the detail page's "blend into backdrop" effect, in case it was left on
+  document.getElementById("sidebar")?.style.removeProperty("--border");
+  document.getElementById("sidebar")?.style.removeProperty("border-color");
   document.getElementById("topbar")?.style.removeProperty("background");
+  document.getElementById("topbar")?.style.removeProperty("--border");
+  document.getElementById("topbar")?.style.removeProperty("border-color");
+  document.getElementById("sec-detail")?.style.removeProperty("--border");
+  document.querySelectorAll("#sec-detail .detail-section-title").forEach(el => el.style.removeProperty("border-color"));
   if (name !== "settings" && _liveActivityInterval) { clearInterval(_liveActivityInterval); _liveActivityInterval = null; }
   if (name !== "settings" && _systemStatsInterval) { clearInterval(_systemStatsInterval); _systemStatsInterval = null; }
   if (name !== "settings" && _downloadsInterval) { clearInterval(_downloadsInterval); _downloadsInterval = null; }
@@ -1643,7 +1805,7 @@ async function loadCollections() {
   try {
     const collections = await API.get("/collections");
     if (!collections.length) {
-      sec.innerHTML = `<div class="empty"><div class="empty-icon">🎬</div><h3>Inga samlingar hittades</h3><p>Skanna om biblioteket för att hitta filmserier</p></div>`;
+      sec.innerHTML = `<div class="empty"><div class="empty-icon">🎬</div><h3>${t("collections.none_found")}</h3><p>${t("collections.rescan_hint")}</p></div>`;
       return;
     }
     const genreSet = new Set();
@@ -1652,14 +1814,14 @@ async function loadCollections() {
     sec.innerHTML = `
       <div class="grid-wrap" style="padding-right:32px">
         <div class="row-header" style="margin-bottom:20px">
-          <span class="row-title">Samlingar</span>
+          <span class="row-title">${t("sidebar.collections")}</span>
           <div style="display:flex;align-items:center;gap:12px">
   <select class="filter-select" id="coll-filter-genre" onchange="filterCollections()">
-    <option value="">Alla genrer</option>
+    <option value="">${t("filter.all_genres")}</option>
     ${sortedGenres.map(g => `<option value="${esc(g)}">${esc(g)}</option>`).join("")}
   </select>
-  <span class="row-count" id="coll-count">${collections.length} samlingar</span>
-  ${currentUser?.role === "admin" ? `<button class="s-btn s-btn-primary" onclick="createCollection()" style="padding:6px 14px;font-size:13px">➕ Ny samling</button>` : ""}
+  <span class="row-count" id="coll-count">${collections.length} ${t("collections.count_label")}</span>
+  ${currentUser?.role === "admin" ? `<button class="s-btn s-btn-primary" onclick="createCollection()" style="padding:6px 14px;font-size:13px">➕ ${t("collections.new")}</button>` : ""}
 </div>
         </div>
         <div class="media-grid" id="lib-grid">
@@ -1685,7 +1847,7 @@ function buildCollectionCard(c) {
       </div>
       <div class="mcard-info">
         <div class="mcard-title">${esc(c.name||"")}</div>
-        <div class="mcard-meta">${c.movies.length} filmer</div>
+        <div class="mcard-meta">${c.movies.length} ${t("collections.movie_count")}</div>
       </div>
     </div>`;
 }
@@ -1696,9 +1858,9 @@ function filterCollections() {
   const filtered = genre ? all.filter(c => c.movies.some(m => (m.genres || []).includes(genre))) : all;
   document.getElementById("lib-grid").innerHTML = filtered.length
     ? filtered.map(c => buildCollectionCard(c)).join("")
-    : '<div style="color:var(--muted);font-size:14px;padding:20px 0">Inga träffar</div>';
+    : `<div style="color:var(--muted);font-size:14px;padding:20px 0">${t("collections.no_results")}</div>`;
   const countEl = document.getElementById("coll-count");
-  if (countEl) countEl.textContent = `${filtered.length} samlingar`;
+  if (countEl) countEl.textContent = `${filtered.length} ${t("collections.count_label")}`;
 }
 async function createCollection() {
   const modal = document.createElement("div");
@@ -1979,9 +2141,9 @@ async function openCollection(collectionId, fromRouter) {
     if (inLib.length) {
       filmsHtml += `<div class="detail-section">
         <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:4px">
-          <h3 class="detail-section-title" style="margin:0">I ditt bibliotek (${inLib.length})</h3>
-          <select class="filter-select" id="collection-filter-sublang" onchange="filterCollectionBySubLang()" title="Visa bara titlar med undertext på valt språk" style="font-size:12px">
-            <option value="">🔤 Alla undertextspråk</option>
+          <h3 class="detail-section-title" style="margin:0">${t("collections.in_library_heading").replace("{count}", inLib.length)}</h3>
+          <select class="filter-select" id="collection-filter-sublang" onchange="filterCollectionBySubLang()" title="${t("filter.subtitle_tooltip")}" style="font-size:12px">
+            <option value="">🔤 ${t("filter.all_subtitle_langs")}</option>
             ${Object.keys(SUBTITLE_LANG_ADJ).filter(l => l !== "und").map(l => `<option value="${l}">${esc(SUBTITLE_LANG_ADJ[l])}</option>`).join("")}
           </select>
         </div>
@@ -1993,7 +2155,7 @@ async function openCollection(collectionId, fromRouter) {
 
     if (missing.length) {
       filmsHtml += `<div class="detail-section">
-        <h3 class="detail-section-title">Saknas i ditt bibliotek (${missing.length})</h3>
+        <h3 class="detail-section-title">${t("collections.missing_heading").replace("{count}", missing.length)}</h3>
         <div class="media-grid">
           ${missing.map(p => `
             <div class="mcard" onclick="openTmdbDetail(${p.tmdb_id})" style="opacity:0.6">
@@ -2030,10 +2192,10 @@ async function openCollection(collectionId, fromRouter) {
           <div class="detail-info-col">
             <h1 class="detail-page-title">${esc(collection.name||"")}</h1>
             <div class="detail-meta-row">
-              <span class="detail-meta-item">${localMovies.length} av ${allParts?.parts?.length||localMovies.length} filmer i ditt bibliotek</span>
+              <span class="detail-meta-item">${t("collections.x_of_y_in_library").replace("{have}", localMovies.length).replace("{total}", allParts?.parts?.length||localMovies.length)}</span>
             </div>
             <div style="display:flex;gap:10px;margin-top:16px;flex-wrap:wrap">
-              ${currentUser?.role === "admin" ? `<button class="s-btn s-btn-primary" onclick="editCollection('${collectionId}')">✏️ Redigera samling</button>` : ""}
+              ${currentUser?.role === "admin" ? `<button class="s-btn s-btn-primary" onclick="editCollection('${collectionId}')">${t("collections.edit")}</button>` : ""}
             </div>
           </div>
         </div>
@@ -2064,24 +2226,24 @@ async function loadLibraryView(libId, libName, libType) {
       <div class="grid-wrap" style="padding-right:32px">
         <div class="filter-bar">
           <h2 style="font-size:22px;font-weight:700;margin:0;flex:1">${esc(libName)}</h2>
-          <input class="filter-input" type="text" placeholder="Sök i ${esc(libName)}..." id="lib-filter-q" oninput="filterLibraryView()"/>
+          <input class="filter-input" type="text" placeholder="${t("filter.search_in").replace("{name}", esc(libName))}" id="lib-filter-q" oninput="filterLibraryView()"/>
           <select class="filter-select" id="lib-filter-sort" onchange="onLibrarySortChange()">
-            <option value="title">A–Ö</option>
-            <option value="year">År (nyast)</option>
-            <option value="rating">Betyg</option>
-            <option value="genre">Genre</option>
+            <option value="title">${t("filter.sort_az")}</option>
+            <option value="year">${t("filter.sort_year")}</option>
+            <option value="rating">${t("filter.sort_rating")}</option>
+            <option value="genre">${t("filter.sort_genre")}</option>
           </select>
           <select class="filter-select" id="lib-filter-genre" onchange="filterLibraryView()" style="display:none">
-            <option value="">Alla genrer</option>
+            <option value="">${t("filter.all_genres")}</option>
             ${sortedGenres.map(g => `<option value="${esc(g)}">${esc(g)}</option>`).join("")}
           </select>
-          <select class="filter-select" id="lib-filter-sublang" onchange="filterLibraryView()" title="Visa bara titlar med undertext på valt språk">
-            <option value="">🔤 Alla undertextspråk</option>
+          <select class="filter-select" id="lib-filter-sublang" onchange="filterLibraryView()" title="${t("filter.subtitle_tooltip")}">
+            <option value="">🔤 ${t("filter.all_subtitle_langs")}</option>
             ${Object.keys(SUBTITLE_LANG_ADJ).filter(l => l !== "und").map(l => `<option value="${l}">${esc(SUBTITLE_LANG_ADJ[l])}</option>`).join("")}
           </select>
         </div>
         <div class="media-grid" id="lib-grid">
-          ${items.length ? items.map(i => buildCard(i)).join("") : '<div class="empty"><div class="empty-icon">📭</div><h3>Tomt bibliotek</h3></div>'}
+          ${items.length ? items.map(i => buildCard(i)).join("") : `<div class="empty"><div class="empty-icon">📭</div><h3>${t("filter.empty_library")}</h3></div>`}
         </div>
       </div>
       ${buildAbcNav(items)}`;
@@ -2337,19 +2499,19 @@ async function loadMediaSection(sectionType) {
 
     let html = `<div class="grid-wrap" style="position:relative">
       <div class="filter-bar">
-        <input class="filter-input" type="text" placeholder="Sök..." id="filter-q-${sectionType}" oninput="filterMediaSection('${sectionType}')"/>
+        <input class="filter-input" type="text" placeholder="${t("filter.search")}" id="filter-q-${sectionType}" oninput="filterMediaSection('${sectionType}')"/>
         <select class="filter-select" id="filter-sort-${sectionType}" onchange="onSortChange('${sectionType}')">
-          <option value="title">A–Ö</option>
-          <option value="year">År (nyast)</option>
-          <option value="rating">Betyg</option>
-          <option value="genre">Genre</option>
+          <option value="title">${t("filter.sort_az")}</option>
+          <option value="year">${t("filter.sort_year")}</option>
+          <option value="rating">${t("filter.sort_rating")}</option>
+          <option value="genre">${t("filter.sort_genre")}</option>
         </select>
         <select class="filter-select" id="filter-genre-${sectionType}" onchange="filterMediaSection('${sectionType}')" style="display:none">
-          <option value="">Alla genrer</option>
+          <option value="">${t("filter.all_genres")}</option>
           ${sortedGenres.map(g => `<option value="${esc(g)}">${esc(g)}</option>`).join("")}
         </select>
-        <select class="filter-select" id="filter-sublang-${sectionType}" onchange="filterMediaSection('${sectionType}')" title="Visa bara titlar med undertext på valt språk">
-          <option value="">🔤 Alla undertextspråk</option>
+        <select class="filter-select" id="filter-sublang-${sectionType}" onchange="filterMediaSection('${sectionType}')" title="${t("filter.subtitle_tooltip")}">
+          <option value="">🔤 ${t("filter.all_subtitle_langs")}</option>
           ${Object.keys(SUBTITLE_LANG_ADJ).filter(l => l !== "und").map(l => `<option value="${l}">${esc(SUBTITLE_LANG_ADJ[l])}</option>`).join("")}
         </select>
       </div>
@@ -2758,7 +2920,13 @@ function buildCard(item, wide = false) {
 async function openShowDetail(id, fromRouter) {
   document.querySelectorAll(".section").forEach(s => s.classList.remove("active"));
   document.getElementById("sidebar")?.style.removeProperty("background");
+  document.getElementById("sidebar")?.style.removeProperty("--border");
+  document.getElementById("sidebar")?.style.removeProperty("border-color");
   document.getElementById("topbar")?.style.removeProperty("background");
+  document.getElementById("topbar")?.style.removeProperty("--border");
+  document.getElementById("topbar")?.style.removeProperty("border-color");
+  document.getElementById("sec-detail")?.style.removeProperty("--border");
+  document.querySelectorAll("#sec-detail .detail-section-title").forEach(el => el.style.removeProperty("border-color"));
   const sec = document.getElementById("sec-detail") || (() => {
     const s = document.createElement("section");
     s.id = "sec-detail"; s.className = "section";
@@ -2844,7 +3012,8 @@ async function openShowDetail(id, fromRouter) {
               <h1 class="detail-page-title">${esc(item.title)}</h1>
               ${directors ? `<div class="detail-director-line" style="color:var(--muted);font-size:13px;margin-top:2px">${directors}</div>` : ""}
               <div class="detail-meta-row" style="margin-top:8px">
-                ${item.rating ? `<span class="detail-rating">⭐ ${parseFloat(item.rating).toFixed(1)}</span>` : ""}
+                ${item.rating ? `<span class="detail-meta-item" style="background:#01b4e4;color:#fff;padding:2px 8px;border-radius:4px;font-weight:600;font-size:12px">⭐ TMDB ${parseFloat(item.rating).toFixed(1)}</span>` : ""}
+                <span id="extra-ratings-${item.id||id}"></span>
                 ${genresHtml ? `<span class="detail-meta-item">${esc(genresHtml)}</span>` : ""}
               </div>
               ${item.overview ? `<p class="detail-page-overview">${esc(item.overview)}</p>` : ""}
@@ -2875,6 +3044,7 @@ async function openShowDetail(id, fromRouter) {
         </div>
       </div>`;
     loadLikeStatus(item.id);
+    loadExtraRatings(`extra-ratings-${item.id}`, item.title, item.year);
     if (item.backdrop_url && localStorage.getItem("sv_detail_bg_shown") === "1") {
       const btn = document.getElementById(`show-bg-btn-${item.id}`);
       toggleDetailBackground(item.id, btn, true);
@@ -2908,27 +3078,34 @@ async function openShowDetail(id, fromRouter) {
         if (!el) return;
         window._wtwData = window._wtwData || {};
         window._wtwData[id] = data;
-        const all = [
-          ...(data.flatrate||[]).map(p => ({ ...p, kind: t("detail.streaming_label") })),
+        const flatrateList = (data.flatrate||[]).map(p => ({ ...p, kind: t("detail.streaming_label") }));
+        const payList = [
           ...(data.rent||[]).map(p => ({ ...p, kind: t("detail.rent") })),
           ...(data.buy||[]).map(p => ({ ...p, kind: t("detail.buy") }))
         ];
-        if (!all.length) { el.innerHTML = ""; return; }
-        const featured = all[0];
-        const rest = all.length - 1;
+        if (!flatrateList.length && !payList.length) { el.innerHTML = ""; return; }
+        // Services included in a subscription you might already have are far more actionable
+        // than ones that cost extra, so those are always shown in full rather than hidden
+        // behind "+N more" — only rent/buy count toward that. If nothing is available on
+        // subscription at all, the first pay option is shown directly instead (still clearly
+        // labeled Hyr/Köp) so there's always something visible, not just a count.
+        const primaryList = flatrateList.length ? flatrateList : payList.slice(0, 1);
+        const extraCount = flatrateList.length ? payList.length : payList.length - 1;
+        const providerCard = (p) => `
+            <div ${providerLink(p.name, data.link) ? `onclick="window.open('${providerLink(p.name, data.link)}','_blank')" style="cursor:pointer;` : `style="`}background:var(--card2);border-radius:8px;padding:10px 14px;display:flex;align-items:center;gap:10px;min-width:160px">
+              ${p.logo ? `<img src="${p.logo}" style="width:36px;height:36px;border-radius:6px;object-fit:cover">` : `<div style="width:36px;height:36px;border-radius:6px;background:var(--border)"></div>`}
+              <div>
+                <div style="font-size:13px;font-weight:600">${esc(p.name)}</div>
+                <div style="font-size:11px;color:var(--muted)">${esc(p.kind)}</div>
+              </div>
+            </div>`;
         el.innerHTML = `
           <div style="font-size:11px;color:var(--muted);margin-bottom:4px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">${t("detail.more_ways_to_watch")}</div>
           <div style="display:flex;gap:10px;flex-wrap:wrap">
-            <div style="background:var(--card2);border-radius:8px;padding:10px 14px;display:flex;align-items:center;gap:10px;min-width:160px">
-              ${featured.logo ? `<img src="${featured.logo}" style="width:36px;height:36px;border-radius:6px;object-fit:cover">` : `<div style="width:36px;height:36px;border-radius:6px;background:var(--border)"></div>`}
-              <div>
-                <div style="font-size:13px;font-weight:600">${esc(featured.name)}</div>
-                <div style="font-size:11px;color:var(--muted)">${esc(featured.kind)}</div>
-              </div>
-            </div>
-            ${rest > 0 ? `<div onclick="openWatchProvidersModal('${id}')" style="background:var(--card2);border-radius:8px;padding:10px 14px;display:flex;align-items:center;gap:10px;cursor:pointer;min-width:120px">
+            ${primaryList.map(providerCard).join("")}
+            ${extraCount > 0 ? `<div onclick="openWatchProvidersModal('${id}')" style="background:var(--card2);border-radius:8px;padding:10px 14px;display:flex;align-items:center;gap:10px;cursor:pointer;min-width:120px">
               <span style="font-size:20px">☰</span>
-              <span style="font-size:13px;color:var(--muted)">+${rest} mer</span>
+              <span style="font-size:13px;color:var(--muted)">${t("detail.more_count").replace("{n}", extraCount)}</span>
             </div>` : ""}
           </div>`;
       }).catch(()=>{});
@@ -3029,7 +3206,7 @@ async function openSeason(showId, seasonNum, fromRouter) {
   }
 }
 
-async function openTmdbDetail(tmdbId, kind) {
+async function openTmdbDetail(tmdbId, kind, fromRouter) {
   kind = kind === "tv" ? "tv" : "movie";
   document.querySelectorAll(".section").forEach(s => s.classList.remove("active"));
   const sec = document.getElementById("sec-detail") || (() => {
@@ -3042,6 +3219,10 @@ async function openTmdbDetail(tmdbId, kind) {
   sec.innerHTML = `<div class="spinner-wrap" style="height:60vh"><div class="spinner"></div></div>`;
   try {
     const item = await API.get(`/tmdb/${kind}/${tmdbId}`);
+    // Without this, clicking through Explore Trailers → a title → a cast member's page and
+    // then hitting the browser's back button skipped straight past this page entirely,
+    // since nothing here had ever registered as its own step in the browser history.
+    if (!fromRouter) navigateToPath(`/titel-${kind === "tv" ? "serie" : "film"}/${clientSlugify(item.title)}-${tmdbId}`, item.title + " - StreamVault");
     const runtime = item.runtime ? `${Math.floor(item.runtime/60)}h ${item.runtime%60}m` : "";
     const genresHtml = (item.genres||[]).map(g => `<span class="detail-genre">${esc(g)}</span>`).join("");
     const directors = (item.crew||[]).map(c => esc(c.name)).join(", ");
@@ -3094,7 +3275,8 @@ async function openTmdbDetail(tmdbId, kind) {
             <div class="detail-info-col">
               <h1 class="detail-page-title">${esc(item.title)}</h1>
               <div class="detail-meta-row">
-                ${item.rating ? `<span class="detail-rating">⭐ ${parseFloat(item.rating).toFixed(1)}</span>` : ""}
+                ${item.rating ? `<span class="detail-meta-item" style="background:#01b4e4;color:#fff;padding:2px 8px;border-radius:4px;font-weight:600;font-size:12px">⭐ TMDB ${parseFloat(item.rating).toFixed(1)}</span>` : ""}
+                <span id="extra-ratings-tmdb-${tmdbId}"></span>
                 ${item.year ? `<span class="detail-meta-item">${item.year}</span>` : ""}
                 ${runtime ? `<span class="detail-meta-item">${runtime}</span>` : ""}
                 ${directors ? `<span class="detail-meta-item">${directorLabel} ${directors}</span>` : ""}
@@ -3114,31 +3296,34 @@ async function openTmdbDetail(tmdbId, kind) {
           ${reviewsHtml}
         </div>
       </div>`;
+    loadExtraRatings(`extra-ratings-tmdb-${tmdbId}`, item.title, item.year);
     API.get(`/watch-providers/${tmdbId}?kind=${kind}`).then(data => {
       const el = document.getElementById("wtw-tmdb-" + tmdbId);
       if (!el) return;
       window._wtwData = window._wtwData || {};
       window._wtwData["tmdb-" + tmdbId] = data;
-      const all = [
-        ...(data.flatrate||[]).map(p => ({ ...p, kind: t("detail.streaming_label") })),
+      const flatrateList = (data.flatrate||[]).map(p => ({ ...p, kind: t("detail.streaming_label") }));
+      const payList = [
         ...(data.rent||[]).map(p => ({ ...p, kind: t("detail.rent") })),
         ...(data.buy||[]).map(p => ({ ...p, kind: t("detail.buy") }))
       ];
-      if (!all.length) { el.innerHTML = `<span style="font-size:13px;color:var(--muted)">${t("detail.not_available_streaming_se")}</span>`; return; }
-      const featured = all[0];
-      const rest = all.length - 1;
+      if (!flatrateList.length && !payList.length) { el.innerHTML = `<span style="font-size:13px;color:var(--muted)">${t("detail.not_available_streaming_se")}</span>`; return; }
+      const primaryList = flatrateList.length ? flatrateList : payList.slice(0, 1);
+      const extraCount = flatrateList.length ? payList.length : payList.length - 1;
+      const providerCard = (p) => `
+          <div ${providerLink(p.name, data.link) ? `onclick="window.open('${providerLink(p.name, data.link)}','_blank')" style="cursor:pointer;` : `style="`}background:var(--card2);border-radius:8px;padding:10px 14px;display:flex;align-items:center;gap:10px;min-width:160px">
+            ${p.logo ? `<img src="${p.logo}" style="width:36px;height:36px;border-radius:6px;object-fit:cover">` : `<div style="width:36px;height:36px;border-radius:6px;background:var(--border)"></div>`}
+            <div>
+              <div style="font-size:13px;font-weight:600">${esc(p.name)}</div>
+              <div style="font-size:11px;color:var(--muted)">${esc(p.kind)}</div>
+            </div>
+          </div>`;
       el.innerHTML = `
         <div style="display:flex;gap:10px;flex-wrap:wrap">
-          <div style="background:var(--card2);border-radius:8px;padding:10px 14px;display:flex;align-items:center;gap:10px;min-width:160px">
-            ${featured.logo ? `<img src="${featured.logo}" style="width:36px;height:36px;border-radius:6px;object-fit:cover">` : `<div style="width:36px;height:36px;border-radius:6px;background:var(--border)"></div>`}
-            <div>
-              <div style="font-size:13px;font-weight:600">${esc(featured.name)}</div>
-              <div style="font-size:11px;color:var(--muted)">${esc(featured.kind)}</div>
-            </div>
-          </div>
-          ${rest > 0 ? `<div onclick="openWatchProvidersModal('tmdb-${tmdbId}')" style="background:var(--card2);border-radius:8px;padding:10px 14px;display:flex;align-items:center;gap:10px;cursor:pointer;min-width:120px">
+          ${primaryList.map(providerCard).join("")}
+          ${extraCount > 0 ? `<div onclick="openWatchProvidersModal('tmdb-${tmdbId}')" style="background:var(--card2);border-radius:8px;padding:10px 14px;display:flex;align-items:center;gap:10px;cursor:pointer;min-width:120px">
             <span style="font-size:20px">☰</span>
-            <span style="font-size:13px;color:var(--muted)">+${rest} mer</span>
+            <span style="font-size:13px;color:var(--muted)">${t("detail.more_count").replace("{n}", extraCount)}</span>
           </div>` : ""}
         </div>`;
     }).catch(()=>{});
@@ -3169,6 +3354,21 @@ function pillBtn(icon, label, onclick, id, tooltip) {
 
 function iconBtn(icon, label, onclick, id) {
   return `<button ${id ? `id="${id}"` : ""} onclick='${onclick}' title="${esc(label)}" style="width:38px;height:38px;border-radius:50%;background:var(--card2, #1a1a28);border:1px solid var(--border, #333);color:var(--text, #fff);font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center">${icon}</button>`;
+}
+
+async function loadExtraRatings(elementId, title, year) {
+  const el = document.getElementById(elementId);
+  if (!el) return;
+  try {
+    const data = await API.get(`/ratings?title=${encodeURIComponent(title)}&year=${year||""}`);
+    const badges = [];
+    if (data.imdb) badges.push(`<span class="detail-meta-item" style="background:#f5c518;color:#000;padding:2px 8px;border-radius:4px;font-weight:600;font-size:12px" title="IMDb${data.imdb_votes ? ' · ' + data.imdb_votes + ' röster' : ''}">IMDb ${data.imdb.toFixed(1)}</span>`);
+    if (data.rotten_tomatoes !== null) {
+      const fresh = data.rotten_tomatoes >= 60;
+      badges.push(`<span class="detail-meta-item" style="background:${fresh ? '#fa320a' : '#7dc855'};color:#fff;padding:2px 8px;border-radius:4px;font-weight:600;font-size:12px">${fresh ? "🍅" : "🤢"} ${data.rotten_tomatoes}%</span>`);
+    }
+    el.innerHTML = badges.join(" ");
+  } catch(e) {}
 }
 
 async function loadDetailTechInfo(itemId, itemTitle) {
@@ -3202,7 +3402,7 @@ function openWatchProvidersModal(itemId) {
     <div style="margin-bottom:18px">
       <div style="font-size:13px;color:var(--muted);margin-bottom:10px">${esc(title)}</div>
       ${list.map(p => `
-        <div style="display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid var(--border)">
+        <div ${providerLink(p.name, data.link) ? `onclick="window.open('${providerLink(p.name, data.link)}','_blank')" style="cursor:pointer;` : `style="`}display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid var(--border)">
           ${p.logo ? `<img src="${p.logo}" style="width:36px;height:36px;border-radius:6px;object-fit:cover">` : `<div style="width:36px;height:36px;border-radius:6px;background:var(--card2)"></div>`}
           <span style="font-size:14px;flex:1">${esc(p.name)}</span>
         </div>`).join("")}
@@ -3238,6 +3438,48 @@ function toggleDetailMoreMenu(itemId) {
   }
 }
 
+// Samples the backdrop image via an offscreen canvas to get its actual average brightness,
+// so the sidebar/label text color can be chosen correctly regardless of whether a given
+// backdrop happens to be light or dark — a fixed color (all-white, or all-black) only ever
+// worked for one of the two cases. Accounts for the CSS brightness(0.75) filter already
+// applied to the visible backdrop, so the measurement matches what's actually shown, not
+// the raw source image. Falls back to null (caller defaults to white) if the image can't be
+// read — e.g. if TMDB's CDN ever doesn't allow canvas pixel access for a given request.
+function getImageBrightness(url, callback) {
+  const img = new Image();
+  img.crossOrigin = "Anonymous";
+  img.onload = () => {
+    try {
+      const size = 20;
+      const canvas = document.createElement("canvas");
+      canvas.width = size; canvas.height = size;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(img, 0, 0, size, size);
+      const data = ctx.getImageData(0, 0, size, size).data;
+      let total = 0;
+      for (let i = 0; i < data.length; i += 4) {
+        total += 0.299 * data[i] + 0.587 * data[i+1] + 0.114 * data[i+2];
+      }
+      callback((total / (data.length / 4)) * 0.75); // *0.75 to match the CSS filter already applied when displayed
+    } catch(e) { callback(null); }
+  };
+  img.onerror = () => callback(null);
+  img.src = url;
+}
+
+// Applies the chosen text color to every element that previously had a hardcoded white (or,
+// briefly, black) color when the backdrop is shown — shared so the brightness check only
+// needs to run once and every affected element updates together.
+function applyDetailBackdropTextColor(itemId, textColor) {
+  document.querySelectorAll("#sidebar .sb-item, #sidebar .sb-section-title, #sidebar .sb-sep").forEach(el => el.style.color = textColor);
+  // Unlike the others, techinfo-label's normal color comes from its own inline style
+  // (color:var(--muted)), not a CSS class rule — clearing it entirely would leave it with no
+  // color set at all rather than back to the correct muted gray, so "off" needs an explicit
+  // value here instead of just "".
+  document.querySelectorAll(`#detail-techinfo-${itemId} .techinfo-label`).forEach(el => el.style.color = textColor || "var(--muted)");
+  document.querySelectorAll(".detail-director-line, .detail-meta-item, .detail-page-overview").forEach(el => el.style.color = textColor);
+}
+
 function toggleDetailBackground(itemId, btn, skipSave) {
   const bg = document.getElementById(`detail-fullbg-${itemId}`);
   const overlay = document.getElementById(`detail-fullbg-overlay-${itemId}`);
@@ -3256,15 +3498,48 @@ function toggleDetailBackground(itemId, btn, skipSave) {
   // Blend the sidebar AND topbar into the backdrop too (Plex's own background doesn't have a
   // hard edge anywhere) — made transparent only while this is on, restored the moment it's
   // turned off or the detail page closes, so it never accidentally stays see-through
-  // elsewhere in the app.
-  if (sidebar) sidebar.style.background = isOn ? "" : "transparent";
-  if (topbar) topbar.style.background = isOn ? "" : "transparent";
-  // Sidebar labels and the Video/Ljud/Undertexter labels normally use a muted gray — against
-  // the busier backdrop image that's harder to read, so switch them to plain white while it's
-  // showing, back to normal the moment it's off.
-  document.querySelectorAll("#sidebar .sb-item, #sidebar .sb-section-title").forEach(el => el.style.color = isOn ? "" : "#fff");
-  document.querySelectorAll(`#detail-techinfo-${itemId} .techinfo-label`).forEach(el => el.style.color = isOn ? "var(--muted)" : "#fff");
-  document.querySelectorAll(".detail-director-line, .detail-meta-item, .detail-page-overview").forEach(el => el.style.color = isOn ? "" : "#fff");
+  // elsewhere in the app. Both the CSS variable AND border-color are set — the divider lines
+  // inside the sidebar are colored via var(--border) directly, but the sidebar's own outer
+  // border turned out not to be driven by that same variable, so only handling one or the
+  // other left something still visible either way.
+  if (sidebar) {
+    sidebar.style.background = isOn ? "" : "transparent";
+    sidebar.style.borderColor = isOn ? "" : "transparent";
+    if (isOn) sidebar.style.removeProperty("--border"); else sidebar.style.setProperty("--border", "transparent");
+  }
+  if (topbar) {
+    topbar.style.background = isOn ? "" : "transparent";
+    topbar.style.borderColor = isOn ? "" : "transparent";
+    if (isOn) topbar.style.removeProperty("--border"); else topbar.style.setProperty("--border", "transparent");
+  }
+  // Same treatment for the detail page's own content area — section headings like
+  // Skådespelare/Betyg och recensioner/Extramaterial have their own underline borders that
+  // are just as out of place against a backdrop as the sidebar's were, and use the same
+  // var(--border) mechanism.
+  const detailContentEl = document.getElementById(`sec-detail`);
+  if (detailContentEl) {
+    if (isOn) detailContentEl.style.removeProperty("--border"); else detailContentEl.style.setProperty("--border", "transparent");
+    document.querySelectorAll("#sec-detail .detail-section-title").forEach(el => el.style.borderColor = isOn ? "" : "transparent");
+  }
+  if (isOn) {
+    // Turning off — no brightness check needed, just restore each element's normal CSS color.
+    applyDetailBackdropTextColor(itemId, "");
+  } else {
+    // Turning on — figure out the backdrop's actual brightness before deciding text color,
+    // rather than assuming. Extracted straight from the div's own inline style so this
+    // doesn't need the backdrop URL passed in separately.
+    const urlMatch = bg.style.backgroundImage.match(/url\(["']?(.*?)["']?\)/);
+    if (urlMatch) {
+      getImageBrightness(urlMatch[1], (brightness) => {
+        // 130 splits roughly light/dark on a 0-255 scale; null (couldn't measure) defaults
+        // to white since dark backdrops have been the more common case so far.
+        const isLight = brightness !== null && brightness > 130;
+        applyDetailBackdropTextColor(itemId, isLight ? "#111" : "#fff");
+      });
+    } else {
+      applyDetailBackdropTextColor(itemId, "#fff");
+    }
+  }
   // Remembered across navigation/refresh — this was the one thing missing before: toggling it
   // on, then switching movies or hitting F5, silently reset back to off every time.
   if (!skipSave) localStorage.setItem("sv_detail_bg_shown", isOn ? "0" : "1");
@@ -3273,7 +3548,13 @@ function toggleDetailBackground(itemId, btn, skipSave) {
 async function openDetail(id, fromRouter) {
   document.querySelectorAll(".section").forEach(s => s.classList.remove("active"));
   document.getElementById("sidebar")?.style.removeProperty("background");
+  document.getElementById("sidebar")?.style.removeProperty("--border");
+  document.getElementById("sidebar")?.style.removeProperty("border-color");
   document.getElementById("topbar")?.style.removeProperty("background");
+  document.getElementById("topbar")?.style.removeProperty("--border");
+  document.getElementById("topbar")?.style.removeProperty("border-color");
+  document.getElementById("sec-detail")?.style.removeProperty("--border");
+  document.querySelectorAll("#sec-detail .detail-section-title").forEach(el => el.style.removeProperty("border-color"));
   const sec = document.getElementById("sec-detail") || (() => {
     const s = document.createElement("section");
     s.id = "sec-detail"; s.className = "section";
@@ -3357,7 +3638,8 @@ async function openDetail(id, fromRouter) {
               <h1 class="detail-page-title">${esc(item.title)}</h1>
               ${directors ? `<div class="detail-director-line" style="color:var(--muted);font-size:13px;margin-top:2px">${t("detail.directed_by")} ${directors}</div>` : ""}
               <div class="detail-meta-row" style="margin-top:8px">
-                ${item.rating ? `<span class="detail-rating">⭐ ${parseFloat(item.rating).toFixed(1)}</span>` : ""}
+                ${item.rating ? `<span class="detail-meta-item" style="background:#01b4e4;color:#fff;padding:2px 8px;border-radius:4px;font-weight:600;font-size:12px">⭐ TMDB ${parseFloat(item.rating).toFixed(1)}</span>` : ""}
+                <span id="extra-ratings-${item.id||id}"></span>
                 ${item.year ? `<span class="detail-meta-item">${item.year}</span>` : ""}
                 ${runtime ? `<span class="detail-meta-item">${runtime}</span>` : ""}
                 ${genresHtml ? `<span class="detail-meta-item">${esc(genresHtml)}</span>` : ""}
@@ -3394,6 +3676,7 @@ async function openDetail(id, fromRouter) {
         </div>
       </div>`;
     loadDetailTechInfo(item.id, item.title);
+    loadExtraRatings(`extra-ratings-${item.id}`, item.title, item.year);
     loadLikeStatus(item.id);
     if (item.backdrop_url && localStorage.getItem("sv_detail_bg_shown") === "1") {
       // Restore the person's last choice — was silently forgotten before, resetting to off
@@ -3407,27 +3690,32 @@ async function openDetail(id, fromRouter) {
         if (!el) return;
         window._wtwData = window._wtwData || {};
         window._wtwData[id] = data;
-        const all = [
-          ...(data.flatrate||[]).map(p => ({ ...p, kind: t("detail.streaming_label") })),
+        const flatrateList = (data.flatrate||[]).map(p => ({ ...p, kind: t("detail.streaming_label") }));
+        const payList = [
           ...(data.rent||[]).map(p => ({ ...p, kind: t("detail.rent") })),
           ...(data.buy||[]).map(p => ({ ...p, kind: t("detail.buy") }))
         ];
-        if (!all.length) { el.innerHTML = ""; return; }
-        const featured = all[0];
-        const rest = all.length - 1;
+        if (!flatrateList.length && !payList.length) { el.innerHTML = ""; return; }
+        const primaryList = flatrateList.length ? flatrateList : payList.slice(0, 1);
+        const extraCount = flatrateList.length ? payList.length : payList.length - 1;
+        // Whole card links out to the provider's own homepage where possible (curated list of
+        // common services), falling back to TMDB's aggregator link for anything not in that
+        // list, and finally just not being clickable if neither is available.
+        const providerCard = (p) => `
+            <div ${providerLink(p.name, data.link) ? `onclick="window.open('${providerLink(p.name, data.link)}','_blank')" style="cursor:pointer;` : `style="`}background:var(--card2);border-radius:8px;padding:10px 14px;display:flex;align-items:center;gap:10px;min-width:160px">
+              ${p.logo ? `<img src="${p.logo}" style="width:36px;height:36px;border-radius:6px;object-fit:cover">` : `<div style="width:36px;height:36px;border-radius:6px;background:var(--border)"></div>`}
+              <div>
+                <div style="font-size:13px;font-weight:600">${esc(p.name)}</div>
+                <div style="font-size:11px;color:var(--muted)">${esc(p.kind)}</div>
+              </div>
+            </div>`;
         el.innerHTML = `
           <div style="font-size:11px;color:var(--muted);margin-bottom:4px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px">${t("detail.more_ways_to_watch")}</div>
           <div style="display:flex;gap:10px;flex-wrap:wrap">
-            <div style="background:var(--card2);border-radius:8px;padding:10px 14px;display:flex;align-items:center;gap:10px;min-width:160px">
-              ${featured.logo ? `<img src="${featured.logo}" style="width:36px;height:36px;border-radius:6px;object-fit:cover">` : `<div style="width:36px;height:36px;border-radius:6px;background:var(--border)"></div>`}
-              <div>
-                <div style="font-size:13px;font-weight:600">${esc(featured.name)}</div>
-                <div style="font-size:11px;color:var(--muted)">${esc(featured.kind)}</div>
-              </div>
-            </div>
-            ${rest > 0 ? `<div onclick="openWatchProvidersModal('${id}')" style="background:var(--card2);border-radius:8px;padding:10px 14px;display:flex;align-items:center;gap:10px;cursor:pointer;min-width:120px">
+            ${primaryList.map(providerCard).join("")}
+            ${extraCount > 0 ? `<div onclick="openWatchProvidersModal('${id}')" style="background:var(--card2);border-radius:8px;padding:10px 14px;display:flex;align-items:center;gap:10px;cursor:pointer;min-width:120px">
               <span style="font-size:20px">☰</span>
-              <span style="font-size:13px;color:var(--muted)">+${rest} mer</span>
+              <span style="font-size:13px;color:var(--muted)">${t("detail.more_count").replace("{n}", extraCount)}</span>
             </div>` : ""}
           </div>`;
       }).catch(()=>{});
@@ -3504,22 +3792,29 @@ async function openPersonDetail(tmdbPersonId, fromRouter) {
     if (!fromRouter) navigateToPath(`/personer/${clientSlugify(data.name)}-${tmdbPersonId}`, data.name + " - StreamVault");
     const inLib = data.credits.filter(c => c.in_library);
     const notLib = data.credits.filter(c => !c.in_library);
+    const notLibMovies = notLib.filter(c => c.media_type !== "tv");
+    const notLibShows = notLib.filter(c => c.media_type === "tv");
+    // TMDB's known_for_department always comes back in English ("Acting", "Directing", ...)
+    // — translated via a fixed lookup since it's one of a known, small set of values, same
+    // idea as translating a status code rather than freeform text.
+    const DEPT_KEYS = { "Acting":"person.dept_acting", "Directing":"person.dept_directing", "Writing":"person.dept_writing", "Production":"person.dept_production", "Sound":"person.dept_sound", "Camera":"person.dept_camera", "Editing":"person.dept_editing", "Art":"person.dept_art", "Costume & Make-Up":"person.dept_costume", "Crew":"person.dept_crew" };
+    const knownForLabel = data.known_for ? t(DEPT_KEYS[data.known_for] || data.known_for) : "";
     sec.innerHTML = `
       <div class="detail-page">
         <div class="person-hero" style="padding-top:20px">
-          <button onclick="history.back()" style="background:var(--card2, #1a1a28);color:var(--text, #fff);border:1px solid var(--border, #333);padding:8px 16px;border-radius:8px;cursor:pointer;font-size:14px;display:inline-block;margin-bottom:20px">← Tillbaka</button>
+          <button onclick="history.back()" style="background:var(--card2, #1a1a28);color:var(--text, #fff);border:1px solid var(--border, #333);padding:8px 16px;border-radius:8px;cursor:pointer;font-size:14px;display:inline-block;margin-bottom:20px">← ${t("detail.back")}</button>
           <div class="person-info">
             ${data.profile_url ? `<img class="person-photo" src="${data.profile_url}" alt="">` : `<div class="person-photo-ph">👤</div>`}
             <div>
               <h1 class="detail-page-title">${esc(data.name)}</h1>
-              <div class="detail-meta-row">
-                ${data.known_for ? `<span class="detail-meta-item">${esc(data.known_for)}</span>` : ""}
-                ${data.birthday ? `<span class="detail-meta-item">Född ${data.birthday}</span>` : ""}
+              <div class="detail-meta-row" style="display:flex;gap:10px;flex-wrap:wrap">
+                ${knownForLabel ? `<span class="detail-meta-item">${esc(knownForLabel)}</span>` : ""}
+                ${data.birthday ? `<span class="detail-meta-item">${t("person.born")} ${data.birthday}</span>` : ""}
               </div>
               ${data.biography ? (data.biography.length > 400 ? `
               <p class="person-bio">
                 <span id="bio-short">${esc(truncateAtWord(data.biography, 400))}</span><span id="bio-full" style="display:none">${esc(data.biography)}</span>
-                <a href="#" onclick="event.preventDefault(); toggleBio()" id="bio-toggle-link" style="color:var(--accent);cursor:pointer;margin-left:4px;white-space:nowrap">Visa mer</a>
+                <a href="#" onclick="event.preventDefault(); toggleBio()" id="bio-toggle-link" style="color:var(--accent);cursor:pointer;margin-left:4px;white-space:nowrap">${t("person.show_more")}</a>
               </p>` : `<p class="person-bio">${esc(data.biography)}</p>`) : ""}
             </div>
           </div>
@@ -3527,7 +3822,7 @@ async function openPersonDetail(tmdbPersonId, fromRouter) {
         <div class="detail-content">
           ${inLib.length ? `
           <div class="detail-section">
-            <h3 class="detail-section-title">I ditt bibliotek</h3>
+            <h3 class="detail-section-title">${t("person.in_your_library")}</h3>
             <div class="cast-scroll">
               ${[...new Map(inLib.map(m => [m.tmdb_id, m])).values()].map(m => `
                 <div class="lib-film-card" onclick="findAndOpenByTmdb(${m.tmdb_id})">
@@ -3537,12 +3832,24 @@ async function openPersonDetail(tmdbPersonId, fromRouter) {
                 </div>`).join("")}
             </div>
           </div>` : ""}
-          ${notLib.length ? `
+          ${notLibMovies.length ? `
           <div class="detail-section">
-            <h3 class="detail-section-title">Mer från ${esc(data.name)}</h3>
+            <h3 class="detail-section-title">${t("person.movies_by").replace("{name}", esc(data.name))}</h3>
             <div class="cast-scroll">
-              ${notLib.slice(0,15).map(m => `
-                <div class="cast-card" style="cursor:default;opacity:0.6">
+              ${notLibMovies.slice(0,15).map(m => `
+                <div class="cast-card" style="opacity:0.75" onclick='openTmdbDetail(${m.tmdb_id}, "movie")'>
+                  <img class="cast-photo" src="${m.poster_url}" alt="" loading="lazy">
+                  <div class="cast-name">${esc(m.title)}</div>
+                  <div class="cast-char">${m.year||""}</div>
+                </div>`).join("")}
+            </div>
+          </div>` : ""}
+          ${notLibShows.length ? `
+          <div class="detail-section">
+            <h3 class="detail-section-title">${t("person.shows_by").replace("{name}", esc(data.name))}</h3>
+            <div class="cast-scroll">
+              ${notLibShows.slice(0,15).map(m => `
+                <div class="cast-card" style="opacity:0.75" onclick='openTmdbDetail(${m.tmdb_id}, "tv")'>
                   <img class="cast-photo" src="${m.poster_url}" alt="" loading="lazy">
                   <div class="cast-name">${esc(m.title)}</div>
                   <div class="cast-char">${m.year||""}</div>
@@ -7127,6 +7434,10 @@ async function loadSettings() {
         </div>
         <div style="margin:-4px 0 12px"><button class="btn-fav" style="font-size:12px" onclick="testTmdbConnection()">🔍 Testa TMDB-anslutning</button></div>
         <div class="setting-row">
+          <div><div class="setting-label">OMDb API-nyckel</div><div class="setting-desc">IMDb, Rotten Tomatoes och Metacritic-betyg</div></div>
+          <input class="s-input" type="password" id="s-omdb" value="${esc(cfg.omdb_api_key || "")}" placeholder="Ej angiven" autocomplete="off"/>
+        </div>
+        <div class="setting-row">
           <div><div class="setting-label">OpenSubtitles API-nyckel</div><div class="setting-desc">Automatiska undertexter</div></div>
           <input class="s-input" type="password" id="s-opensub" value="${esc(cfg.opensubtitles_api_key || "")}" placeholder="Ej angiven" autocomplete="off"/>
         </div>
@@ -7571,6 +7882,7 @@ async function saveApiKeys() {
     await API.patch("/config", {
       server_name: document.getElementById("s-server-name")?.value?.trim() || "StreamVault",
       tmdb_api_key: document.getElementById("s-tmdb").value.trim(),
+      omdb_api_key: document.getElementById("s-omdb").value.trim(),
       opensubtitles_api_key: document.getElementById("s-opensub").value.trim(),
       lastfm_api_key: document.getElementById("s-lastfm")?.value?.trim() || "",
       spotify_client_id: document.getElementById("s-spotify-id")?.value?.trim() || "",

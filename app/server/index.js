@@ -438,6 +438,7 @@ try {
   const keys = require("./keys.js");
   if (!config.tmdb_api_key && keys.TMDB_KEY) config.tmdb_api_key = keys.TMDB_KEY;
   if (!config.opensubtitles_api_key && keys.OPENSUBTITLES_KEY) config.opensubtitles_api_key = keys.OPENSUBTITLES_KEY;
+  if (!config.omdb_api_key && keys.OMDB_KEY) config.omdb_api_key = keys.OMDB_KEY;
   if (!config.lastfm_api_key && keys.LASTFM_KEY) config.lastfm_api_key = keys.LASTFM_KEY;
   if (!config.spotify_client_id && keys.SPOTIFY_CLIENT_ID) config.spotify_client_id = keys.SPOTIFY_CLIENT_ID;
   if (!config.spotify_client_secret && keys.SPOTIFY_CLIENT_SECRET) config.spotify_client_secret = keys.SPOTIFY_CLIENT_SECRET;
@@ -560,6 +561,14 @@ setInterval(sampleSystemStats, SYSTEM_STATS_INTERVAL_MS);
 sampleSystemStats(); // seed the first sample immediately rather than waiting 3s for anything to show
 
 const app = express();
+// Caddy now sits in front of this as a reverse proxy (for HTTPS/external access), running
+// on the same machine and connecting via localhost. This tells Express to trust the
+// X-Forwarded-For header specifically from loopback — not from anywhere else — so
+// express-rate-limit (and anything else relying on req.ip) sees each external visitor's
+// real IP instead of treating every request as coming from Caddy itself. Scoped to
+// "loopback" rather than trusting it universally, since blindly trusting the header would
+// let anyone spoof their IP if the server were ever reachable by another path.
+app.set("trust proxy", "loopback");
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: "10mb" }));
 app.use((req, res, next) => { res.setHeader("X-Content-Type-Options","nosniff"); res.setHeader("X-Frame-Options","SAMEORIGIN"); next(); });
@@ -4178,7 +4187,12 @@ app.get("/api/watch-providers/:tmdb_id", requireAuth, async (req, res) => {
   res.json({
     flatrate: filterIfPreferred(withLogo(region.flatrate)),
     rent: filterIfPreferred(withLogo(region.rent)),
-    buy: filterIfPreferred(withLogo(region.buy))
+    buy: filterIfPreferred(withLogo(region.buy)),
+    // TMDB's own aggregator page for this specific title — the actual per-provider deep
+    // links (e.g. straight to this movie's page on Netflix) require JustWatch's paid
+    // affiliate API, which we don't have; this is the free alternative that still gets
+    // someone one click closer instead of nothing at all.
+    link: region.link || null
   });
 });
 
@@ -6003,7 +6017,7 @@ app.get("/api/config", requireAdmin, (req, res) => {
 });
 
 app.patch("/api/config", requireAdmin, (req, res) => {
-  ["tmdb_api_key","opensubtitles_api_key","lastfm_api_key","spotify_client_id","spotify_client_secret","port","language","update_channel","server_name","trailer_stream_enabled","iptv_enabled","watched_threshold_pct","continue_watching_max_weeks","continue_watching_max_items","periodic_scan_enabled","periodic_scan_interval_hours","scan_low_priority"].forEach(k=>{if(req.body[k]!==undefined)config[k]=req.body[k];});
+  ["tmdb_api_key","opensubtitles_api_key","omdb_api_key","lastfm_api_key","spotify_client_id","spotify_client_secret","port","language","update_channel","server_name","trailer_stream_enabled","iptv_enabled","watched_threshold_pct","continue_watching_max_weeks","continue_watching_max_items","periodic_scan_enabled","periodic_scan_interval_hours","scan_low_priority"].forEach(k=>{if(req.body[k]!==undefined)config[k]=req.body[k];});
   fs.writeFileSync(CONFIG_PATH,JSON.stringify(config,null,2));
   res.json({ok:true});
 });
@@ -6726,6 +6740,30 @@ app.get("/api/collections/:collection_id/full", requireAuth, async (req, res) =>
 });
 
 // ── COLLECTIONS ──────────────────────────────────────────────────────────────
+// Collection names have the same scan-time-language problem overview text had — stored once
+// during scanning, always in the server's own default language, never re-fetched per viewing
+// user. Cached per collection+language so this stays fast on repeat visits, and only touches
+// TMDB at all for users whose language isn't Swedish.
+const _collectionNameCache = new Map(); // `${collection_id}:${lang}` -> name
+async function translatedCollectionName(collectionId, fallbackName, userLang) {
+  if (!userLang || userLang.startsWith("sv")) return fallbackName;
+  const cacheKey = `${collectionId}:${userLang}`;
+  if (_collectionNameCache.has(cacheKey)) return _collectionNameCache.get(cacheKey);
+  try {
+    const data = await tmdbFetch(`/collection/${collectionId}`, userLang);
+    let name = data?.name;
+    // Same original-language leak issue as overview text — if the requested language isn't
+    // genuinely translated, fall back to English rather than trusting whatever came back.
+    if (!name || name === fallbackName) {
+      const enData = await tmdbFetch(`/collection/${collectionId}`, "en-US");
+      if (enData?.name) name = enData.name;
+    }
+    name = name || fallbackName;
+    _collectionNameCache.set(cacheKey, name);
+    return name;
+  } catch { return fallbackName; }
+}
+
 app.get("/api/collections", requireAuth, async (req, res) => {
   try {
     const movies = await dbFind(db.media, { type: "movie", collection_id: { $exists: true } });
@@ -6741,14 +6779,57 @@ app.get("/api/collections", requireAuth, async (req, res) => {
       collectionsMap[id].movies.push({ ...m, file_path: undefined, _id: undefined, id: m._id });
     });
     // Only return collections with 2+ movies
-    const collections = Object.values(collectionsMap)
-      .filter(c => c.movies.length >= 2)
-      .sort((a,b) => (a.name||"").localeCompare(b.name||""));
+    let collections = Object.values(collectionsMap).filter(c => c.movies.length >= 2);
+    const userLang = req.user?.language || null;
+    if (userLang && !userLang.startsWith("sv")) {
+      collections = await Promise.all(collections.map(async c => ({
+        ...c, name: await translatedCollectionName(c.id, c.name, userLang)
+      })));
+    }
+    collections.sort((a,b) => (a.name||"").localeCompare(b.name||""));
     res.json(collections);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── MEDIA DETAILS (cast, crew, genres) ───────────────────────────────────────
+// IMDb, Rotten Tomatoes, and Metacritic scores — TMDB doesn't have these itself, but OMDb
+// wraps all three in a single free call, matched by title+year rather than needing an IMDb
+// ID lookup first. Cached indefinitely per title+year in memory (these scores essentially
+// never change once a title has settled), so this only costs a real API call the first time
+// any given title is looked up, not on every page view.
+const _omdbCache = new Map(); // `${title}:${year}` -> ratings object (or null if not found)
+app.get("/api/ratings", requireAuth, async (req, res) => {
+  if (!config.omdb_api_key) return res.json({});
+  const { title, year } = req.query;
+  if (!title) return res.status(400).json({ error: "Saknar titel" });
+  const cacheKey = `${title.toLowerCase()}:${year||""}`;
+  if (_omdbCache.has(cacheKey)) return res.json(_omdbCache.get(cacheKey) || {});
+  try {
+    const params = new URLSearchParams({ t: title, apikey: config.omdb_api_key });
+    if (year) params.set("y", year);
+    const url = `https://www.omdbapi.com/?${params.toString()}`;
+    const resp = await new Promise((resolve, reject) => {
+      https.get(url, r => {
+        let body = "";
+        r.on("data", c => body += c);
+        r.on("end", () => { try { resolve(JSON.parse(body)); } catch(e) { reject(e); } });
+      }).on("error", reject);
+    });
+    if (resp.Response === "False") { _omdbCache.set(cacheKey, null); return res.json({}); }
+    const ratings = {
+      imdb: resp.imdbRating && resp.imdbRating !== "N/A" ? parseFloat(resp.imdbRating) : null,
+      imdb_votes: resp.imdbVotes && resp.imdbVotes !== "N/A" ? resp.imdbVotes : null,
+      imdb_id: resp.imdbID || null,
+      rotten_tomatoes: null,
+      metacritic: resp.Metascore && resp.Metascore !== "N/A" ? parseInt(resp.Metascore) : null
+    };
+    const rt = (resp.Ratings||[]).find(r => r.Source === "Rotten Tomatoes");
+    if (rt) ratings.rotten_tomatoes = parseInt(rt.Value); // comes back as "87%" — parseInt stops at the %, giving just the number
+    _omdbCache.set(cacheKey, ratings);
+    res.json(ratings);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get("/api/media/:id/details", requireAuth, async (req, res) => {
   try {
     const item = await dbFindOne(db.media, { _id: req.params.id });
@@ -6939,12 +7020,24 @@ app.get("/api/person/:tmdb_id", requireAuth, async (req, res) => {
     }
     const allCast = [...(data.movie_credits?.cast||[]), ...(data.combined_credits?.cast||[])];
     const seenIds = new Set();
-    const uniqueCast = allCast.filter(m => { if (seenIds.has(m.id)) return false; seenIds.add(m.id); return true; });
+    // Filter out talk show (10767) and news (10763) appearances — these are guest-appearance
+    // credits TMDB tracks like any other role, but they're rarely what someone means when
+    // browsing "what else has this person been in".
+    const EXCLUDED_GENRES = new Set([10767, 10763]);
+    const uniqueCast = allCast.filter(m => {
+      if (seenIds.has(m.id)) return false;
+      if ((m.genre_ids||[]).some(g => EXCLUDED_GENRES.has(g))) return false;
+      seenIds.add(m.id);
+      return true;
+    });
     const credits = uniqueCast.filter(m => m.poster_path).sort((a,b) => (b.popularity||0)-(a.popularity||0)).slice(0,100).map(m => {
       const tmdbTitle = m.title || m.name;
       const localTitle = tmdbToLocalTitle.get(String(m.id));
       const in_library = tmdbToLocalTitle.has(String(m.id)) && titlesSimilar(tmdbTitle, localTitle||"");
-      return { tmdb_id: m.id, title: tmdbTitle, character: m.character, poster_url: `https://image.tmdb.org/t/p/w342${m.poster_path}`, year: (m.release_date||m.first_air_date||"").substring(0,4), in_library };
+      // combined_credits includes both movies and TV, and TMDB tags each with media_type —
+      // movie_credits items don't have that field at all, so they're always a movie.
+      const media_type = m.media_type || (m.name && !m.title ? "tv" : "movie");
+      return { tmdb_id: m.id, title: tmdbTitle, character: m.character, poster_url: `https://image.tmdb.org/t/p/w342${m.poster_path}`, year: (m.release_date||m.first_air_date||"").substring(0,4), in_library, media_type };
     });
     res.json({
       name: data.name, biography: data.biography, birthday: data.birthday,
