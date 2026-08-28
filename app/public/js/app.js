@@ -468,6 +468,10 @@ const I18N = {
     "person.dept_art": "Scenografi",
     "person.dept_costume": "Kostym & Smink",
     "person.dept_crew": "Filmteam",
+    "iptv.now": "Nu",
+    "iptv.next": "Nästa",
+    "iptv.full_guide": "Visa hela tablån",
+    "iptv.no_guide_data": "Ingen programinformation tillgänglig för denna kanal",
     "collections.in_library_heading": "I ditt bibliotek ({count})",
     "collections.missing_heading": "Saknas i ditt bibliotek ({count})",
     "collections.x_of_y_in_library": "{have} av {total} filmer i ditt bibliotek",
@@ -642,6 +646,10 @@ const I18N = {
     "person.dept_art": "Art",
     "person.dept_costume": "Costume & Make-Up",
     "person.dept_crew": "Crew",
+    "iptv.now": "Now",
+    "iptv.next": "Next",
+    "iptv.full_guide": "Show full guide",
+    "iptv.no_guide_data": "No programme information available for this channel",
     "collections.in_library_heading": "In Your Library ({count})",
     "collections.missing_heading": "Missing From Your Library ({count})",
     "collections.x_of_y_in_library": "{have} of {total} movies in your library",
@@ -818,6 +826,10 @@ const I18N = {
     "person.dept_art": "Lavastus",
     "person.dept_costume": "Puvustus & Maskeeraus",
     "person.dept_crew": "Työryhmä",
+    "iptv.now": "Nyt",
+    "iptv.next": "Seuraavaksi",
+    "iptv.full_guide": "Näytä koko ohjelmaopas",
+    "iptv.no_guide_data": "Ohjelmatietoja ei saatavilla tälle kanavalle",
     "collections.in_library_heading": "Kirjastossasi ({count})",
     "collections.missing_heading": "Puuttuu kirjastostasi ({count})",
     "collections.x_of_y_in_library": "{have}/{total} elokuvaa kirjastossasi",
@@ -1310,20 +1322,18 @@ async function openIptvPlaylist(playlistId, name, fromRouter) {
         </div>
         <h2 style="margin-bottom:14px">⭐ ${esc(name)}</h2>
         ${isEmpty ? `<p style="color:var(--muted)">Listan är tom.</p>` : `
-        <div style="display:flex;flex-direction:column;gap:6px;max-width:500px">
+        <div style="display:flex;flex-direction:column;gap:6px;max-width:500px;margin-bottom:16px">
           ${data.countryEntries.map(c => `
             <div class="s-row" style="cursor:pointer" onclick='openIptvPlaylistCountry("${playlistId}", "${esc(c.name).replace(/"/g,"&quot;")}", ${c.isCountry}, "${esc(name).replace(/"/g,"&quot;")}")'>
               <span>🌍 ${esc(c.name)}</span>
               <span style="color:var(--muted);font-size:13px">${c.count} kanaler</span>
             </div>`).join("")}
-          ${data.channels.map(c => `
-            <div class="s-row" style="cursor:pointer" onclick='playIptvChannelInPlayer("${esc(c.name).replace(/"/g,"&quot;")}", "${c.url.replace(/"/g,"&quot;")}")'>
-              ${c.logo ? `<img src="${c.logo}" style="width:32px;height:32px;object-fit:contain;border-radius:4px;margin-right:10px" onerror="this.style.display='none'">` : `<span style="margin-right:10px">${c.type === "movie" ? "🎬" : c.type === "series" ? "🎞️" : "📺"}</span>`}
-              <span style="flex:1">${esc(c.name)}</span>
-              <button onclick='event.stopPropagation(); openSaveToPlaylistPicker({channelId:"${c.id}"})' title="Spara till..." style="background:none;border:none;color:var(--accent);font-size:16px;cursor:pointer">⭐</button>
-            </div>`).join("")}
+        </div>
+        <div class="media-grid">
+          ${data.channels.map(c => buildIptvChannelCard(c, { showSaveButton: true })).join("")}
         </div>`}
       </div>`;
+    loadEpgForChannelList(data.channels);
   } catch(e) {
     sec.innerHTML = `<p style="color:var(--danger)">Fel: ${esc(e.message)}</p>`;
   }
@@ -1343,14 +1353,11 @@ async function openIptvPlaylistCountry(playlistId, country, isCountry, playlistN
       <div class="grid-wrap">
         <button onclick="history.back()" style="background:var(--card2, #1a1a28);color:var(--text, #fff);border:1px solid var(--border, #333);padding:8px 16px;border-radius:8px;cursor:pointer;font-size:14px;display:inline-block;margin-bottom:14px">← Tillbaka</button>
         <h2 style="margin-bottom:14px">🌍 ${esc(country)}</h2>
-        <div style="display:flex;flex-direction:column;gap:6px;max-width:500px">
-          ${data.channels.map(c => `
-            <div class="s-row" style="cursor:pointer" onclick='playIptvChannelInPlayer("${esc(c.name).replace(/"/g,"&quot;")}", "${c.url.replace(/"/g,"&quot;")}")'>
-              ${c.logo ? `<img src="${c.logo}" style="width:32px;height:32px;object-fit:contain;border-radius:4px;margin-right:10px" onerror="this.style.display='none'">` : `<span style="margin-right:10px">📺</span>`}
-              <span style="flex:1">${esc(c.name)}</span>
-            </div>`).join("")}
+        <div class="media-grid">
+          ${data.channels.map(c => buildIptvChannelCard(c)).join("")}
         </div>
       </div>`;
+    loadEpgForChannelList(data.channels);
   } catch(e) {
     sec.innerHTML = `<p style="color:var(--danger)">Fel: ${esc(e.message)}</p>`;
   }
@@ -1379,15 +1386,11 @@ async function openIptvGroup(groupName, type, fromRouter) {
       <div class="grid-wrap">
         <button onclick="history.back()" style="background:var(--card2, #1a1a28);color:var(--text, #fff);border:1px solid var(--border, #333);padding:8px 16px;border-radius:8px;cursor:pointer;font-size:14px;display:inline-block;margin-bottom:14px">← Tillbaka</button>
         <h2 style="margin-bottom:14px">${esc(groupName)}</h2>
-        <div style="display:flex;flex-direction:column;gap:6px;max-width:500px">
-          ${data.channels.map(c => `
-            <div class="s-row" style="cursor:pointer" onclick='playIptvChannelInPlayer("${esc(c.name).replace(/"/g,"&quot;")}", "${c.url.replace(/"/g,"&quot;")}")'>
-              <button onclick='event.stopPropagation(); openSaveToPlaylistPicker({channelId:"${c.id}"})' title="Spara till..." style="background:none;border:none;color:${c.inAnyPlaylist ? "var(--accent)" : "var(--muted)"};font-size:16px;cursor:pointer;margin-right:10px">${c.inAnyPlaylist ? "⭐" : "💾"}</button>
-              ${c.logo ? `<img src="${c.logo}" style="width:32px;height:32px;object-fit:contain;border-radius:4px;margin-right:10px" onerror="this.style.display='none'">` : `<span style="margin-right:10px">${type === "movie" ? "🎬" : type === "series" ? "🎞️" : "📺"}</span>`}
-              <span style="flex:1">${esc(c.name)}</span>
-            </div>`).join("")}
+        <div class="media-grid">
+          ${data.channels.map(c => buildIptvChannelCard(c, { showSaveButton: true })).join("")}
         </div>
       </div>`;
+    loadEpgForChannelList(data.channels);
   } catch(e) {
     sec.innerHTML = `<p style="color:var(--danger)">Fel: ${esc(e.message)}</p>`;
   }
@@ -1424,6 +1427,130 @@ async function saveIptvEnabledToggle(enabled) {
   }
 }
 
+// Shared between all three channel-listing views — only live channels with a tvg_id can
+// show EPG info at all (VOD movies/series aren't scheduled programming, and channels the
+// provider didn't tag with an ID have nothing to match against).
+// Shared between all three channel-listing views — a small card per channel (logo, name,
+// EPG line) laid out in a grid, matching how the rest of the app shows posters side by side
+// instead of a long vertical list, which stopped being practical once lists ran into the
+// hundreds of channels.
+function buildIptvChannelCard(c, opts = {}) {
+  const hasEpg = c.type !== "movie" && c.type !== "series" && c.tvg_id;
+  const epgLine = hasEpg ? `<div id="epg-${c.id}" class="mcard-meta" style="font-size:11px"></div>` : "";
+  const fallbackIcon = c.type === "movie" ? "🎬" : c.type === "series" ? "🎞️" : "📺";
+  const saveBtn = opts.showSaveButton
+    ? `<button onclick='event.stopPropagation(); openSaveToPlaylistPicker({channelId:"${c.id}"})' title="Spara till..." style="position:absolute;top:6px;right:6px;background:rgba(0,0,0,0.6);border:none;border-radius:6px;color:${c.inAnyPlaylist ? "var(--accent)" : "#fff"};font-size:14px;cursor:pointer;padding:4px 6px">${c.inAnyPlaylist ? "⭐" : "💾"}</button>`
+    : "";
+  const guideBtn = hasEpg
+    ? `<button onclick='event.stopPropagation(); openChannelGuide("${c.tvg_id}", "${esc(c.name).replace(/"/g,"&quot;")}")' title="${t("iptv.full_guide")}" style="position:absolute;top:6px;left:6px;background:rgba(0,0,0,0.6);border:none;border-radius:6px;color:#fff;font-size:14px;cursor:pointer;padding:4px 6px">📅</button>`
+    : "";
+  return `
+    <div class="mcard" style="cursor:pointer" onclick='playIptvChannelInPlayer("${esc(c.name).replace(/"/g,"&quot;")}", "${c.url.replace(/"/g,"&quot;")}", ${c.tvg_id ? `"${c.tvg_id}"` : "null"})'>
+      <div style="position:relative;aspect-ratio:16/9;background:var(--card2);border-radius:8px;display:flex;align-items:center;justify-content:center;overflow:hidden">
+        ${c.logo ? `<img src="${c.logo}" style="max-width:80%;max-height:80%;object-fit:contain" onerror="this.style.display='none'">` : `<span style="font-size:28px">${fallbackIcon}</span>`}
+        ${guideBtn}
+        ${saveBtn}
+      </div>
+      <div class="mcard-title" style="font-size:13px;margin-top:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.name)}</div>
+      ${epgLine}
+    </div>`;
+}
+
+// Full upcoming schedule for one channel — the card itself only shows now/next to stay
+// compact, this is the "see everything coming up" view for when that's not enough.
+// In-player split view — same schedule data as the modal guide, but laid out as a permanent
+// side panel instead of an overlay. Built this way specifically because popups/overlays are
+// unreliable on some devices (smart TVs, in-car browsers), where a plain layout change is
+// far more likely to just work.
+function closeInPlayerEpg() {
+  const panel = document.getElementById("player-epg-panel");
+  const video = document.getElementById("main-video");
+  if (panel) panel.style.display = "none";
+  if (video) { video.style.width = ""; video.style.position = ""; video.style.left = ""; }
+  const btn = document.getElementById("ctrl-epg");
+  if (btn) btn.style.background = "";
+}
+async function toggleInPlayerEpg() {
+  const panel = document.getElementById("player-epg-panel");
+  const video = document.getElementById("main-video");
+  const btn = document.getElementById("ctrl-epg");
+  if (!panel || !video) return;
+  const isOpen = panel.style.display !== "none";
+  if (isOpen) { closeInPlayerEpg(); return; }
+  // Video shrinks and shifts right to make room — matches how the panel itself is
+  // positioned (left 35%), rather than overlapping it.
+  video.style.width = "65%";
+  video.style.position = "relative";
+  video.style.left = "35%";
+  panel.style.display = "block";
+  if (btn) btn.style.background = "var(--accent, #e05724)";
+  const content = document.getElementById("player-epg-content");
+  const tvgId = window._currentIptvTvgId;
+  if (!tvgId) { content.innerHTML = `<p style="color:var(--muted)">${t("iptv.no_guide_data")}</p>`; return; }
+  content.innerHTML = `<div class="spinner-wrap" style="height:120px"><div class="spinner"></div></div>`;
+  try {
+    const programmes = await API.get(`/iptv/epg/${encodeURIComponent(tvgId)}`);
+    content.innerHTML = renderScheduleList(programmes);
+  } catch(e) {
+    content.innerHTML = `<p style="color:var(--danger)">${e.message}</p>`;
+  }
+}
+// Shared between the in-player panel and the standalone modal guide.
+function renderScheduleList(programmes) {
+  if (!programmes.length) return `<p style="color:var(--muted);text-align:center;padding:20px 0">${t("iptv.no_guide_data")}</p>`;
+  const now = Date.now();
+  return programmes.map(p => {
+    const isNow = p.start <= now && (!p.stop || p.stop > now);
+    const time = new Date(p.start).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+    return `
+      <div style="display:flex;gap:12px;padding:8px 6px;border-radius:6px;${isNow ? "background:var(--accent);color:#fff" : ""}">
+        <span style="font-size:13px;font-weight:600;min-width:44px">${time}</span>
+        <span style="font-size:13px;flex:1">${esc(p.title)}</span>
+        ${isNow ? `<span style="font-size:11px;text-transform:uppercase;font-weight:700">${t("iptv.now")}</span>` : ""}
+      </div>`;
+  }).join("");
+}
+
+async function openChannelGuide(tvgId, channelName) {
+  const overlay = document.createElement("div");
+  overlay.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:10000;display:flex;align-items:center;justify-content:center";
+  overlay.innerHTML = `
+    <div style="background:var(--card2);border:1px solid var(--border);border-radius:12px;padding:20px;max-width:420px;width:90%;max-height:80vh;display:flex;flex-direction:column">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+        <h3 style="margin:0;font-size:16px">${esc(channelName)}</h3>
+        <button id="guide-close-btn" style="background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer;line-height:1">✕</button>
+      </div>
+      <div id="guide-list" style="overflow-y:auto;flex:1;display:flex;flex-direction:column;gap:2px">
+        <div class="spinner-wrap" style="height:120px"><div class="spinner"></div></div>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  overlay.addEventListener("click", (e) => { if (e.target === overlay) overlay.remove(); });
+  overlay.querySelector("#guide-close-btn").onclick = () => overlay.remove();
+  try {
+    const programmes = await API.get(`/iptv/epg/${encodeURIComponent(tvgId)}`);
+    overlay.querySelector("#guide-list").innerHTML = renderScheduleList(programmes);
+  } catch(e) {
+    overlay.querySelector("#guide-list").innerHTML = `<p style="color:var(--danger);text-align:center;padding:20px 0">${e.message}</p>`;
+  }
+}
+async function loadEpgForChannelList(channels) {
+  const withTvgId = channels.filter(c => c.tvg_id && c.type !== "movie" && c.type !== "series");
+  if (!withTvgId.length) return;
+  try {
+    const data = await API.get("/iptv/epg/now-next");
+    withTvgId.forEach(c => {
+      const el = document.getElementById(`epg-${c.id}`);
+      const info = data[c.tvg_id];
+      if (!el || !info?.now) return;
+      // Kept short since this now lives in a narrow card rather than a full-width row — the
+      // full now+next detail still goes in the title attribute for anyone who hovers/long-presses.
+      el.textContent = `▸ ${info.now.title}`;
+      el.title = info.next ? `${t("iptv.now")}: ${info.now.title}\n${t("iptv.next")}: ${info.next.title}` : `${t("iptv.now")}: ${info.now.title}`;
+    });
+  } catch(e) {}
+}
+
 async function parseIptvPlaylist() {
   const url = document.getElementById("iptv-url-input")?.value.trim();
   const statusEl = document.getElementById("iptv-status");
@@ -1433,6 +1560,21 @@ async function parseIptvPlaylist() {
     const data = await API.post("/iptv/parse", { url });
     if (statusEl) statusEl.textContent = `✓ ${data.count} kanaler hittades och sparades`;
     toast(`✓ ${data.count} kanaler tolkade`, "success");
+  } catch(e) {
+    if (statusEl) statusEl.textContent = "";
+    toast("Fel: " + e.message, "error");
+  }
+}
+
+async function setupEpg() {
+  const url = document.getElementById("epg-url-input")?.value.trim();
+  const statusEl = document.getElementById("epg-status");
+  if (!url) { toast("Ange en adress först", "info"); return; }
+  if (statusEl) statusEl.textContent = "⏳ Hämtar och tolkar (kan ta en stund för stora filer)...";
+  try {
+    const data = await API.post("/iptv/epg/setup", { url });
+    if (statusEl) statusEl.textContent = `✓ ${data.count} program hittades och sparades`;
+    toast(`✓ ${data.count} program tolkade`, "success");
   } catch(e) {
     if (statusEl) statusEl.textContent = "";
     toast("Fel: " + e.message, "error");
@@ -4203,7 +4345,7 @@ window._iptvPlaying = false; // lets closePlayer() know to skip movie-specific c
 // same controls bar) instead of a separate floating modal — reuses player-bar/main-video
 // directly. No resume position, no subtitles, no DASH transcode: those are VOD concepts that
 // don't apply to a live stream.
-async function playIptvChannelInPlayer(name, url) {
+async function playIptvChannelInPlayer(name, url, tvgId) {
   const bar = document.getElementById("player-bar");
   const video = document.getElementById("main-video");
   if (!bar || !video) return;
@@ -4215,6 +4357,7 @@ async function playIptvChannelInPlayer(name, url) {
   }
 
   window._iptvPlaying = true;
+  window._currentIptvTvgId = tvgId || null;
   currentItemId = null;
   nowPlayingId = null;
   bar.style.display = "flex";
@@ -4224,6 +4367,11 @@ async function playIptvChannelInPlayer(name, url) {
   resetFillScreen();
   ensureFillScreenButton();
   bar.style.overflow = "hidden";
+  // Closing any split-view left open from a previous channel — new channel starts fresh,
+  // and the EPG button only appears at all when this specific channel has something to show.
+  closeInPlayerEpg();
+  const epgBtn = document.getElementById("ctrl-epg");
+  if (epgBtn) epgBtn.style.display = tvgId ? "" : "none";
 
   const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
   if (isSafari) {
@@ -6212,6 +6360,7 @@ function closePlayer() {
   if (video) { video.src = ""; video.load(); }
   document.getElementById("player-bar").style.display = "none";
   document.body.style.paddingBottom = "";
+  closeInPlayerEpg();
   // Tell the server to actually kill the FFmpeg transcode (if any) — otherwise it just
   // keeps running/counting on the server after the player is closed, wasting CPU forever.
   // Not applicable to a live IPTV channel — there's no server-side transcode job for it.
@@ -7489,7 +7638,15 @@ async function loadSettings() {
           <input type="text" id="iptv-url-input" class="s-input" placeholder="https://exempel.se/spellista.m3u" value="${esc(cfg.iptv_m3u_url||"")}" style="flex:1">
           <button class="btn-fav" onclick="parseIptvPlaylist()">Hämta & tolka</button>
         </div>
-        <div id="iptv-status" style="font-size:13px;color:var(--muted)"></div>
+        <div id="iptv-status" style="font-size:13px;color:var(--muted);margin-bottom:14px"></div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:10px">
+          Programtablå (EPG) — separat adress från din leverantör, i XMLTV-format. Visar vad som sänds just nu och härnäst under varje kanal. Uppdateras automatiskt var 4:e timme.
+        </div>
+        <div style="display:flex;gap:8px;margin-bottom:10px">
+          <input type="text" id="epg-url-input" class="s-input" placeholder="https://exempel.se/epg.xml" value="${esc(cfg.iptv_epg_url||"")}" style="flex:1">
+          <button class="btn-fav" onclick="setupEpg()">Hämta & tolka</button>
+        </div>
+        <div id="epg-status" style="font-size:13px;color:var(--muted)"></div>
       </div>
 
       <div class="settings-section">

@@ -463,7 +463,8 @@ const db = {
   iptvChannels: new Datastore({ filename: path.join(DATA_DIR, "iptv_channels.db"), autoload: true }),
   // Named IPTV favorite lists (Spotify-style "save to playlist") — personal per user, one
   // document per list, each holding the channel IDs currently in it.
-  iptvPlaylists: new Datastore({ filename: path.join(DATA_DIR, "iptv_playlists.db"), autoload: true })
+  iptvPlaylists: new Datastore({ filename: path.join(DATA_DIR, "iptv_playlists.db"), autoload: true }),
+  epgProgrammes: new Datastore({ filename: path.join(DATA_DIR, "epg_programmes.db"), autoload: true })
 };
 
 db.users.ensureIndex({ fieldName: "username", unique: true });
@@ -472,6 +473,7 @@ db.media.ensureIndex({ fieldName: "type" });
 db.history.ensureIndex({ fieldName: "user_id" });
 db.iptvChannels.ensureIndex({ fieldName: "group" });
 db.iptvPlaylists.ensureIndex({ fieldName: "user_id" });
+db.epgProgrammes.ensureIndex({ fieldName: "channel_id" });
 
 const dbFind = (s, q) => new Promise((r, j) => s.find(q, (e, d) => e ? j(e) : r(d)));
 const dbFindOne = (s, q) => new Promise((r, j) => s.findOne(q, (e, d) => e ? j(e) : r(d)));
@@ -492,6 +494,7 @@ const SYSTEM_STATS_MAX_SAMPLES = 60; // 60 × 3s = 3 minutes of history, comfort
 let _systemStatsBuffer = [];
 let _lastCpuSample = null; // { time, processCpu (from process.cpuUsage()), systemCpu }
 let _lastPeriodicScanTime = null;
+let _lastEpgRefreshTime = null;
 let _lastBandwidthSampleTime = null;
 let _bandwidthCounters = { local: 0, remote: 0 };
 function isLocalRequestIp(ip) {
@@ -1405,6 +1408,7 @@ function parseM3U(text) {
     if (!url || url.startsWith("#")) continue; // malformed entry — no URL followed, skip
     const logoMatch = line.match(/tvg-logo="([^"]*)"/i);
     const groupMatch = line.match(/group-title="([^"]*)"/i);
+    const tvgIdMatch = line.match(/tvg-id="([^"]*)"/i);
     const name = line.split(",").pop().trim() || "Okänd kanal";
     const group = groupMatch && groupMatch[1] ? groupMatch[1] : "Övrigt";
     const type = detectContentType(url, group);
@@ -1415,7 +1419,8 @@ function parseM3U(text) {
       group,
       country: type === "live" ? detectCountry(group) : null, // consolidation only makes sense for live TV, not movies/series
       type,
-      url
+      url,
+      tvg_id: tvgIdMatch && tvgIdMatch[1] ? tvgIdMatch[1] : null // needed to match this channel against EPG programme data later
     });
   }
   return channels;
@@ -1425,6 +1430,86 @@ function parseM3U(text) {
 // updates, so keeping stale entries around from a previous version doesn't make sense.
 // Shared logic for fetching + parsing + saving a playlist — used by both the initial setup
 // (POST /parse, with a URL provided) and refresh (POST /refresh, reusing the saved URL).
+
+// ── EPG (XMLTV) ───────────────────────────────────────────────────────────────
+// A small, dependency-free XMLTV parser — no new package to install on the server for this.
+// XMLTV is a well-established, fairly rigid format, so a careful regex-based approach covers
+// the common shape reliably without pulling in a full XML parsing library for one feature.
+function decodeXmlEntities(str) {
+  return (str || "")
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'").replace(/&amp;/g, "&")
+    .trim();
+}
+// XMLTV timestamps look like "20260828120000 +0000" (YYYYMMDDHHMMSS, optional timezone offset).
+function parseXmltvDate(str) {
+  const m = (str || "").trim().match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\s*([+-]\d{4})?$/);
+  if (!m) return null;
+  const [, y, mo, d, h, mi, s, tz] = m;
+  const iso = `${y}-${mo}-${d}T${h}:${mi}:${s}${tz ? tz.slice(0,3)+":"+tz.slice(3) : "Z"}`;
+  const date = new Date(iso);
+  return isNaN(date.getTime()) ? null : date.getTime();
+}
+function parseXMLTV(xml) {
+  const programmes = [];
+  const progRegex = /<programme\b([^>]*)>([\s\S]*?)<\/programme>/gi;
+  let match;
+  while ((match = progRegex.exec(xml)) !== null) {
+    const attrs = match[1], body = match[2];
+    const channelMatch = attrs.match(/channel="([^"]*)"/i);
+    const startMatch = attrs.match(/start="([^"]*)"/i);
+    if (!channelMatch || !startMatch) continue;
+    const stopMatch = attrs.match(/stop="([^"]*)"/i);
+    const titleMatch = body.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+    const descMatch = body.match(/<desc[^>]*>([\s\S]*?)<\/desc>/i);
+    const start = parseXmltvDate(startMatch[1]);
+    if (!start) continue;
+    programmes.push({
+      channel_id: channelMatch[1],
+      start,
+      stop: stopMatch ? parseXmltvDate(stopMatch[1]) : null,
+      title: decodeXmlEntities(titleMatch ? titleMatch[1] : "") || "Okänt program",
+      description: decodeXmlEntities(descMatch ? descMatch[1] : "") || null
+    });
+  }
+  return programmes;
+}
+// Handles both plain and gzip-compressed XMLTV (very common — these files can be large, so
+// most providers serve them gzipped) by checking the response headers rather than assuming.
+async function fetchXMLTV(url) {
+  const zlib = require("zlib");
+  const buffer = await new Promise((resolve, reject) => {
+    const client = url.startsWith("http://") ? http : https;
+    client.get(url, { timeout: 30000 }, (r) => {
+      if (r.statusCode >= 400) { r.resume(); return reject(new Error(`HTTP ${r.statusCode}`)); }
+      const chunks = [];
+      r.on("data", c => chunks.push(c));
+      r.on("end", () => resolve({ buf: Buffer.concat(chunks), encoding: r.headers["content-encoding"] }));
+    }).on("error", reject).on("timeout", () => reject(new Error("Timeout")));
+  });
+  let raw = buffer.buf;
+  const looksGzipped = buffer.encoding === "gzip" || url.endsWith(".gz") || (raw[0] === 0x1f && raw[1] === 0x8b);
+  if (looksGzipped) raw = await new Promise((resolve, reject) => zlib.gunzip(raw, (e, r) => e ? reject(e) : resolve(r)));
+  return raw.toString("utf8");
+}
+// Refreshes the stored EPG data — replaces old programmes entirely rather than merging, same
+// principle as channel refresh. Only keeps a reasonable window (2h in the past to 48h ahead)
+// since IPTV EPG feeds often include many days of data that would otherwise bloat the
+// database for no benefit — nobody's browsing a live-TV guide a week out.
+async function fetchAndSaveEPG(url) {
+  const xml = await fetchXMLTV(url);
+  const allProgrammes = parseXMLTV(xml);
+  if (!allProgrammes.length) throw new Error("Ingen programinformation hittades — kontrollera att adressen pekar på en giltig XMLTV-fil");
+  const now = Date.now();
+  const windowStart = now - (2 * 60 * 60 * 1000);
+  const windowEnd = now + (48 * 60 * 60 * 1000);
+  const programmes = allProgrammes.filter(p => p.start < windowEnd && (p.stop === null || p.stop > windowStart));
+  await new Promise((resolve, reject) => db.epgProgrammes.remove({}, { multi: true }, (err) => err ? reject(err) : resolve()));
+  await new Promise((resolve, reject) => db.epgProgrammes.insert(programmes, (err) => err ? reject(err) : resolve()));
+  return programmes.length;
+}
+
 async function fetchAndSaveM3U(url) {
   const text = await new Promise((resolve, reject) => {
     const client = url.startsWith("http://") ? http : https;
@@ -1456,6 +1541,61 @@ app.post("/api/iptv/refresh", requireAdmin, async (req, res) => {
   } catch(e) {
     res.status(500).json({ error: "Kunde inte hämta/tolka listan: " + e.message });
   }
+});
+
+// EPG setup — separate from the M3U playlist since providers give it as its own URL.
+// Saves the URL AND does an immediate fetch, so setting it up gives instant feedback rather
+// than silently waiting for the next scheduled refresh.
+app.post("/api/iptv/epg/setup", requireAdmin, async (req, res) => {
+  const { url } = req.body;
+  if (!url) return res.status(400).json({ error: "Ingen adress angiven" });
+  try {
+    const count = await fetchAndSaveEPG(url);
+    config.iptv_epg_url = url;
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
+    res.json({ ok: true, count });
+  } catch(e) {
+    res.status(500).json({ error: "Kunde inte hämta/tolka EPG-datan: " + e.message });
+  }
+});
+
+app.post("/api/iptv/epg/refresh", requireAdmin, async (req, res) => {
+  if (!config.iptv_epg_url) return res.status(400).json({ error: "Ingen EPG-adress sparad ännu" });
+  try {
+    const count = await fetchAndSaveEPG(config.iptv_epg_url);
+    res.json({ ok: true, count });
+  } catch(e) {
+    res.status(500).json({ error: "Kunde inte hämta/tolka EPG-datan: " + e.message });
+  }
+});
+
+// Now-playing/up-next for every channel that has a tvg_id, in one call — the frontend needs
+// this per-channel info for a whole visible list at once, so a single bulk endpoint avoids
+// firing off one request per channel tile.
+app.get("/api/iptv/epg/now-next", requireAuth, async (req, res) => {
+  try {
+    const now = Date.now();
+    const current = await dbFind(db.epgProgrammes, { start: { $lte: now }, $or: [{ stop: { $gt: now } }, { stop: null }] });
+    const upcoming = await dbFind(db.epgProgrammes, { start: { $gt: now } });
+    const result = {};
+    current.forEach(p => { if (!result[p.channel_id]) result[p.channel_id] = {}; result[p.channel_id].now = { title: p.title, start: p.start, stop: p.stop }; });
+    // Earliest upcoming programme per channel — sorting once up front rather than per-channel scanning.
+    upcoming.sort((a,b) => a.start - b.start).forEach(p => {
+      if (!result[p.channel_id]) result[p.channel_id] = {};
+      if (!result[p.channel_id].next) result[p.channel_id].next = { title: p.title, start: p.start };
+    });
+    res.json(result);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Full schedule for one channel — used when someone wants to see more than just now/next.
+app.get("/api/iptv/epg/:tvgId", requireAuth, async (req, res) => {
+  try {
+    const now = Date.now();
+    const programmes = await dbFind(db.epgProgrammes, { channel_id: req.params.tvgId, stop: { $gt: now } });
+    programmes.sort((a,b) => a.start - b.start);
+    res.json(programmes);
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post("/api/iptv/parse", requireAdmin, async (req, res) => {
@@ -1616,7 +1756,7 @@ app.get("/api/iptv/playlists/:id/channels", requireAuth, async (req, res) => {
     res.json({
       name: playlist.name,
       countryEntries,
-      channels: channels.map(c => ({ id: c._id, name: c.name, logo: c.logo, group: c.group, country: c.country, type: c.type || "live", url: c.url }))
+      channels: channels.map(c => ({ id: c._id, name: c.name, logo: c.logo, group: c.group, country: c.country, type: c.type || "live", url: c.url, tvg_id: c.tvg_id || null }))
     });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -1629,7 +1769,7 @@ app.get("/api/iptv/playlists/:id/country-channels", requireAuth, async (req, res
     if (!playlist || playlist.user_id !== req.user._id) return res.status(404).json({ error: "Hittades inte" });
     const { country, isCountry } = req.query;
     const channels = (await dbFind(db.iptvChannels, channelsForCountryQuery(country, isCountry === "true"))).sort((a, b) => a.name.localeCompare(b.name));
-    res.json({ channels: channels.map(c => ({ id: c._id, name: c.name, logo: c.logo, group: c.group, type: c.type || "live", url: c.url })) });
+    res.json({ channels: channels.map(c => ({ id: c._id, name: c.name, logo: c.logo, group: c.group, type: c.type || "live", url: c.url, tvg_id: c.tvg_id || null })) });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -1656,7 +1796,7 @@ app.get("/api/iptv/channels", requireAuth, async (req, res) => {
     const favoritedChannelIds = new Set(userPlaylists.flatMap(p => p.channel_ids || []));
     const favoritedCountryNames = new Set(userPlaylists.flatMap(p => (p.countries || []).map(c => c.name)));
     res.json({ channels: channels.map(c => ({
-      id: c._id, name: c.name, logo: c.logo, group: c.group, type: c.type || "live", url: c.url,
+      id: c._id, name: c.name, logo: c.logo, group: c.group, type: c.type || "live", url: c.url, tvg_id: c.tvg_id || null,
       inAnyPlaylist: favoritedChannelIds.has(c._id) || (c.country && favoritedCountryNames.has(c.country)) || favoritedCountryNames.has(c.group)
     })) });
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -6017,7 +6157,7 @@ app.get("/api/config", requireAdmin, (req, res) => {
 });
 
 app.patch("/api/config", requireAdmin, (req, res) => {
-  ["tmdb_api_key","opensubtitles_api_key","omdb_api_key","lastfm_api_key","spotify_client_id","spotify_client_secret","port","language","update_channel","server_name","trailer_stream_enabled","iptv_enabled","watched_threshold_pct","continue_watching_max_weeks","continue_watching_max_items","periodic_scan_enabled","periodic_scan_interval_hours","scan_low_priority"].forEach(k=>{if(req.body[k]!==undefined)config[k]=req.body[k];});
+  ["tmdb_api_key","opensubtitles_api_key","omdb_api_key","lastfm_api_key","spotify_client_id","spotify_client_secret","port","language","update_channel","server_name","trailer_stream_enabled","iptv_enabled","iptv_epg_url","watched_threshold_pct","continue_watching_max_weeks","continue_watching_max_items","periodic_scan_enabled","periodic_scan_interval_hours","scan_low_priority"].forEach(k=>{if(req.body[k]!==undefined)config[k]=req.body[k];});
   fs.writeFileSync(CONFIG_PATH,JSON.stringify(config,null,2));
   res.json({ok:true});
 });
@@ -7690,6 +7830,18 @@ server.listen(PORT,()=>{
     console.log(`[SCAN] Running scheduled safety-net rescan (every ${intervalHours}h)...`);
     scanLibraries().catch(e => console.error("[SCAN] Scheduled rescan error:", e));
   }, 30 * 60 * 1000); // checked every 30 min — cheap, and means the configured interval doesn't need to divide evenly into anything
+
+  // EPG data goes stale on its own schedule (programmes finish airing, new ones need to be
+  // known ahead of time) — refreshed automatically every 4h whenever a URL is configured,
+  // no separate on/off setting needed since there's no real downside to keeping it current.
+  setInterval(() => {
+    if (!config.iptv_epg_url) return;
+    const hoursSinceLastEpgRefresh = (Date.now() - (_lastEpgRefreshTime || 0)) / 3600000;
+    if (hoursSinceLastEpgRefresh < 4) return;
+    _lastEpgRefreshTime = Date.now();
+    console.log("[EPG] Running scheduled EPG refresh...");
+    fetchAndSaveEPG(config.iptv_epg_url).catch(e => console.error("[EPG] Scheduled refresh error:", e));
+  }, 30 * 60 * 1000);
 });
 
 process.on("SIGTERM",()=>{server.close();process.exit(0);});
