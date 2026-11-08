@@ -44,7 +44,7 @@ Name: "{commonappdata}\StreamVault\data"
 Source: "app\server\*"; DestDir: "{app}\server"; Flags: recursesubdirs createallsubdirs
 Source: "app\public\*"; DestDir: "{app}\public"; Flags: recursesubdirs createallsubdirs
 Source: "app\package.json"; DestDir: "{app}"; Flags: ignoreversion
-Source: "app\setup\setup.html"; DestDir: "{app}\setup"; Flags: ignoreversion
+Source: "app\setup\setup.html"; DestDir: "{app}\public\setup"; Flags: ignoreversion
 Source: "deps\node-v22.15.0-x64.msi"; DestDir: "{tmp}"; Flags: deleteafterinstall
 Source: "deps\ffmpeg-release-essentials.zip"; DestDir: "{tmp}"; Flags: deleteafterinstall
 Source: "deps\nssm\nssm.exe"; DestDir: "{app}\tools"; Flags: ignoreversion
@@ -230,7 +230,7 @@ begin
     Exec('taskkill.exe', '/F /IM node.exe',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Sleep(2000);
-    // Server will be started by DeinitializeSetup
+    // Server is started below (step 7), so it is already running when the browser opens
 
     SetStep(6, 8, 'Adding firewall rule...', 'Opening port 7000');
     Exec('netsh.exe', 'advfirewall firewall delete rule name="StreamVault"',
@@ -240,7 +240,13 @@ begin
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
     SetStep(7, 8, 'Starting StreamVault...', 'Waiting for server...');
-    Sleep(8000);
+    // Start the server now instead of only in DeinitializeSetup, then wait until it
+    // actually answers (up to 60 seconds). Before this, the browser opened on the last
+    // click before the server existed, which showed "localhost can't be reached".
+    Exec('schtasks.exe', '/Run /TN "StreamVault"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Exec('powershell.exe',
+      '-NoProfile -ExecutionPolicy Bypass -Command "for ($i = 0; $i -lt 60; $i++) { try { Invoke-WebRequest -UseBasicParsing -Uri http://localhost:7000/api/setup-required -TimeoutSec 2 | Out-Null; exit 0 } catch { Start-Sleep -Seconds 1 } }; exit 1"',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     SetStep(8, 8, 'Installation complete!', '');
 
   finally
