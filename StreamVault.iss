@@ -34,6 +34,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "Create desktop shortcut"; GroupDescription: "Options:"
+Name: "runasuser"; Description: "Start StreamVault when I log in, as my user (needed to use network drives mapped in Windows)"; GroupDescription: "Startup:"; Flags: unchecked
 
 [Dirs]
 Name: "{app}"
@@ -59,6 +60,8 @@ Name: "{commondesktop}\StreamVault"; Filename: "{#AppURL}"; IconFilename: "{app}
 Filename: "{#AppURL}/setup"; Description: "Open StreamVault setup wizard"; Flags: postinstall shellexec skipifsilent
 
 [UninstallRun]
+Filename: "schtasks.exe"; Parameters: "/End /TN ""StreamVault"""; Flags: runhidden; RunOnceId: "EndTask"
+Filename: "schtasks.exe"; Parameters: "/Delete /TN ""StreamVault"" /F"; Flags: runhidden; RunOnceId: "DeleteTask"
 Filename: "{app}\tools\nssm.exe"; Parameters: "stop StreamVault"; Flags: runhidden; RunOnceId: "StopService"
 Filename: "{app}\tools\nssm.exe"; Parameters: "remove StreamVault confirm"; Flags: runhidden; RunOnceId: "RemoveService"
 Filename: "netsh.exe"; Parameters: "advfirewall firewall delete rule name=""StreamVault"""; Flags: runhidden; RunOnceId: "RemoveFirewall"
@@ -129,6 +132,8 @@ var
   NpmCli: String;
   DataDir: String;
   AppDir: String;
+  TaskUser: String;
+  Ps: String;
   ResultCode: Integer;
 begin
   if CurStep <> ssPostInstall then Exit;
@@ -219,12 +224,38 @@ begin
     Exec(NssmPath, 'stop StreamVault', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Exec(NssmPath, 'remove StreamVault confirm', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
-    // Register as scheduled task at startup
-    Exec('schtasks.exe',
-      '/Create /F /RU SYSTEM /RL HIGHEST /SC ONSTART /TN "StreamVault" ' +
-      '/TR "powershell.exe -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File """' + AppDir + '\start.ps1"""" ' +
-      '/DELAY 0000:15',
-      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    // Register the startup task.
+    // Default: a SYSTEM task that starts at boot. It works without anyone logged in, but a
+    // SYSTEM process cannot see network drives that are mapped in Windows.
+    // If "runasuser" is ticked: a task that starts at logon as the installing user, without
+    // administrator rights, so mapped network drives are visible to the server. The user gets
+    // modify rights on the data folder, because the server now writes there as that user.
+    if WizardIsTaskSelected('runasuser') then
+    begin
+      TaskUser := GetEnv('USERDOMAIN') + '\' + GetEnv('USERNAME');
+      Ps :=
+        '$user = "' + TaskUser + '"' + #13#10 +
+        '$action = New-ScheduledTaskAction -Execute "conhost.exe" -Argument "--headless powershell.exe -NonInteractive -ExecutionPolicy Bypass -File `"' + AppDir + '\start.ps1`""' + #13#10 +
+        '$trigger = New-ScheduledTaskTrigger -AtLogOn -User $user' + #13#10 +
+        '$trigger.Delay = "PT60S"' + #13#10 +
+        '$principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited' + #13#10 +
+        '$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries' + #13#10 +
+        'Register-ScheduledTask -TaskName "StreamVault" -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null' + #13#10 +
+        'icacls "' + DataDir + '" /grant "${user}:(OI)(CI)M" /T /C /Q | Out-Null' + #13#10;
+      SaveStringToFile(AppDir + '\register-task-user.ps1', Ps, False);
+      Exec('powershell.exe',
+        '-NoProfile -ExecutionPolicy Bypass -File "' + AppDir + '\register-task-user.ps1"',
+        '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+      DeleteFile(AppDir + '\register-task-user.ps1');
+    end
+    else
+    begin
+      Exec('schtasks.exe',
+        '/Create /F /RU SYSTEM /RL HIGHEST /SC ONSTART /TN "StreamVault" ' +
+        '/TR "powershell.exe -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File """' + AppDir + '\start.ps1"""" ' +
+        '/DELAY 0000:15',
+        '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    end;
     Sleep(3000);
     // Kill any remaining node processes
     Exec('taskkill.exe', '/F /IM node.exe',
