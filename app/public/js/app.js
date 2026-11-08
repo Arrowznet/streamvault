@@ -4358,6 +4358,11 @@ async function playIptvChannelInPlayer(name, url, tvgId) {
 
   window._iptvPlaying = true;
   window._currentIptvTvgId = tvgId || null;
+  window._iptvRemuxAttempted = false;
+  if (window._currentIptvLiveStreamId) {
+    API.post(`/iptv/live/${window._currentIptvLiveStreamId}/stop`).catch(() => {});
+    window._currentIptvLiveStreamId = null;
+  }
   currentItemId = null;
   nowPlayingId = null;
   bar.style.display = "flex";
@@ -4376,6 +4381,7 @@ async function playIptvChannelInPlayer(name, url, tvgId) {
   const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
   if (isSafari) {
     video.src = url;
+    video.onerror = () => attemptIptvRemuxFallback(url, name, tvgId);
     video.play().catch(() => {});
     return;
   }
@@ -4388,7 +4394,7 @@ async function playIptvChannelInPlayer(name, url, tvgId) {
       currentHls.on(window.Hls.Events.MANIFEST_PARSED, () => video.play().catch(() => {}));
       currentHls.on(window.Hls.Events.ERROR, (event, data) => {
         console.log("[IPTV] HLS.js error:", JSON.stringify({ type: data.type, details: data.details, fatal: data.fatal }));
-        if (data.fatal) document.getElementById("pb-sub").textContent = "⚠️ Kunde inte spela strömmen";
+        if (data.fatal) attemptIptvRemuxFallback(url, name, tvgId);
       });
       return;
     }
@@ -4396,7 +4402,46 @@ async function playIptvChannelInPlayer(name, url, tvgId) {
     console.log("[IPTV] Could not set up HLS.js:", e.message);
   }
   video.src = url; // last-resort fallback
+  video.onerror = () => attemptIptvRemuxFallback(url, name, tvgId);
   video.play().catch(() => {});
+}
+
+// Only reached when direct playback has already failed — most streams never touch this path
+// at all. Remuxes the channel server-side (repackaging only, not a full re-encode) into a
+// format guaranteed to work with hls.js, for the minority of streams whose original
+// container/codec combination a given browser can't handle natively (seen specifically with
+// Tesla's in-car browser on some channels). Guarded with a flag so a remuxed stream that
+// ALSO fails doesn't loop back into remuxing again.
+async function attemptIptvRemuxFallback(originalUrl, name, tvgId) {
+  if (window._iptvRemuxAttempted) {
+    document.getElementById("pb-sub").textContent = "⚠️ Kunde inte spela strömmen";
+    return;
+  }
+  window._iptvRemuxAttempted = true;
+  document.getElementById("pb-sub").textContent = "📡 Live · Anpassar strömmen...";
+  try {
+    const data = await API.post("/iptv/live/start", { url: originalUrl });
+    window._currentIptvLiveStreamId = data.streamId;
+    const video = document.getElementById("main-video");
+    if (currentHls) { try { currentHls.destroy(); } catch {} currentHls = null; }
+    await ensureHlsJs();
+    if (window.Hls && window.Hls.isSupported()) {
+      currentHls = new window.Hls();
+      currentHls.loadSource(data.playlist);
+      currentHls.attachMedia(video);
+      currentHls.on(window.Hls.Events.MANIFEST_PARSED, () => { video.play().catch(() => {}); document.getElementById("pb-sub").textContent = "📡 Live"; });
+      currentHls.on(window.Hls.Events.ERROR, (event, errData) => {
+        if (errData.fatal) document.getElementById("pb-sub").textContent = "⚠️ Kunde inte spela strömmen";
+      });
+    } else {
+      video.src = data.playlist;
+      video.play().catch(() => {});
+      document.getElementById("pb-sub").textContent = "📡 Live";
+    }
+  } catch(e) {
+    console.log("[IPTV] Remux fallback failed:", e.message);
+    document.getElementById("pb-sub").textContent = "⚠️ Kunde inte spela strömmen";
+  }
 }
 
 let currentItemId = null;
@@ -6109,10 +6154,27 @@ async function autoLoadSubtitles(mediaId, offsetSec) {
       ? currentUser.subtitleLanguages
       : [userSubLang].filter(Boolean);
     console.log("[SUBTITLES] Auto-select debug — currentUser.language:", currentUser?.language, "serverDefault:", window._serverDefaultLanguage, "effectiveLanguage:", effectiveLanguage, "subtitleLanguages:", currentUser?.subtitleLanguages, "→ priorityList used:", priorityList);
+    // Within a language, not all tracks are equally usable. The server lists external .srt
+    // files first, then every embedded track, then cached (OCR-converted) text — so taking the
+    // first match for a language used to land on the embedded image-based (PGS) track whenever
+    // one existed, even when a working text version of that same language had already been
+    // converted and cached. A bitmap track never turns into text on its own, so nothing ever
+    // showed and the user had to switch manually. Now: text files first, embedded text next,
+    // bitmap tracks only as a last resort (which keeps the old behavior for languages that
+    // have no text version at all yet).
+    var BITMAP_SUB_CODECS = ["hdmv_pgs_subtitle", "pgssub", "dvd_subtitle", "dvdsub", "dvb_subtitle", "xsub"];
+    function subRank(s) {
+      if (s.type !== "embedded") return 0;
+      return BITMAP_SUB_CODECS.indexOf((s.codec || "").toLowerCase()) >= 0 ? 2 : 1;
+    }
     var userSub = null;
     for (var pi = 0; pi < priorityList.length; pi++) {
-      userSub = subs.find(function(s) { return matchesLang(s, priorityList[pi]); });
-      if (userSub) break;
+      var best = null;
+      subs.forEach(function(s) {
+        if (!matchesLang(s, priorityList[pi])) return;
+        if (!best || subRank(s) < subRank(best)) best = s; // strict < keeps the first-listed track on ties
+      });
+      if (best) { userSub = best; break; }
     }
     var engSub = subs.find(function(s) { return s.type === "srt" && matchesLang(s, "eng"); });
     var sweSub = subs.find(function(s) { return s.type === "srt" && matchesLang(s, "swe"); });
@@ -6361,6 +6423,10 @@ function closePlayer() {
   document.getElementById("player-bar").style.display = "none";
   document.body.style.paddingBottom = "";
   closeInPlayerEpg();
+  if (window._currentIptvLiveStreamId) {
+    API.post(`/iptv/live/${window._currentIptvLiveStreamId}/stop`).catch(() => {});
+    window._currentIptvLiveStreamId = null;
+  }
   // Tell the server to actually kill the FFmpeg transcode (if any) — otherwise it just
   // keeps running/counting on the server after the player is closed, wasting CPU forever.
   // Not applicable to a live IPTV channel — there's no server-side transcode job for it.

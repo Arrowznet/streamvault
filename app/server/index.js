@@ -467,6 +467,14 @@ const db = {
   epgProgrammes: new Datastore({ filename: path.join(DATA_DIR, "epg_programmes.db"), autoload: true })
 };
 
+// Safety net on top of the specific fixes above: NeDB's on-disk files are append-only and
+// never shrink by themselves, so ANY collection that gets rewritten often (remove+insert
+// cycles, frequent updates) can in principle grow unboundedly over time the same way
+// epg_programmes.db did — large enough to eventually fail to even load at startup. Every
+// datastore gets its own periodic auto-compaction as a blanket protection against that,
+// independent of whether a given collection's own code remembers to compact explicitly.
+Object.values(db).forEach(store => store.persistence.setAutocompactionInterval(6 * 60 * 60 * 1000)); // every 6h
+
 db.users.ensureIndex({ fieldName: "username", unique: true });
 db.media.ensureIndex({ fieldName: "library_id" });
 db.media.ensureIndex({ fieldName: "type" });
@@ -1507,6 +1515,12 @@ async function fetchAndSaveEPG(url) {
   const programmes = allProgrammes.filter(p => p.start < windowEnd && (p.stop === null || p.stop > windowStart));
   await new Promise((resolve, reject) => db.epgProgrammes.remove({}, { multi: true }, (err) => err ? reject(err) : resolve()));
   await new Promise((resolve, reject) => db.epgProgrammes.insert(programmes, (err) => err ? reject(err) : resolve()));
+  // Critical: NeDB's on-disk file is append-only and never shrinks by itself — every remove
+  // and insert just adds another line to the file, so this refresh cycle (running every 4h,
+  // every single time wiping and re-inserting the whole dataset) made the file grow without
+  // bound until it became too large for Node to even read back in at startup. Compacting
+  // rewrites the file to reflect only the current, actual contents.
+  db.epgProgrammes.persistence.compactDatafile();
   return programmes.length;
 }
 
@@ -1524,6 +1538,7 @@ async function fetchAndSaveM3U(url) {
   if (!channels.length) throw new Error("Ingen kanal hittades i listan — kontrollera att adressen pekar på en giltig M3U-fil");
   await new Promise((resolve, reject) => db.iptvChannels.remove({}, { multi: true }, (err) => err ? reject(err) : resolve()));
   await new Promise((resolve, reject) => db.iptvChannels.insert(channels, (err) => err ? reject(err) : resolve()));
+  db.iptvChannels.persistence.compactDatafile(); // same unbounded-growth risk as EPG — fixed the same way
   config.iptv_m3u_url = url;
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
   console.log(`[IPTV] Tolkade ${channels.length} kanaler från spellistan`);
@@ -1596,6 +1611,98 @@ app.get("/api/iptv/epg/:tvgId", requireAuth, async (req, res) => {
     programmes.sort((a,b) => a.start - b.start);
     res.json(programmes);
   } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Live IPTV remux (fallback path) ──────────────────────────────────────────
+// Most IPTV streams play fine directly in the browser, so this is only used when direct
+// playback fails (e.g. a container/codec combination a given browser — Tesla's, an LG TV's —
+// doesn't handle natively). Remuxes (repackages, "-c copy" — no re-encoding) the raw stream
+// into HLS, reusing the hls.js integration IPTV playback already has rather than adding a
+// second streaming library just for this fallback.
+const IPTV_LIVE_CACHE = path.join(DATA_DIR, "iptv_live");
+if (!fs.existsSync(IPTV_LIVE_CACHE)) fs.mkdirSync(IPTV_LIVE_CACHE, { recursive: true });
+const _liveIptvSessions = new Map(); // streamId -> { process, dir, lastAccess }
+
+function stopLiveIptvSession(streamId) {
+  const session = _liveIptvSessions.get(streamId);
+  if (!session) return;
+  try { session.process.kill("SIGKILL"); } catch {}
+  fs.rm(session.dir, { recursive: true, force: true }, () => {});
+  _liveIptvSessions.delete(streamId);
+}
+
+// Idle sessions are cleaned up automatically — hls.js polls its playlist continuously while
+// actually being watched, so no request in 60s reliably means the viewer navigated away or
+// closed the tab without a clean "stop" ever firing (closed tabs, app switches on mobile,
+// and Tesla's own browser hopping between contexts, are all exactly this).
+setInterval(() => {
+  const now = Date.now();
+  for (const [streamId, session] of _liveIptvSessions.entries()) {
+    if (now - session.lastAccess > 60000) stopLiveIptvSession(streamId);
+  }
+}, 20000);
+
+app.post("/api/iptv/live/start", requireAuth, async (req, res) => {
+  const { url } = req.body;
+  if (!url) return res.status(400).json({ error: "Ingen kanal-URL angiven" });
+  try {
+    const parsedUrl = new URL(url);
+    if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") throw new Error("bad protocol");
+  } catch {
+    return res.status(400).json({ error: "Ogiltig kanal-URL — endast http och https tillåts" });
+  }
+  try {
+    const streamId = uuidv4();
+    const dir = path.join(IPTV_LIVE_CACHE, streamId);
+    fs.mkdirSync(dir, { recursive: true });
+    const playlistPath = path.join(dir, "playlist.m3u8");
+    const proc = spawn(getFfmpegPath(), [
+      "-re", "-protocol_whitelist", "http,https,tcp,tls,crypto", "-i", url,
+      "-c", "copy", // remux only — this whole path exists specifically to avoid the cost of re-encoding when just repackaging is enough
+      "-f", "hls",
+      "-hls_time", "4",
+      "-hls_list_size", "6",
+      "-hls_flags", "delete_segments",
+      playlistPath
+    ]);
+    proc.stderr.on("data", () => {}); // ffmpeg logs progress to stderr even on success — drained, not treated as an error signal
+    proc.on("error", (e) => console.error("[IPTV live] ffmpeg failed to start:", e.message));
+    _liveIptvSessions.set(streamId, { process: proc, dir, lastAccess: Date.now() });
+
+    // Give ffmpeg a moment to produce the first segments before handing back a URL that's
+    // just going to 404 immediately — same wait-for-file approach already used for VOD DASH.
+    let waited = 0;
+    while (!fs.existsSync(playlistPath) && waited < 10000) {
+      await new Promise(r => setTimeout(r, 200));
+      waited += 200;
+    }
+    if (!fs.existsSync(playlistPath)) {
+      stopLiveIptvSession(streamId);
+      return res.status(500).json({ error: "Kunde inte starta omkodning av kanalen — källan svarade inte i tid" });
+    }
+    const token = jwt.sign({ userId: req.user._id, type: "access" }, config.jwt_secret, { expiresIn: "6h" });
+    res.json({ streamId, playlist: `/api/iptv/live/${streamId}/playlist.m3u8?token=${token}` });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post("/api/iptv/live/:streamId/stop", requireAuth, (req, res) => {
+  stopLiveIptvSession(req.params.streamId);
+  res.json({ ok: true });
+});
+
+app.get("/api/iptv/live/:streamId/:file", async (req, res) => {
+  const session = _liveIptvSessions.get(req.params.streamId);
+  if (!session) return res.status(404).end();
+  session.lastAccess = Date.now();
+  const root = path.resolve(session.dir) + path.sep;
+  const filePath = path.resolve(session.dir, req.params.file);
+  if (!filePath.startsWith(root)) return res.status(403).end();
+  const ext = path.extname(req.params.file);
+  res.setHeader("Content-Type", ext === ".m3u8" ? "application/vnd.apple.mpegurl" : "video/mp2t");
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Cache-Control", "no-cache");
+  if (!fs.existsSync(filePath)) return res.status(404).end();
+  fs.createReadStream(filePath).pipe(res);
 });
 
 app.post("/api/iptv/parse", requireAdmin, async (req, res) => {
