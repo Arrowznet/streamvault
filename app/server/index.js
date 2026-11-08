@@ -7617,7 +7617,7 @@ app.get("/api/browse", requireAuth, (req, res) => {
       if (process.platform === "win32") {
         const { execSync } = require("child_process");
         try {
-          const output = execSync("wmic logicaldisk get name", { encoding: "utf8", windowsHide: true });
+          const output = execSync('powershell.exe -NoProfile -NonInteractive -Command "Get-PSDrive -PSProvider FileSystem | ForEach-Object { $_.Name + [char]58 }"', { encoding: "utf8", windowsHide: true, timeout: 8000 });
           const drives = output.split("\n")
             .map(l => l.trim())
             .filter(l => /^[A-Z]:$/.test(l))
