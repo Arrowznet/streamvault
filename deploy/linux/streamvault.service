@@ -1,0 +1,27 @@
+# EXEMPEL på en systemd-tjänst för StreamVault på Linux — bara dokumentation.
+# Anpassa User, sökvägar och node-sökvägen (kolla med: which node) innan du använder den.
+#
+# Installera (som root):
+#   cp streamvault.service /etc/systemd/system/streamvault.service
+#   systemctl daemon-reload
+#   systemctl enable --now streamvault
+#   journalctl -u streamvault -f        # följ loggen
+
+[Unit]
+Description=StreamVault media server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=streamvault
+WorkingDirectory=/opt/streamvault/app
+Environment=NODE_ENV=production
+# Här hamnar config.json, databaser och cache (i en undermapp som heter "data").
+Environment=STREAMVAULT_DATA=/var/lib/streamvault
+ExecStart=/usr/bin/node /opt/streamvault/app/server/index.js
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

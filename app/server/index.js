@@ -363,7 +363,13 @@ const PGSTOSRT_EXE = path.join(PGSTOSRT_DIR, "PgsToSrt.exe");
 const TESSDATA_DIR = path.join(PGSTOSRT_DIR, "tessdata");
 fs.mkdirSync(TOOLS_DIR, { recursive: true });
 
+// PgsToSrt is only downloaded/run as a Windows .exe for now. On other platforms OCR of bitmap
+// (PGS) subtitles is skipped gracefully instead of trying to run a Windows binary.
+const PGSTOSRT_SUPPORTED = process.platform === "win32";
+if (!PGSTOSRT_SUPPORTED) console.log("[SUBTITLES] OCR av bildbaserade undertexter (PgsToSrt) stöds inte på den här plattformen ännu – bildbaserade spår hoppas över");
+
 function isPgsToSrtInstalled() {
+  if (!PGSTOSRT_SUPPORTED) return false;
   return fs.existsSync(PGSTOSRT_EXE) && fs.existsSync(TESSDATA_DIR);
 }
 
@@ -719,7 +725,18 @@ app.get("/api/setup-required", async (req, res) => {
 app.get("/setup", async (req, res) => {
   const admin = await dbFindOne(db.users, { role: "admin" });
   if (admin) return res.redirect("/");
-  res.sendFile(path.join(PUBLIC, "setup", "setup.html"));
+  // The Windows installer copies setup.html to public/setup/; when running straight from the
+  // repo (e.g. on Linux) it only exists in app/setup/ — so look in both places.
+  const setupCandidates = [
+    path.join(PUBLIC, "setup", "setup.html"),
+    path.join(__dirname, "..", "setup", "setup.html")
+  ];
+  const setupFile = setupCandidates.find(p => fs.existsSync(p));
+  if (!setupFile) {
+    console.error("[SETUP] setup.html hittades inte, letade i:", setupCandidates.join(", "));
+    return res.status(404).send("setup.html hittades inte på servern");
+  }
+  res.sendFile(setupFile);
 });
 
 app.post("/api/auth/setup", async (req, res) => {
@@ -1086,7 +1103,10 @@ app.get("/api/updates/check", requireAuth, async (req, res) => {
     const hasUpdate = channel === "beta"
       ? latest !== STREAMVAULT_VERSION
       : latestBase !== currentBase;
-    const downloadUrl = (data.assets || []).find(a => a.name && a.name.endsWith(".exe"))?.browser_download_url || null;
+    // The installer is a Windows .exe — on other platforms there's nothing to offer to install.
+    const downloadUrl = process.platform === "win32"
+      ? ((data.assets || []).find(a => a.name && a.name.endsWith(".exe"))?.browser_download_url || null)
+      : null;
 
     // Android app updates — completely separate version numbering from the server's own
     // (e.g. app "1.0.1" vs server "2.6.2"), so these are tracked independently: the Android
@@ -1150,6 +1170,7 @@ app.get("/api/updates/check", requireAuth, async (req, res) => {
 // Download and install update
 app.post("/api/updates/install", requireAdmin, async (req, res) => {
   const { downloadUrl } = req.body;
+  if (process.platform !== "win32") return res.status(400).json({ error: "Automatisk uppdatering stöds bara på Windows. Uppdatera manuellt (git pull / ny version) på den här plattformen." });
   if (!downloadUrl) return res.status(400).json({ error: "No download URL" });
 
   res.json({ ok: true, message: "Update started" });
@@ -2375,6 +2396,10 @@ async function processSubtitleCacheQueue() {
 
 // Convert bitmap subtitle (PGS/VOBSUB) to SRT using PgsToSrt + Tesseract, for one specific language track
 async function convertPgsTosrt(item, subIdx, cacheFile, targetLang) {
+  if (!PGSTOSRT_SUPPORTED) {
+    logSubtitle("warn", item, `Bildbaserat spår ${subIdx} (${targetLang}) hoppas över – OCR (PgsToSrt) stöds inte på den här plattformen ännu`, { subIdx, targetLang });
+    return false;
+  }
   const { execFile } = require("child_process");
   const supFile = cacheFile.replace(".srt", ".sup");
   const tessLang = TESSERACT_LANG_MAP[targetLang] || "eng";
@@ -2517,7 +2542,7 @@ async function preCacheSubtitles(item, opts) {
   // 1. Embedded subtitle streams via ffprobe
   let streams = [];
   try {
-    const ffprobePath = getFfmpegPath().replace("ffmpeg.exe", "ffprobe.exe");
+    const ffprobePath = getFfprobePath();
     const { execFile } = require("child_process");
     streams = await new Promise((resolve) => {
       execFile(ffprobePath, [
@@ -3362,7 +3387,7 @@ app.get("/api/playback/:id", requireMediaAccess, async (req, res) => {
   async function getAllAudioStreams() {
     try {
       const { execFileSync } = require("child_process");
-      const ffprobePath = getFfmpegPath().replace("ffmpeg.exe", "ffprobe.exe");
+      const ffprobePath = getFfprobePath();
       const out = execFileSync(ffprobePath, [
         "-v", "quiet", "-analyzeduration", "100M", "-probesize", "100M",
         "-show_streams", "-select_streams", "a",
@@ -3681,8 +3706,16 @@ async function startHlsTranscode(item, startSec = 0) {
   let videoFilterArgs = [];
 
   if (is4kHdr) {
-    console.log(`[HLS] 4K HDR detected (${item.width}x${item.height} 10-bit HEVC) - using d3d11va + scale`);
-    hwaccelArgs = ["-hwaccel", "d3d11va"];
+    if (process.platform === "win32") {
+      console.log(`[HLS] 4K HDR detected (${item.width}x${item.height} 10-bit HEVC) - using d3d11va + scale`);
+      hwaccelArgs = ["-hwaccel", "d3d11va"];
+    } else if (encoder === "h264_nvenc") {
+      // d3d11va exists only on Windows; on Linux NVIDIA uses CUDA (same as the DASH path).
+      console.log(`[HLS] 4K HDR detected (${item.width}x${item.height} 10-bit HEVC) - using cuda hwaccel + scale`);
+      hwaccelArgs = ["-hwaccel", "cuda"];
+    } else {
+      console.log(`[HLS] 4K HDR detected (${item.width}x${item.height} 10-bit HEVC) - using software decode + scale`);
+    }
     const targetW = 1920;
     const targetH = item.width && item.height
       ? Math.round((item.height / item.width) * targetW / 2) * 2
@@ -3931,7 +3964,7 @@ async function startDashTranscode(item, seekSec = 0, audioTrackIndex = null, all
   if (audioTrackIndex === null) {
     try {
       const { execFileSync } = require("child_process");
-      const ffprobePath = getFfmpegPath().replace("ffmpeg.exe", "ffprobe.exe");
+      const ffprobePath = getFfprobePath();
       const probeOut = execFileSync(ffprobePath, [
         "-v", "quiet", "-analyzeduration", "100M", "-probesize", "100M",
         "-print_format", "json", "-show_streams",
@@ -5061,7 +5094,7 @@ app.get("/api/media/:id/subtitles", requireAuth, async (req, res) => {
     }
 
     // 2. Check for embedded subtitle tracks via ffprobe (every language, on-demand extraction)
-    const ffprobePath = getFfmpegPath().replace("ffmpeg.exe", "ffprobe.exe");
+    const ffprobePath = getFfprobePath();
     try {
       const { execFileSync } = require("child_process");
       const probeOut = execFileSync(ffprobePath, [
@@ -5280,7 +5313,7 @@ app.get("/api/media/:id/subtitle-extract", requireMediaAccess, async (req, res) 
     let lang = "und", codec = "";
     try {
       const { execFileSync } = require("child_process");
-      const ffprobePath = getFfmpegPath().replace("ffmpeg.exe", "ffprobe.exe");
+      const ffprobePath = getFfprobePath();
       const probeOut = execFileSync(ffprobePath, [
         "-v", "quiet", "-analyzeduration", "100M", "-probesize", "100M",
         "-print_format", "json", "-show_streams",
@@ -7468,12 +7501,16 @@ let _pgsInstallProgress = null; // { step, percent, message, error, done }
 app.get("/api/tools/pgstosrt-status", requireAuth, (req, res) => {
   res.json({
     installed: isPgsToSrtInstalled(),
+    supported: PGSTOSRT_SUPPORTED,
     installing: !!_pgsInstallProgress && !_pgsInstallProgress.done,
     progress: _pgsInstallProgress
   });
 });
 
 app.post("/api/tools/pgstosrt-install", requireAdmin, async (req, res) => {
+  if (!PGSTOSRT_SUPPORTED) {
+    return res.status(400).json({ ok: false, message: "Bildbaserade undertexter (OCR) stöds inte på Linux ännu" });
+  }
   if (_pgsInstallProgress && !_pgsInstallProgress.done) {
     return res.json({ ok: false, message: "Installation pågår redan" });
   }
@@ -7734,10 +7771,21 @@ app.get("/api/browse", requireAuth, (req, res) => {
           return res.json({ current: "", items: [{ name: "C:", path: "C:\\", type: "drive" }], parent: null });
         }
       } else {
+        // Linux/macOS: keep the root listing, but put handy starting points first — the home
+        // folder and the usual mount points (/mnt, /media) if they exist.
+        const quick = [];
+        try {
+          const home = require("os").homedir();
+          if (home && fs.existsSync(home)) quick.push({ name: "~ (hemmapp)", path: home, type: "folder" });
+        } catch {}
+        for (const p of ["/mnt", "/media"]) {
+          try { if (fs.statSync(p).isDirectory()) quick.push({ name: p, path: p, type: "folder" }); } catch {}
+        }
+        const quickPaths = new Set(quick.map(q => q.path));
         const items = fs.readdirSync("/", { withFileTypes: true })
-          .filter(e => e.isDirectory())
+          .filter(e => e.isDirectory() && !quickPaths.has("/" + e.name))
           .map(e => ({ name: e.name, path: "/" + e.name, type: "folder" }));
-        return res.json({ current: "/", items, parent: null });
+        return res.json({ current: "/", items: [...quick, ...items], parent: null });
       }
     }
     if (!fs.existsSync(reqPath)) return res.status(400).json({ error: "Sökvägen finns inte" });
@@ -7817,6 +7865,12 @@ function startFileWatchers() {
         } catch(e) { /* fall through and scan to be safe if we couldn't check */ }
         scheduleWatcherScan(lib.name);
       });
+      // Without an 'error' listener, a watcher error (e.g. Linux hitting its inotify watch
+      // limit, or a network drive disappearing) is an unhandled event and would crash the
+      // whole server. Just log it and carry on.
+      watcher.on("error", (e) => {
+        console.warn(`Bevakningen av biblioteket "${lib.name}" (${lib.path}) fick ett fel och kan ha slutat fungera: ${e.message}. Starta en skanning manuellt vid behov.`);
+      });
       watchers.push(watcher);
       console.log(`👁  Watching: ${lib.path}`);
     } catch(e) {
@@ -7876,7 +7930,8 @@ try {
       testArgs: ["-preset", "p4", "-profile:v", "high"]
     });
   }
-  if (encoderList.includes("h264_amf")) candidates.push({
+  // AMD AMF is a Windows-only API, so it's only a candidate there.
+  if (process.platform === "win32" && encoderList.includes("h264_amf")) candidates.push({
     encoder: "h264_amf",
     extraArgs: [],
     testArgs: []
