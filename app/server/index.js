@@ -363,14 +363,82 @@ const PGSTOSRT_EXE = path.join(PGSTOSRT_DIR, "PgsToSrt.exe");
 const TESSDATA_DIR = path.join(PGSTOSRT_DIR, "tessdata");
 fs.mkdirSync(TOOLS_DIR, { recursive: true });
 
-// PgsToSrt is only downloaded/run as a Windows .exe for now. On other platforms OCR of bitmap
-// (PGS) subtitles is skipped gracefully instead of trying to run a Windows binary.
-const PGSTOSRT_SUPPORTED = process.platform === "win32";
-if (!PGSTOSRT_SUPPORTED) console.log("[SUBTITLES] OCR av bildbaserade undertexter (PgsToSrt) stöds inte på den här plattformen ännu – bildbaserade spår hoppas över");
+// PgsToSrt runs as a Windows .exe on Windows, and as "dotnet PgsToSrt.dll" on Linux (needs the
+// .NET runtime plus the Tesseract and Leptonica system libraries). On any other platform OCR of
+// bitmap (PGS) subtitles is skipped gracefully.
+const IS_LINUX = process.platform === "linux";
+const PGSTOSRT_SUPPORTED = process.platform === "win32" || IS_LINUX; // "can this platform do it at all"
+const PGSTOSRT_DLL = path.join(PGSTOSRT_DIR, "PgsToSrt.dll");
 
+// Linux only: checks the system dependencies PgsToSrt needs, using execFile with argument lists
+// (no shell). Returns { ok, missing: [{name, package}], tesseractVersion, leptName, leptVersion,
+// aptCommand }. Cached for a minute since the status endpoint and OCR steps call it often.
+let _pgsLinuxDepsCache = null;
+function checkPgsToSrtLinuxDeps(force = false) {
+  if (!IS_LINUX) return { ok: true, missing: [], tesseractVersion: null, leptName: null, leptVersion: null, aptCommand: null };
+  if (!force && _pgsLinuxDepsCache && Date.now() - _pgsLinuxDepsCache.at < 60000) return _pgsLinuxDepsCache.result;
+  const { execFileSync } = require("child_process");
+  const run = (bin, args) => execFileSync(bin, args, { encoding: "utf8", timeout: 8000, maxBuffer: 32 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] });
+  const missing = [];
+
+  let dotnetOk = false;
+  try { dotnetOk = /Microsoft\.NETCore\.App\s+\d+/.test(run("dotnet", ["--list-runtimes"])); } catch {}
+  if (!dotnetOk) missing.push({ name: ".NET-runtime (dotnet i PATH)", package: "dotnet-runtime-10.0" });
+
+  // Defaults are used if ldconfig itself can't be run (then the libraries simply aren't verified).
+  let tesseractVersion = "5", leptName = "leptonica", leptVersion = "6";
+  let ldOut = null;
+  for (const bin of ["ldconfig", "/sbin/ldconfig", "/usr/sbin/ldconfig"]) {
+    try { ldOut = run(bin, ["-p"]); break; } catch {}
+  }
+  if (ldOut !== null) {
+    const tessVersions = [...ldOut.matchAll(/^\s*libtesseract\.so\.(\d+)\s/gm)].map(m => m[1]);
+    if (!tessVersions.length) missing.push({ name: "Tesseract-biblioteket (libtesseract)", package: "libtesseract5" });
+    else tesseractVersion = tessVersions.includes("5") ? "5" : tessVersions[0];
+
+    const leptonica = ldOut.match(/^\s*libleptonica\.so\.(\d+)\s/m);
+    const lept = ldOut.match(/^\s*liblept\.so\.(\d+)\s/m);
+    if (leptonica) { leptName = "leptonica"; leptVersion = leptonica[1]; }
+    else if (lept) { leptName = "lept"; leptVersion = lept[1]; }
+    else missing.push({ name: "Leptonica-biblioteket (libleptonica)", package: "libleptonica6" });
+  }
+
+  const result = {
+    ok: missing.length === 0, missing, tesseractVersion, leptName, leptVersion,
+    aptCommand: missing.length ? "sudo apt install " + missing.map(m => m.package).join(" ") : null
+  };
+  _pgsLinuxDepsCache = { at: Date.now(), result };
+  return result;
+}
+
+// Is the PgsToSrt tool itself downloaded? (Linux: PgsToSrt.dll; Windows: PgsToSrt.exe.)
 function isPgsToSrtInstalled() {
   if (!PGSTOSRT_SUPPORTED) return false;
-  return fs.existsSync(PGSTOSRT_EXE) && fs.existsSync(TESSDATA_DIR);
+  return fs.existsSync(IS_LINUX ? PGSTOSRT_DLL : PGSTOSRT_EXE) && fs.existsSync(TESSDATA_DIR);
+}
+
+// Installed AND usable right now. Identical to isPgsToSrtInstalled() on Windows; on Linux it also
+// needs the system packages (dotnet, tesseract, leptonica).
+function isPgsToSrtReady() {
+  return isPgsToSrtInstalled() && (!IS_LINUX || checkPgsToSrtLinuxDeps().ok);
+}
+
+// Short reason text for log lines when OCR can't run. On Windows this is exactly the old wording.
+function pgsNotReadyReason() {
+  if (IS_LINUX && isPgsToSrtInstalled()) {
+    const deps = checkPgsToSrtLinuxDeps();
+    if (!deps.ok) return `systempaket saknas (${deps.missing.map(m => m.package).join(", ")}) – kör: ${deps.aptCommand}`;
+  }
+  return "PgsToSrt är inte installerat";
+}
+
+// Startup note: silent when everything works. Windows keeps logging nothing here.
+if (!PGSTOSRT_SUPPORTED) {
+  console.log("[SUBTITLES] OCR av bildbaserade undertexter (PgsToSrt) stöds bara på Windows och Linux – bildbaserade spår hoppas över");
+} else if (IS_LINUX) {
+  const _deps = checkPgsToSrtLinuxDeps();
+  if (!_deps.ok) console.log(`[SUBTITLES] OCR av bildbaserade undertexter: systempaket saknas (${_deps.missing.map(m => m.package).join(", ")}). Installera med: ${_deps.aptCommand} – bildbaserade spår hoppas över tills dess`);
+  else if (!isPgsToSrtInstalled()) console.log("[SUBTITLES] OCR av bildbaserade undertexter: PgsToSrt är inte nedladdat ännu – installera det under Inställningar");
 }
 
 // Downloads a missing Tesseract language pack (e.g. "fin.traineddata") straight from the
@@ -2441,12 +2509,25 @@ async function convertPgsTosrt(item, subIdx, cacheFile, targetLang) {
 
     // Step 2: Convert .sup to .srt using PgsToSrt
     await new Promise((resolve, reject) => {
-      const proc = execFile(PGSTOSRT_EXE, [
+      const pgsArgs = [
         "--input", supFile,
         "--output", cacheFile,
         "--tesseractdata", TESSDATA_DIR,
         "--tesseractlanguage", tessLang
-      ], { timeout: 600000, windowsHide: true }, (err) => {
+      ];
+      let pgsProgram = PGSTOSRT_EXE;
+      let pgsOptions = { timeout: 600000, windowsHide: true };
+      if (IS_LINUX) {
+        // Linux: run the .NET build via "dotnet" (argument list, no shell). Tesseract/Leptonica
+        // versions come from the system. DOTNET_ROLL_FORWARD=Major lets the .NET 8 build run on a
+        // newer runtime — set only in this child process's environment, not for the whole server.
+        const deps = checkPgsToSrtLinuxDeps();
+        pgsProgram = "dotnet";
+        pgsArgs.unshift(PGSTOSRT_DLL);
+        pgsArgs.push("--tesseractversion", deps.tesseractVersion, "--libleptname", deps.leptName, "--libleptversion", deps.leptVersion);
+        pgsOptions = { ...pgsOptions, env: { ...process.env, DOTNET_ROLL_FORWARD: "Major" } };
+      }
+      const proc = execFile(pgsProgram, pgsArgs, pgsOptions, (err) => {
         if (err) reject(err); else resolve();
       });
       deprioritizeBackgroundProcess(proc);
@@ -2583,8 +2664,8 @@ async function preCacheSubtitles(item, opts) {
         hadGatedSkip = true;
         continue;
       }
-      if (!isPgsToSrtInstalled()) {
-        logSubtitle("warn", item, `Bildbaserat spår (${subtitleLangLabel(lang)}) hoppas över – PgsToSrt är inte installerat`, { subIdx, lang, codec });
+      if (!isPgsToSrtReady()) {
+        logSubtitle("warn", item, `Bildbaserat spår (${subtitleLangLabel(lang)}) hoppas över – ${pgsNotReadyReason()}`, { subIdx, lang, codec });
         hadGatedSkip = true;
         continue;
       }
@@ -2622,7 +2703,7 @@ async function preCacheSubtitles(item, opts) {
         if (ocrLangs !== null && !ocrLangs.has(lang)) {
           logSubtitle("info", item, `Bildbaserat spår (${subtitleLangLabel(lang)}, upptäckt sent) hoppas över – inte i språklistan just nu`, { subIdx, lang });
           hadGatedSkip = true;
-        } else if (isPgsToSrtInstalled()) {
+        } else if (isPgsToSrtReady()) {
           const t1 = Date.now();
           const ok = await convertPgsTosrt(item, subIdx, cacheFile, lang);
           const secs2 = ((Date.now() - t1) / 1000).toFixed(1);
@@ -2634,7 +2715,7 @@ async function preCacheSubtitles(item, opts) {
             hadRealFailure = true;
           }
         } else {
-          logSubtitle("warn", item, `Bildbaserat spår (${subtitleLangLabel(lang)}) hoppas över – PgsToSrt är inte installerat`, { subIdx, lang, codec });
+          logSubtitle("warn", item, `Bildbaserat spår (${subtitleLangLabel(lang)}) hoppas över – ${pgsNotReadyReason()}`, { subIdx, lang, codec });
           hadGatedSkip = true;
         }
       } else {
@@ -5339,9 +5420,9 @@ app.get("/api/media/:id/subtitle-extract", requireMediaAccess, async (req, res) 
         return res.status(404).json({ error: "DVD/VobSub subtitle format not supported by current OCR tool (PGS only)" });
       }
       if (bitmapCodecs.includes(codec)) {
-        if (!isPgsToSrtInstalled()) {
+        if (!isPgsToSrtReady()) {
           vlog(`  → 404, PgsToSrt not installed`);
-          logSubtitle("warn", item, `Bildbaserat spår (${subtitleLangLabel(lang)}) kan inte visas – PgsToSrt är inte installerat`, { trackIndex, lang });
+          logSubtitle("warn", item, `Bildbaserat spår (${subtitleLangLabel(lang)}) kan inte visas – ${pgsNotReadyReason()}`, { trackIndex, lang });
           return res.status(404).json({ error: "Bitmap subtitle not supported without PgsToSrt" });
         }
         if (fs.existsSync(tempFile)) { vlog(`  → 202, already converting (PGS)`); return res.status(202).json({ status: "extracting", retryAfter: 5 }); }
@@ -7499,17 +7580,36 @@ const TESSDATA_LANGUAGES = { "swe": "swe.traineddata", "eng": "eng.traineddata",
 let _pgsInstallProgress = null; // { step, percent, message, error, done }
 
 app.get("/api/tools/pgstosrt-status", requireAuth, (req, res) => {
+  // "supported" = this platform can do OCR at all (Windows, Linux); "ready" = everything needed
+  // is in place right now. On Linux, "missing" lists missing system packages with apt names.
+  const deps = checkPgsToSrtLinuxDeps();
   res.json({
     installed: isPgsToSrtInstalled(),
     supported: PGSTOSRT_SUPPORTED,
+    ready: isPgsToSrtReady(),
+    platform: process.platform,
+    missing: IS_LINUX ? deps.missing : [],
+    aptCommand: IS_LINUX ? deps.aptCommand : null,
     installing: !!_pgsInstallProgress && !_pgsInstallProgress.done,
     progress: _pgsInstallProgress
   });
 });
 
+// Linux: unpack with the "unzip" command (argument list, no shell, so paths with spaces or
+// special characters are fine). Exit code 1 means "finished with warnings" for unzip — not a failure.
+function extractZipLinux(zipPath, destDir) {
+  return new Promise((resolve, reject) => {
+    require("child_process").execFile("unzip", ["-o", "-q", zipPath, "-d", destDir], { timeout: 120000 }, (err) => {
+      if (!err || err.code === 1) return resolve();
+      if (err.code === "ENOENT") return reject(new Error("Kommandot unzip saknas – installera det med: sudo apt install unzip"));
+      reject(new Error("Kunde inte packa upp zip-filen: " + (err.message || "").split("\n")[0]));
+    });
+  });
+}
+
 app.post("/api/tools/pgstosrt-install", requireAdmin, async (req, res) => {
   if (!PGSTOSRT_SUPPORTED) {
-    return res.status(400).json({ ok: false, message: "Bildbaserade undertexter (OCR) stöds inte på Linux ännu" });
+    return res.status(400).json({ ok: false, message: "Bildbaserade undertexter (OCR) stöds bara på Windows och Linux" });
   }
   if (_pgsInstallProgress && !_pgsInstallProgress.done) {
     return res.json({ ok: false, message: "Installation pågår redan" });
@@ -7545,7 +7645,12 @@ app.post("/api/tools/pgstosrt-install", requireAdmin, async (req, res) => {
 
       // Step 2: Extract zip
       _pgsInstallProgress = { step: 2, percent: 40, message: "Packar upp PgsToSrt...", error: null, done: false };
-      await extractZip(zipPath, PGSTOSRT_DIR);
+      if (IS_LINUX) {
+        await extractZipLinux(zipPath, PGSTOSRT_DIR);
+        if (!fs.existsSync(PGSTOSRT_DLL)) throw new Error("PgsToSrt.dll hittades inte efter uppackningen");
+      } else {
+        await extractZip(zipPath, PGSTOSRT_DIR);
+      }
       try { fs.unlinkSync(zipPath); } catch {}
 
       // Step 3: Download tessdata - always get configured language + eng + any extras
@@ -7559,7 +7664,13 @@ app.post("/api/tools/pgstosrt-install", requireAdmin, async (req, res) => {
         await downloadFile(TESSDATA_BASE_URL + filename, path.join(TESSDATA_DIR, filename), () => {});
       }
 
-      _pgsInstallProgress = { step: 4, percent: 100, message: "Installation klar!", error: null, done: true };
+      let doneMessage = "Installation klar!";
+      if (IS_LINUX) {
+        // The app can't install system packages itself — tell the admin exactly what to run.
+        const deps = checkPgsToSrtLinuxDeps(true);
+        if (!deps.ok) doneMessage = `PgsToSrt är nedladdat, men systempaket saknas. Kör på servern: ${deps.aptCommand}`;
+      }
+      _pgsInstallProgress = { step: 4, percent: 100, message: doneMessage, error: null, done: true };
       console.log("[TOOLS] PgsToSrt installed successfully");
     } catch(e) {
       console.error("[TOOLS] PgsToSrt install failed:", e.message);

@@ -41,6 +41,26 @@ automatiskt med standardvärden (port 7000 och en slumpad nyckel).
 
 Se `streamvault.service` i den här mappen (ett systemd-exempel, bara som dokumentation).
 
+## Bildbaserade undertexter (OCR av PGS)
+
+StreamVault använder verktyget PgsToSrt tillsammans med Tesseract för att göra om
+bildbaserade undertexter (Blu-ray/PGS) till text. På Linux körs verktyget via `dotnet`.
+
+Installera systempaketen (testat på Ubuntu 26.04; andra distributioner kan ha andra
+paketnamn och versioner):
+
+```bash
+sudo apt install dotnet-runtime-10.0 libtesseract5 libleptonica6 unzip
+```
+
+- `unzip` behövs när StreamVault packar upp verktyget.
+- Själva verktyget (PgsToSrt) och språkdata för Tesseract laddar StreamVault ner själv:
+  gå till Inställningar och tryck på "Installera nu" i kortet för bildbaserade undertexter.
+  Saknas något systempaket visar kortet i stället exakt vilket `apt`-kommando du ska köra.
+- PgsToSrt är byggt för .NET 8, som inte finns i Ubuntu 26.04. StreamVault startar det därför
+  med `DOTNET_ROLL_FORWARD=Major` (bara för just det programmet) så att det kör på .NET 10.
+- Servern hittar Tesseract- och Leptonica-versionerna själv med `ldconfig -p`.
+
 ## Kända begränsningar på Linux
 
 - **Mappbevakningen upptäcker inte nya filer på nätverksmonteringar (CIFS/NFS).** Linux
@@ -48,8 +68,8 @@ Se `streamvault.service` i den här mappen (ett systemd-exempel, bara som dokume
   skanning för hand från StreamVaults inställningar när du lagt till filer. Lokala diskar
   bevakas som vanligt. Om gränsen för antal bevakade filer (inotify) nås loggar servern ett
   meddelande med bibliotekets namn och fortsätter köra.
-- **Bildbaserade undertexter (PGS, OCR)** stöds inte ännu: de spåren hoppas över med ett
-  meddelande i loggen. Textundertexter fungerar.
+- **Bildbaserade undertexter (PGS, OCR)** kräver några systempaket (se nästa avsnitt). Saknas
+  de hoppas de spåren över med ett meddelande i loggen. Textundertexter fungerar alltid.
 - **Automatisk uppdatering** finns inte på Linux (den hämtar en Windows-installerare).
   Uppdatera manuellt.
 - **AMD (AMF)** används bara på Windows. Hårdvarukodning på Linux testas bara med NVIDIA/NVENC.

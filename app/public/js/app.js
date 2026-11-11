@@ -6082,6 +6082,40 @@ async function saveTrailerStreamToggle(enabled) {
   }
 }
 
+// Settings card content for the bitmap-subtitle (OCR) tool on non-Windows servers (Linux).
+// The Windows card is unchanged and is rendered by the original template in loadSettings().
+function renderPgsNonWindowsCard(s) {
+  if (s.supported === false) {
+    return `<div style="font-size:13px;color:var(--muted)">Bildbaserade undertexter (OCR) stöds bara på Windows och Linux. På den här servern hoppas de spåren över.</div>`;
+  }
+  if (s.ready) {
+    return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+      <span style="color:var(--accent)">✅</span>
+      <span style="font-size:13px">PgsToSrt är installerat och redo</span>
+    </div>`;
+  }
+  // System packages the app can't install itself — show exactly what to run instead of the button.
+  if (s.missing && s.missing.length) {
+    return `<div style="font-size:13px;margin-bottom:8px">
+        ${s.installed ? "PgsToSrt är nedladdat, men" : "För att kunna konvertera bildbaserade undertexter (PGS) krävs"} följande på servern${s.installed ? " saknas" : ""}:
+      </div>
+      <ul style="font-size:13px;color:var(--muted);margin:0 0 10px 18px">
+        ${s.missing.map(m => `<li>${esc(m.name)} (paket: ${esc(m.package)})</li>`).join("")}
+      </ul>
+      <div style="font-size:13px;margin-bottom:6px">Kör detta på servern och ladda sedan om den här sidan:</div>
+      <pre style="background:var(--card2);padding:10px;border-radius:6px;font-size:12px;overflow-x:auto;user-select:all;margin:0 0 8px">${esc(s.aptCommand || "")}</pre>
+      <div style="font-size:11px;color:var(--muted)">Andra Linux-distributioner kan ha andra paketnamn och versioner.</div>`;
+  }
+  // System packages are fine — only the PgsToSrt download is missing.
+  return `<div style="font-size:13px;color:var(--muted);margin-bottom:12px">
+      Krävs för att konvertera bildbaserade undertexter (PGS) till text.
+      Utan detta kan dessa undertexter inte visas.
+    </div>
+    <button class="s-btn s-btn-primary" onclick="installPgsToSrt()" id="pgstosrt-install-btn">
+      📥 Installera nu (~50MB)
+    </button>`;
+}
+
 async function installPgsToSrt() {
   const btn = document.getElementById("pgstosrt-install-btn");
   const progressDiv = document.getElementById("pgstosrt-progress");
@@ -7442,7 +7476,7 @@ async function loadSettings() {
       <div class="settings-section">
         <div class="settings-section-title">Bildbaserade undertexter (PGS/VOBSUB)</div>
         <div id="pgstosrt-status-section">
-          ${pgsStatus.installed ? `
+          ${(pgsStatus.platform && pgsStatus.platform !== "win32") ? renderPgsNonWindowsCard(pgsStatus) : pgsStatus.installed ? `
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
             <span style="color:var(--accent)">✅</span>
             <span style="font-size:13px">PgsToSrt är installerat och redo</span>
