@@ -309,6 +309,8 @@ const I18N = {
     "sidebar.explore_movies": "Utforska Filmtrailers",
     "sidebar.explore_tv": "Utforska Serietrailers",
     "sidebar.iptv": "IPTV",
+    "iptv.sort_provider": "Leverantörens ordning",
+    "iptv.sort_name": "A–Ö",
     "sidebar.back": "Tillbaka",
     "sidebar.settings": "INSTÄLLNINGAR",
     "home.recommends": "StreamVault rekommenderar",
@@ -487,6 +489,8 @@ const I18N = {
     "sidebar.explore_movies": "Explore Movie Trailers",
     "sidebar.explore_tv": "Explore TV Trailers",
     "sidebar.iptv": "IPTV",
+    "iptv.sort_provider": "Provider order",
+    "iptv.sort_name": "A–Z",
     "sidebar.back": "Back",
     "sidebar.settings": "SETTINGS",
     "home.recommends": "StreamVault recommends",
@@ -667,6 +671,8 @@ const I18N = {
     "sidebar.explore_movies": "Selaa elokuvatrailereita",
     "sidebar.explore_tv": "Selaa sarjatrailereita",
     "sidebar.iptv": "IPTV",
+    "iptv.sort_provider": "Tarjoajan järjestys",
+    "iptv.sort_name": "A–Ö",
     "sidebar.back": "Takaisin",
     "sidebar.settings": "ASETUKSET",
     "home.recommends": "StreamVault suosittelee",
@@ -1226,6 +1232,37 @@ async function loadIptv(fromRouter) {
   }
 }
 
+// ── IPTV list order switch ("Leverantörens ordning" / "A–Ö") ──────────────────────
+// The choice is remembered in the browser, separately for live, movies and series. With no choice
+// made nothing is sent and the server decides (live: provider's order, movies/series: A–Z).
+function getIptvSort(type) {
+  try {
+    const v = localStorage.getItem("sv_iptv_sort_" + (type || "live"));
+    return v === "list" || v === "name" ? v : null;
+  } catch { return null; }
+}
+// What is actually in effect — the saved choice, else the server's default for that type.
+function iptvEffectiveSort(type) {
+  return getIptvSort(type) || ((type === "movie" || type === "series") ? "name" : "list");
+}
+// Adds "sort=list|name" to an API path, only when the person has made a choice.
+function iptvWithSort(url, type) {
+  const s = getIptvSort(type);
+  return s ? url + (url.includes("?") ? "&" : "?") + "sort=" + s : url;
+}
+function setIptvSort(type, mode) {
+  try { localStorage.setItem("sv_iptv_sort_" + (type || "live"), mode); } catch {}
+  if (typeof window._iptvSortReload === "function") window._iptvSortReload(); // redraw the current list
+}
+function iptvSortSwitchHtml(type) {
+  const eff = iptvEffectiveSort(type);
+  const btn = (mode, label) => {
+    const on = eff === mode;
+    return `<button onclick="setIptvSort('${type || "live"}','${mode}')" aria-pressed="${on}" style="padding:7px 14px;font-size:13px;font-family:inherit;cursor:pointer;border-radius:8px;border:1px solid ${on ? "var(--accent)" : "var(--border, #333)"};background:${on ? "var(--accent)" : "var(--card2, #1a1a28)"};color:${on ? "#fff" : "var(--muted, #999)"};font-weight:${on ? "700" : "400"}">${esc(label)}</button>`;
+  };
+  return `<div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap">${btn("list", t("iptv.sort_provider"))}${btn("name", t("iptv.sort_name"))}</div>`;
+}
+
 async function loadIptvGroups(type, fromRouter) {
   activateIptvSection();
   const sec = document.getElementById("sec-iptv");
@@ -1264,12 +1301,14 @@ async function openIptvSubgroups(country, type, fromRouter) {
   if (!sec) return;
   if (!fromRouter) navigateToPath(`/iptv?type=${type}&country=${encodeURIComponent(country)}`, `${country} - StreamVault`);
   sec.innerHTML = `<div class="spinner-wrap"><div class="spinner"></div></div>`;
+  window._iptvSortReload = () => openIptvSubgroups(country, type, true);
   try {
-    const data = await API.get("/iptv/subgroups?country=" + encodeURIComponent(country));
+    const data = await API.get(iptvWithSort("/iptv/subgroups?country=" + encodeURIComponent(country), "live"));
     sec.innerHTML = `
       <div class="grid-wrap">
         <button onclick="history.back()" style="background:var(--card2, #1a1a28);color:var(--text, #fff);border:1px solid var(--border, #333);padding:8px 16px;border-radius:8px;cursor:pointer;font-size:14px;display:inline-block;margin-bottom:14px">← Tillbaka</button>
         <h2 style="margin-bottom:14px">${esc(country)}</h2>
+        ${iptvSortSwitchHtml("live")}
         <div style="display:flex;flex-direction:column;gap:8px;max-width:500px">
           ${data.groups.map(g => `
             <div class="s-row" style="cursor:pointer" onclick="openIptvGroup('${esc(g.name).replace(/'/g,"\\'")}', '${type}')">
@@ -1315,8 +1354,9 @@ async function openIptvPlaylist(playlistId, name, fromRouter) {
   if (!sec) return;
   if (!fromRouter) navigateToPath(`/iptv?playlist=${playlistId}&name=${encodeURIComponent(name)}`, `${name} - StreamVault`);
   sec.innerHTML = `<div class="spinner-wrap"><div class="spinner"></div></div>`;
+  window._iptvSortReload = () => openIptvPlaylist(playlistId, name, true);
   try {
-    const data = await API.get("/iptv/playlists/" + playlistId + "/channels");
+    const data = await API.get(iptvWithSort("/iptv/playlists/" + playlistId + "/channels", "live"));
     const isEmpty = !data.countryEntries.length && !data.channels.length;
     sec.innerHTML = `
       <div class="grid-wrap">
@@ -1325,6 +1365,7 @@ async function openIptvPlaylist(playlistId, name, fromRouter) {
           <button class="btn-fav" style="color:var(--danger)" onclick="deleteIptvPlaylist('${playlistId}')">🗑 Ta bort lista</button>
         </div>
         <h2 style="margin-bottom:14px">⭐ ${esc(name)}</h2>
+        ${iptvSortSwitchHtml("live")}
         ${isEmpty ? `<p style="color:var(--muted)">Listan är tom.</p>` : `
         <div style="display:flex;flex-direction:column;gap:6px;max-width:500px;margin-bottom:16px">
           ${data.countryEntries.map(c => `
@@ -1351,12 +1392,14 @@ async function openIptvPlaylistCountry(playlistId, country, isCountry, playlistN
   if (!sec) return;
   if (!fromRouter) navigateToPath(`/iptv?playlist=${playlistId}&name=${encodeURIComponent(playlistName)}&country=${encodeURIComponent(country)}&isCountry=${isCountry}`, `${country} - StreamVault`);
   sec.innerHTML = `<div class="spinner-wrap"><div class="spinner"></div></div>`;
+  window._iptvSortReload = () => openIptvPlaylistCountry(playlistId, country, isCountry, playlistName, true);
   try {
-    const data = await API.get(`/iptv/playlists/${playlistId}/country-channels?country=${encodeURIComponent(country)}&isCountry=${isCountry}`);
+    const data = await API.get(iptvWithSort(`/iptv/playlists/${playlistId}/country-channels?country=${encodeURIComponent(country)}&isCountry=${isCountry}`, "live"));
     sec.innerHTML = `
       <div class="grid-wrap">
         <button onclick="history.back()" style="background:var(--card2, #1a1a28);color:var(--text, #fff);border:1px solid var(--border, #333);padding:8px 16px;border-radius:8px;cursor:pointer;font-size:14px;display:inline-block;margin-bottom:14px">← Tillbaka</button>
         <h2 style="margin-bottom:14px">🌍 ${esc(country)}</h2>
+        ${iptvSortSwitchHtml("live")}
         <div class="media-grid">
           ${data.channels.map(c => buildIptvChannelCard(c)).join("")}
         </div>
@@ -1384,12 +1427,14 @@ async function openIptvGroup(groupName, type, fromRouter) {
   if (!sec) return;
   if (!fromRouter) navigateToPath(`/iptv?type=${type || "live"}&group=${encodeURIComponent(groupName)}`, `${groupName} - StreamVault`);
   sec.innerHTML = `<div class="spinner-wrap"><div class="spinner"></div></div>`;
+  window._iptvSortReload = () => openIptvGroup(groupName, type, true);
   try {
-    const data = await API.get("/iptv/channels?group=" + encodeURIComponent(groupName) + "&type=" + (type || "live"));
+    const data = await API.get(iptvWithSort("/iptv/channels?group=" + encodeURIComponent(groupName) + "&type=" + (type || "live"), type || "live"));
     sec.innerHTML = `
       <div class="grid-wrap">
         <button onclick="history.back()" style="background:var(--card2, #1a1a28);color:var(--text, #fff);border:1px solid var(--border, #333);padding:8px 16px;border-radius:8px;cursor:pointer;font-size:14px;display:inline-block;margin-bottom:14px">← Tillbaka</button>
         <h2 style="margin-bottom:14px">${esc(groupName)}</h2>
+        ${iptvSortSwitchHtml(type || "live")}
         <div class="media-grid">
           ${data.channels.map(c => buildIptvChannelCard(c, { showSaveButton: true })).join("")}
         </div>

@@ -1502,6 +1502,8 @@ function detectContentType(url, groupTitle) {
   return "live";
 }
 
+const { sortChannels, groupsByFirstOrder, reuseChannelIds } = require("./iptvOrder");
+
 function parseM3U(text) {
   const lines = text.split(/\r?\n/);
   const channels = [];
@@ -1518,6 +1520,7 @@ function parseM3U(text) {
     const type = detectContentType(url, group);
     channels.push({
       _id: uuidv4(),
+      order: channels.length, // position in the provider's file (0, 1, 2 ...), kept so lists can follow it
       name,
       logo: logoMatch ? logoMatch[1] : null,
       group,
@@ -1630,14 +1633,18 @@ async function fetchAndSaveM3U(url) {
       r.on("end", () => resolve(body));
     }).on("error", reject).on("timeout", () => reject(new Error("Timeout")));
   });
-  const channels = parseM3U(text);
-  if (!channels.length) throw new Error("Ingen kanal hittades i listan — kontrollera att adressen pekar på en giltig M3U-fil");
+  const parsed = parseM3U(text);
+  if (!parsed.length) throw new Error("Ingen kanal hittades i listan — kontrollera att adressen pekar på en giltig M3U-fil");
+  // Keep the _id of a channel that was already there (same url), so channels saved individually
+  // in favorite lists (channel_ids) survive a refresh instead of getting a new id every time.
+  const previous = await dbFind(db.iptvChannels, {});
+  const { channels, preserved } = reuseChannelIds(previous, parsed);
   await new Promise((resolve, reject) => db.iptvChannels.remove({}, { multi: true }, (err) => err ? reject(err) : resolve()));
   await new Promise((resolve, reject) => db.iptvChannels.insert(channels, (err) => err ? reject(err) : resolve()));
   db.iptvChannels.persistence.compactDatafile(); // same unbounded-growth risk as EPG — fixed the same way
   config.iptv_m3u_url = url;
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
-  console.log(`[IPTV] Tolkade ${channels.length} kanaler från spellistan`);
+  console.log(`[IPTV] Tolkade ${channels.length} kanaler från spellistan (${preserved} id bevarade)`);
   return channels.length;
 }
 
@@ -1856,6 +1863,14 @@ app.get("/api/iptv/groups", requireAuth, async (req, res) => {
 //     channel list (not stored), so a later playlist refresh that adds/removes channels for
 //     that country is reflected automatically.
 
+// Order of channel lists: "list" = the provider's own order, "name" = A–Z. ?sort=list|name decides;
+// without it live TV (or no type given) follows the provider's list and movies/series are A–Z.
+function iptvSortMode(req, type) {
+  const s = req.query.sort;
+  if (s === "list" || s === "name") return s;
+  return (type === "movie" || type === "series") ? "name" : "list";
+}
+
 function channelsForCountryQuery(country, isCountry) {
   return isCountry ? { country, type: "live" } : { group: country, type: "live" };
 }
@@ -1955,7 +1970,7 @@ app.get("/api/iptv/playlists/:id/channels", requireAuth, async (req, res) => {
       countryEntries.push({ name: c.name, isCountry: c.isCountry, count });
     }
     const ids = playlist.channel_ids || [];
-    const channels = ids.length ? (await dbFind(db.iptvChannels, { _id: { $in: ids } })).sort((a, b) => a.name.localeCompare(b.name)) : [];
+    const channels = ids.length ? sortChannels(await dbFind(db.iptvChannels, { _id: { $in: ids } }), iptvSortMode(req)) : [];
     res.json({
       name: playlist.name,
       countryEntries,
@@ -1971,7 +1986,7 @@ app.get("/api/iptv/playlists/:id/country-channels", requireAuth, async (req, res
     const playlist = await dbFindOne(db.iptvPlaylists, { _id: req.params.id });
     if (!playlist || playlist.user_id !== req.user._id) return res.status(404).json({ error: "Hittades inte" });
     const { country, isCountry } = req.query;
-    const channels = (await dbFind(db.iptvChannels, channelsForCountryQuery(country, isCountry === "true"))).sort((a, b) => a.name.localeCompare(b.name));
+    const channels = sortChannels(await dbFind(db.iptvChannels, channelsForCountryQuery(country, isCountry === "true")), iptvSortMode(req));
     res.json({ channels: channels.map(c => ({ id: c._id, name: c.name, logo: c.logo, group: c.group, type: c.type || "live", url: c.url, tvg_id: c.tvg_id || null })) });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -1982,9 +1997,15 @@ app.get("/api/iptv/subgroups", requireAuth, async (req, res) => {
     const country = req.query.country;
     if (!country) return res.status(400).json({ error: "Inget land angivet" });
     const channels = await dbFind(db.iptvChannels, { country, type: "live" });
-    const counts = {};
-    for (const c of channels) counts[c.group] = (counts[c.group] || 0) + 1;
-    const groups = Object.entries(counts).map(([name, count]) => ({ name, count })).sort((a, b) => a.name.localeCompare(b.name));
+    let groups;
+    if (iptvSortMode(req, "live") === "list") {
+      // sub-groups in the order they first appear in the provider's list (lowest order in the group)
+      groups = groupsByFirstOrder(channels);
+    } else {
+      const counts = {};
+      for (const c of channels) counts[c.group] = (counts[c.group] || 0) + 1;
+      groups = Object.entries(counts).map(([name, count]) => ({ name, count })).sort((a, b) => a.name.localeCompare(b.name));
+    }
     res.json({ groups });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -1994,7 +2015,7 @@ app.get("/api/iptv/channels", requireAuth, async (req, res) => {
   try {
     const query = req.query.group ? { group: req.query.group } : {};
     if (["live", "movie", "series"].includes(req.query.type)) query.type = req.query.type;
-    const channels = (await dbFind(db.iptvChannels, query)).sort((a, b) => a.name.localeCompare(b.name));
+    const channels = sortChannels(await dbFind(db.iptvChannels, query), iptvSortMode(req, query.type));
     const userPlaylists = await dbFind(db.iptvPlaylists, { user_id: req.user._id });
     const favoritedChannelIds = new Set(userPlaylists.flatMap(p => p.channel_ids || []));
     const favoritedCountryNames = new Set(userPlaylists.flatMap(p => (p.countries || []).map(c => c.name)));
