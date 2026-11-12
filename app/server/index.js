@@ -2874,6 +2874,18 @@ async function fetchOpenSubtitlesForItem(item) {
   } catch(e) {}
 }
 
+// TMDB episode object -> the shape mergeEpisodeMeta() works on (also used by the season page).
+function normalizeTmdbEpisode(te) {
+  if (!te) return null;
+  return {
+    title: te.name || "",
+    overview: te.overview || "",
+    runtime: te.runtime || null,
+    still_url: te.still_path ? `https://image.tmdb.org/t/p/w300${te.still_path}` : null,
+    air_date: te.air_date || null
+  };
+}
+
 // Fetch TMDB episode info in background after scan
 async function enrichEpisodeMeta(episode) {
   if (!config.tmdb_api_key) return;
@@ -2892,15 +2904,31 @@ async function enrichEpisodeMeta(episode) {
       console.log(`[ENRICH] No data for ${show.title} S${episode.season}E${episode.episode}`);
       return;
     }
+    let title = data.name;
+    let overview = data.overview || null;
+    let stillUrl = data.still_path ? `https://image.tmdb.org/t/p/w300${data.still_path}` : null;
+    // Double episode (one file holding episodes N and N+1...): also fetch the last part and store
+    // a combined title/overview. If the second part isn't on TMDB, just the first is used.
+    if (episode.episode_end) {
+      try {
+        const data2 = await tmdbFetch(`/tv/${show.tmdb_id}/season/${episode.season}/episode/${episode.episode_end}?`, "en-US");
+        if (data2 && data2.name) {
+          const merged = mergeEpisodeMeta(normalizeTmdbEpisode(data), normalizeTmdbEpisode(data2));
+          title = merged.title;
+          overview = merged.overview || null;
+          stillUrl = merged.still_url || null;
+        }
+      } catch(e) { /* keep the first part only */ }
+    }
     await dbUpdate(db.media, { _id: episode._id }, {
       $set: {
-        title: data.name,
-        overview: data.overview || null,
+        title,
+        overview,
         rating: data.vote_average || null,
-        still_url: data.still_path ? `https://image.tmdb.org/t/p/w300${data.still_path}` : null
+        still_url: stillUrl
       }
     });
-    console.log(`[ENRICH] ${show.title} S${episode.season}E${episode.episode} → "${data.name}"`);
+    console.log(`[ENRICH] ${show.title} S${episode.season}E${episode.episode}${episode.episode_end ? "–" + episode.episode_end : ""} → "${title}"`);
   } catch(e) {
     console.log(`[ENRICH] Error for ${show.title} S${episode.season}E${episode.episode}:`, e.message);
   }
@@ -2926,7 +2954,7 @@ async function processEpisodeEnrichQueue() {
   _episodeEnrichRunning = false;
 }
 
-const { parseEpisodeFromFilename, seasonHintFromFolderName, detectFolderNumbering } = require("./episodeParser");
+const { parseEpisodeFromFilename, seasonHintFromFolderName, detectFolderNumbering, mergeEpisodeMeta } = require("./episodeParser");
 
 // seasonHint: season number taken from the folder name this directory was entered through
 // ("Season 3" -> 3), or null. Only used when the file name itself has no season marker.
@@ -2956,7 +2984,7 @@ async function scanEpisodes(showPath,showId,libId,depth=0,seasonHint=null) {
     if (!parsedEp) console.log(`[SCAN] Warning: could not detect season/episode from "${entry.name}"`);
     const emSeason = parsedEp ? parsedEp.season : 0;
     const emEpisode = parsedEp ? parsedEp.episode : 0;
-    const newEp = {_id:id,library_id:libId,type:"episode",title:path.parse(entry.name).name,file_path:fullPath,file_size:fs.statSync(fullPath).size,parent_id:showId,season:emSeason,episode:emEpisode,added_at:new Date().toISOString()};
+    const newEp = {_id:id,library_id:libId,type:"episode",title:path.parse(entry.name).name,file_path:fullPath,file_size:fs.statSync(fullPath).size,parent_id:showId,season:emSeason,episode:emEpisode,...(parsedEp && parsedEp.episodeEnd !== undefined ? {episode_end:parsedEp.episodeEnd} : {}),added_at:new Date().toISOString()};
     await dbInsert(db.media, newEp);
     queueEpisodeEnrich(newEp); // fetch episode title from TMDB in background
     queueSubtitleCache(newEp); // queue subtitle pre-cache (external SRT + OpenSubtitles)
@@ -7438,7 +7466,23 @@ app.get("/api/tvshow/:id/season/:season", requireAuth, async (req, res) => {
     }
 
     const enriched = episodes.map(ep => {
-      const tmdbEp = tmdbEpisodes.find(te => te.episode_number === ep.episode);
+      let tmdbEp = tmdbEpisodes.find(te => te.episode_number === ep.episode);
+      if (ep.episode_end && tmdbEp) {
+        // Double episode: combine both parts' TMDB info into one card. If the last part isn't on
+        // TMDB, the first part is used as it is.
+        const endEp = tmdbEpisodes.find(te => te.episode_number === ep.episode_end);
+        if (endEp) {
+          const merged = mergeEpisodeMeta(normalizeTmdbEpisode(tmdbEp), normalizeTmdbEpisode(endEp));
+          return {
+            ...safe(ep),
+            title: merged.title || ep.title || `Avsnitt ${ep.episode}`,
+            overview: merged.overview || "",
+            still_url: merged.still_url || null,
+            runtime: merged.runtime || null,
+            air_date: merged.air_date || null
+          };
+        }
+      }
       return {
         ...safe(ep),
         title: tmdbEp?.name || ep.title || `Avsnitt ${ep.episode}`,
@@ -7981,7 +8025,11 @@ app.post("/api/scan/repair-episodes", requireAdmin, async (req, res) => {
     const showTitle = new Map(shows.map(s => [s._id, s.title]));
     const tag = (s, e) => `S${s}E${e}`;
 
-    const changes = [];       // { ep, season, episode }
+    const rangeTag = (s, e, end) => end === undefined ? tag(s, e) : `${tag(s, e)}–${end}`;
+    const changes = [];       // renumbered: { ep, season, episode, newEnd, oldEnd, endChanged }
+    const rangeOnly = [];     // only episode_end differs: { ep, newEnd, oldEnd }
+    let rangesAdded = 0, rangesRemoved = 0;
+    const rangeExamples = [];
     let unparsed = 0;
     const finalByKey = new Map(); // "parent|season|episode" -> [{ ep, changed }]
     // Numbering style per folder ("compact" 101 = S1E01 / "absolute" 101 = episode 101), judged
@@ -8003,9 +8051,28 @@ app.post("/api/scan/repair-episodes", requireAdmin, async (req, res) => {
       let season = ep.season, episode = ep.episode, changed = false;
       if (!parsed) {
         unparsed++;                       // couldn't be parsed: never touched
-      } else if (parsed.season !== ep.season || parsed.episode !== ep.episode) {
-        season = parsed.season; episode = parsed.episode; changed = true;
-        changes.push({ ep, season, episode });
+      } else {
+        // Double episode (one file, two episodes): the stored episode_end vs. what the name says.
+        const oldEnd = (typeof ep.episode_end === "number") ? ep.episode_end : undefined;
+        const newEnd = parsed.episodeEnd;
+        const endChanged = newEnd !== oldEnd;
+        if (parsed.season !== ep.season || parsed.episode !== ep.episode) {
+          season = parsed.season; episode = parsed.episode; changed = true;
+          changes.push({ ep, season, episode, newEnd, oldEnd, endChanged });
+        } else if (endChanged) {
+          rangeOnly.push({ ep, newEnd, oldEnd });   // same numbers, only the episode_end differs
+        }
+        if (endChanged && newEnd !== undefined) {
+          rangesAdded++;
+          if (rangeExamples.length < 10) rangeExamples.push({
+            show: showTitle.get(ep.parent_id) || ep.parent_id,
+            file: base,
+            from: rangeTag(ep.season, ep.episode, oldEnd),
+            to: rangeTag(season, episode, newEnd)
+          });
+        } else if (endChanged) {
+          rangesRemoved++;
+        }
       }
       if (season === 0 && episode === 0) continue; // "unknown" isn't a duplicate of anything
       const key = `${ep.parent_id}|${season}|${episode}`;
@@ -8038,9 +8105,10 @@ app.post("/api/scan/repair-episodes", requireAdmin, async (req, res) => {
 
     const result = {
       dryRun, libraryId, checked: episodes.length, changed: changes.length, unparsed, duplicates,
-      perShow: perShowAll.slice(0, 10), examples, duplicateExamples
+      perShow: perShowAll.slice(0, 10), examples, duplicateExamples,
+      rangesAdded, rangesRemoved, rangeExamples
     };
-    if (dryRun || changes.length === 0) return res.json(result);
+    if (dryRun || (changes.length === 0 && rangeOnly.length === 0)) return res.json(result);
 
     // Real run. Safety copy of media.db FIRST; any problem aborts before a single write.
     let backupPath;
@@ -8051,7 +8119,7 @@ app.post("/api/scan/repair-episodes", requireAdmin, async (req, res) => {
       return res.status(500).json({ error: `Reparationen avbröts och ingenting ändrades: ${e.message}` });
     }
 
-    let failed = 0, firstError = null;
+    let failed = 0, firstError = null, rangesApplied = 0;
     const updated = [];
     for (const c of changes) {
       const stem = path.parse(path.basename(c.ep.file_path || "")).name;
@@ -8059,24 +8127,41 @@ app.post("/api/scan/repair-episodes", requireAdmin, async (req, res) => {
         // season/episode, plus the TMDB-enriched fields reset to the freshly-scanned state
         // (title = file name; overview/rating/still_url absent). _id, file_path, history,
         // favorites and the subtitle cache are not touched.
-        await dbUpdate(db.media, { _id: c.ep._id }, {
-          $set: { season: c.season, episode: c.episode, title: stem },
-          $unset: { overview: true, rating: true, still_url: true }
-        });
-        updated.push({ ...c.ep, season: c.season, episode: c.episode, title: stem });
+        const set = { season: c.season, episode: c.episode, title: stem };
+        const unset = { overview: true, rating: true, still_url: true };
+        if (c.newEnd !== undefined) set.episode_end = c.newEnd;     // double episode
+        else if (c.oldEnd !== undefined) unset.episode_end = true;  // no longer one
+        await dbUpdate(db.media, { _id: c.ep._id }, { $set: set, $unset: unset });
+        updated.push({ ...c.ep, season: c.season, episode: c.episode, title: stem, episode_end: c.newEnd });
+        if (c.endChanged && c.newEnd !== undefined) rangesApplied++;
       } catch(e) {
         failed++; if (!firstError) firstError = e.message;
         console.error(`[REPAIR] Kunde inte uppdatera ${c.ep.file_path}:`, e.message);
       }
     }
+    // Episodes whose season/episode are right and where ONLY episode_end differs: nothing else is
+    // touched (title etc. stay), but the TMDB enrichment is queued again below.
+    const rangeUpdated = [];
+    for (const r of rangeOnly) {
+      try {
+        await dbUpdate(db.media, { _id: r.ep._id }, r.newEnd !== undefined
+          ? { $set: { episode_end: r.newEnd } }
+          : { $unset: { episode_end: true } });
+        rangeUpdated.push({ ...r.ep, episode_end: r.newEnd });
+        if (r.newEnd !== undefined) rangesApplied++;
+      } catch(e) {
+        failed++; if (!firstError) firstError = e.message;
+        console.error(`[REPAIR] Kunde inte uppdatera ${r.ep.file_path}:`, e.message);
+      }
+    }
 
     const updatedPerShow = new Map();
-    for (const u of updated) updatedPerShow.set(u.parent_id, (updatedPerShow.get(u.parent_id) || 0) + 1);
+    for (const u of [...updated, ...rangeUpdated]) updatedPerShow.set(u.parent_id, (updatedPerShow.get(u.parent_id) || 0) + 1);
     for (const [id, n] of updatedPerShow) console.log(`[REPAIR] ${showTitle.get(id) || id}: ${n} avsnitt ändrade`);
-    for (const u of updated) queueEpisodeEnrich(u); // re-fetch title/overview/rating/image from TMDB in the background
-    console.log(`[REPAIR] Klart: kontrollerade ${episodes.length}, ändrade ${updated.length} avsnitt i ${updatedPerShow.size} serier, ${unparsed} kunde inte tolkas, ${duplicates} i dubbletter, ${failed} misslyckades. Säkerhetskopia: ${backupPath}`);
+    for (const u of [...updated, ...rangeUpdated]) queueEpisodeEnrich(u); // re-fetch title/overview/rating/image from TMDB in the background
+    console.log(`[REPAIR] Klart: kontrollerade ${episodes.length}, ändrade ${updated.length} avsnitt och ${rangeUpdated.length} dubbelavsnitt-markeringar i ${updatedPerShow.size} serier (${rangesApplied} dubbelavsnitt), ${unparsed} kunde inte tolkas, ${duplicates} i dubbletter, ${failed} misslyckades. Säkerhetskopia: ${backupPath}`);
 
-    res.json({ ...result, changed: updated.length, failed, firstError, backup: backupPath });
+    res.json({ ...result, changed: updated.length, rangesApplied, failed, firstError, backup: backupPath });
   } catch(e) {
     console.error("[REPAIR] Fel:", e);
     res.status(500).json({ error: e.message });

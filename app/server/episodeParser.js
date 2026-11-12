@@ -25,11 +25,62 @@ function seasonHintFromFolderName(folderName) {
 
 // The four original naming patterns, most specific first. A match here always wins and is
 // never affected by season hints or folder numbering style.
+// The returned match gets two extra properties for the range detection (episode_end):
+//   kind:   "se" (S01E01 / S01x01), "nxm" (1x01) or "code" (packed 301)
+//   endIdx: index in the name where the episode digits end
+// (The "d" flag only adds index information; it doesn't change what matches.)
 function matchOriginalPatterns(name) {
-  return name.match(/[Ss](\d+)[\s._-]?[Ee](\d+)/) ||   // S01E01, S01 E01, S01-E01
-         name.match(/[Ss](\d+)[xX](\d+)/) ||              // S01x01
-         name.match(/(?<![\d])(\d+)[xX](\d+)(?![\d])/) || // 1x01, 2x01
-         name.match(/\.([1-9])(\d{2})\.|[-_\s]([1-9])(\d{2})[-_\s.]/); // .301. or -301-
+  let m;
+  if ((m = name.match(/[Ss](\d+)[\s._-]?[Ee](\d+)/d))) {          // S01E01, S01 E01, S01-E01
+    m.kind = "se"; m.endIdx = m.indices[2][1]; return m;
+  }
+  if ((m = name.match(/[Ss](\d+)[xX](\d+)/d))) {                  // S01x01
+    m.kind = "se"; m.endIdx = m.indices[2][1]; return m;
+  }
+  if ((m = name.match(/(?<![\d])(\d+)[xX](\d+)(?![\d])/d))) {     // 1x01, 2x01
+    m.kind = "nxm"; m.endIdx = m.indices[2][1]; return m;
+  }
+  if ((m = name.match(/\.([1-9])(\d{2})\.|[-_\s]([1-9])(\d{2})[-_\s.]/d))) { // .301. or -301-
+    m.kind = "code"; m.endIdx = m.indices[m[1] !== undefined ? 2 : 4][1]; return m;
+  }
+  return null;
+}
+
+// Episode ranges in ONE file ("212+213", "S10E18-19", "1x01-02", ...). Looks only at the text
+// directly after the episode digits (which end at endIdx), so words like "Part 1+2" later in a
+// title are never read as a range. Returns the last episode number, or undefined.
+// Guards: the end must be greater than the first episode and at most 3 higher, and it must not
+// be followed by a letter or digit ("720p" and the like can never become a range).
+const MAX_RANGE_SPAN = 3;
+function episodeEndAfter(name, endIdx, kind, season, episode) {
+  const rest = name.slice(endIdx);
+  let end, m;
+  if (kind === "se") {
+    // S10E18-19, S10E18E19, S01E01-E02
+    m = rest.match(/^(?:-?[Ee]|-)(\d{1,3})(?![\p{L}\d])/u);
+    if (m) end = parseInt(m[1], 10);
+  } else if (kind === "nxm") {
+    // 1x01-02, [1x01-1x02] (a second season number, if given, must be the same)
+    m = rest.match(/^-(?:(\d+)[xX])?(\d{1,2})(?![\p{L}\d])/u);
+    if (m && (m[1] === undefined || parseInt(m[1], 10) === season)) end = parseInt(m[2], 10);
+  } else if (kind === "code") {
+    // 212+213, 116&117, 205-06, 1215-16: separator, then a second code of the same season, or two digits
+    m = rest.match(/^[+&-](?:(\d{3,4})|(\d{2}))(?![\p{L}\d])/u);
+    if (m) {
+      if (m[1] !== undefined) {
+        const n2 = parseInt(m[1], 10);
+        if (Math.floor(n2 / 100) === season) end = n2 % 100;
+      } else {
+        end = parseInt(m[2], 10);
+      }
+    }
+  }
+  return (Number.isInteger(end) && end > episode && end <= episode + MAX_RANGE_SPAN) ? end : undefined;
+}
+
+// { season, episode } plus episodeEnd only when there is a range.
+function withEnd(season, episode, end) {
+  return end === undefined ? { season, episode } : { season, episode, episodeEnd: end };
 }
 
 // Decides how the files in ONE folder are numbered, from the folder's file names:
@@ -72,7 +123,10 @@ function parseEpisodeFromFilename(fileName, seasonHint = null, numbering) {
   const name = String(fileName || "");
 
   const em = matchOriginalPatterns(name);
-  if (em) return { season: parseInt(em[1] || em[3]), episode: parseInt(em[2] || em[4]) };
+  if (em) {
+    const season = parseInt(em[1] || em[3]), episode = parseInt(em[2] || em[4]);
+    return withEnd(season, episode, episodeEndAfter(name, em.endIdx, em.kind, season, episode));
+  }
 
   if (seasonHint !== null && seasonHint !== undefined) {
     const style = numbering || detectFolderNumbering([name]);
@@ -84,7 +138,9 @@ function parseEpisodeFromFilename(fileName, seasonHint = null, numbering) {
     } else {
       for (const m of name.matchAll(/(?<![\p{L}\d])(\d{3,4})(?![\p{L}\d])/gu)) {
         const n = parseInt(m[1], 10);
-        if (Math.floor(n / 100) === seasonHint && n % 100 >= 1) return { season: seasonHint, episode: n % 100 };
+        if (Math.floor(n / 100) === seasonHint && n % 100 >= 1) {
+          return withEnd(seasonHint, n % 100, episodeEndAfter(name, m.index + m[1].length, "code", seasonHint, n % 100));
+        }
       }
     }
 
@@ -115,4 +171,52 @@ function parseEpisodeFromFilename(fileName, seasonHint = null, numbering) {
   return null;
 }
 
-module.exports = { parseEpisodeFromFilename, seasonHintFromFolderName, detectFolderNumbering, SEASON_FOLDER_RE };
+// ── Double episodes: combining the TMDB info of the two parts ─────────────────────
+// Trailing "part" markers that are stripped before comparing the two titles:
+// "(1)", "(2)", ", Part 1", ": Part 2", " - Part II", "Pt. 1".
+const PART_MARKER_RES = [
+  /\s*\(\s*(?:1|2|3|i{1,3}|one|two)\s*\)\s*$/i,
+  /\s*[,:]\s*part\s*(?:1|2|3|i{1,3}|one|two)\s*$/i,
+  /\s+-\s+part\s*(?:1|2|3|i{1,3}|one|two)\s*$/i,
+  /\s+pt\.?\s*(?:1|2|3|i{1,3})\s*$/i
+];
+function stripPartMarker(title) {
+  let t = String(title || "").trim();
+  for (const re of PART_MARKER_RES) {
+    const next = t.replace(re, "").trim();
+    if (next !== t) { t = next; break; }
+  }
+  return t;
+}
+
+// Combines two episodes' metadata ({ title, overview, runtime, still_url, air_date }) into one
+// card for a double episode file. a = first part, b = second part. If one is missing, the other
+// is used as it is (no error).
+//  - title:    same title once the part markers are removed -> "Title (1 & 2)", else "A / B"
+//  - overview: A's text, then B's on a new line (empty or identical ones skipped)
+//  - runtime:  the sum if both have one, otherwise whichever exists
+//  - still_url, air_date: A's (B's only if A has none)
+function mergeEpisodeMeta(a, b) {
+  if (!a && !b) return null;
+  if (!b) return a;
+  if (!a) return b;
+  const ta = String(a.title || "").trim(), tb = String(b.title || "").trim();
+  let title;
+  if (ta && tb) {
+    const baseA = stripPartMarker(ta), baseB = stripPartMarker(tb);
+    title = baseA && baseA.toLowerCase() === baseB.toLowerCase() ? `${baseA} (1 & 2)` : `${ta} / ${tb}`;
+  } else {
+    title = ta || tb || a.title;
+  }
+  const oa = String(a.overview || "").trim(), ob = String(b.overview || "").trim();
+  const overview = [oa, ob].filter((t, i, all) => t && all.indexOf(t) === i).join("\n");
+  const runtime = (a.runtime && b.runtime) ? a.runtime + b.runtime : (a.runtime || b.runtime || null);
+  return {
+    ...a,
+    title, overview, runtime,
+    still_url: a.still_url || b.still_url || null,
+    air_date: a.air_date || b.air_date || null
+  };
+}
+
+module.exports = { parseEpisodeFromFilename, seasonHintFromFolderName, detectFolderNumbering, mergeEpisodeMeta, SEASON_FOLDER_RE };

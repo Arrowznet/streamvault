@@ -177,7 +177,10 @@ async function resolveAndRenderPath(path) {
         window._currentSeasonShowSlug = show.slug;
         window._currentSeasonNum = seasonNum;
         window._currentSeasonCast = seasonData.cast || [];
-        const ep = episodes.find(e => String(e.episode) === parts[5]);
+        // A double episode (episode 12–13) is also found by its second number (/13).
+        const wantedEp = parseInt(parts[5], 10);
+        const ep = episodes.find(e => String(e.episode) === parts[5]) ||
+                   episodes.find(e => e.episode_end && wantedEp > e.episode && wantedEp <= e.episode_end);
         if (ep) return openEpisodeDetail(ep.id, true);
         return switchSection("home", true);
       }
@@ -2395,10 +2398,20 @@ async function loadLibraryView(libId, libName, libType) {
   }
 }
 
+// Double episodes (one file holding two episodes) carry an episode_end. "12" or "12–13".
+function episodeRangeText(ep) {
+  return ep && ep.episode_end && ep.episode_end > ep.episode ? `${ep.episode}–${ep.episode_end}` : String(ep && ep.episode != null ? ep.episode : "");
+}
+// "S02 E12" or, for a double episode, "S02 E12–13".
+function episodeCodeLabel(season, ep) {
+  const pad = n => String(n || 0).padStart(2, "0");
+  return `S${pad(season)} E${pad(ep && ep.episode)}` + (ep && ep.episode_end && ep.episode_end > ep.episode ? `–${pad(ep.episode_end)}` : "");
+}
+
 // Builds a single episode's poster card — extracted so both the initial season render and
 // the subtitle-language filter's re-render use identical markup.
 function buildEpisodeCard(ep, showId, showTitle, seasonNum) {
-  const label = `S${String(seasonNum).padStart(2,"0")} E${String(ep.episode||0).padStart(2,"0")}`;
+  const label = episodeCodeLabel(seasonNum, ep);
   return `<div class="mcard" onclick='openEpisodeDetail("${ep.id}")'>
     <div style="position:relative">
       ${ep.still_url
@@ -2407,8 +2420,8 @@ function buildEpisodeCard(ep, showId, showTitle, seasonNum) {
       <div class="mcard-overlay"><span class="mcard-play">▶</span></div>
     </div>
     <div class="mcard-info">
-      <div class="mcard-title">${esc(ep.title||"Avsnitt "+ep.episode)}</div>
-      <div class="mcard-meta">Avsnitt ${ep.episode||""}${ep.runtime ? " · "+ep.runtime+" min" : ""}</div>
+      <div class="mcard-title">${esc(ep.title||"Avsnitt "+episodeRangeText(ep))}</div>
+      <div class="mcard-meta">Avsnitt ${ep.episode ? episodeRangeText(ep) : ""}${ep.runtime ? " · "+ep.runtime+" min" : ""}</div>
     </div>
   </div>`;
 }
@@ -2461,7 +2474,7 @@ async function openEpisodeDetail(episodeId, fromRouter) {
       if (slugForUrl) { const w = seasonEpisodeWords(); navigateToPath(`/serier/${slugForUrl}/${w.season}/${seasonNum}/${w.episode}/${ep.episode||0}`, `${showTitle} - ${ep.title||"Avsnitt "+ep.episode}`); }
     }
     const progress = await API.get("/media/" + episodeId + "/progress").catch(() => ({}));
-    const label = `S${String(seasonNum||0).padStart(2,"0")} E${String(ep.episode||0).padStart(2,"0")}`;
+    const label = episodeCodeLabel(seasonNum, ep);
     const pct = progress?.duration ? Math.round((progress.position / progress.duration) * 100) : 0;
     const watchedMin = Math.floor((progress?.position || 0) / 60);
     const watchedLabel = watchedMin >= 60 ? `${Math.floor(watchedMin/60)}h ${watchedMin%60}m` : `${watchedMin}m`;
@@ -2479,7 +2492,7 @@ async function openEpisodeDetail(episodeId, fromRouter) {
               <div class="detail-meta-row" style="margin-bottom:4px">
                 <span class="detail-meta-item">${esc(label)}</span>
               </div>
-              <h1 class="detail-page-title">${esc(ep.title || "Avsnitt " + ep.episode)}</h1>
+              <h1 class="detail-page-title">${esc(ep.title || "Avsnitt " + episodeRangeText(ep))}</h1>
               <div class="detail-meta-row">
                 ${ep.air_date ? `<span class="detail-meta-item">${esc(ep.air_date)}</span>` : ""}
                 ${ep.runtime ? `<span class="detail-meta-item">${ep.runtime} min</span>` : ""}
@@ -3313,7 +3326,7 @@ async function openSeason(showId, seasonNum, fromRouter) {
           ${Object.keys(SUBTITLE_LANG_ADJ).filter(l => l !== "und").map(l => `<option value="${l}">${esc(SUBTITLE_LANG_ADJ[l])}</option>`).join("")}
         </select>
       </div>
-      <div class="media-grid" id="season-episodes-grid" data-items='${esc(JSON.stringify(episodes.map(ep => ({ id: ep.id, title: ep.title, episode: ep.episode, runtime: ep.runtime, still_url: ep.still_url, cached_subtitle_langs: ep.cached_subtitle_langs || [] }))))}' data-show-id="${showId}" data-show-title="${esc(show.title)}" data-season="${seasonNum}">${episodes.map(ep => buildEpisodeCard(ep, showId, show.title, seasonNum)).join("")}</div>`;
+      <div class="media-grid" id="season-episodes-grid" data-items='${esc(JSON.stringify(episodes.map(ep => ({ id: ep.id, title: ep.title, episode: ep.episode, episode_end: ep.episode_end, runtime: ep.runtime, still_url: ep.still_url, cached_subtitle_langs: ep.cached_subtitle_langs || [] }))))}' data-show-id="${showId}" data-show-title="${esc(show.title)}" data-season="${seasonNum}">${episodes.map(ep => buildEpisodeCard(ep, showId, show.title, seasonNum)).join("")}</div>`;
     sec.innerHTML = `
       <div class="detail-page">
         <div class="show-hero" ${show.backdrop_url ? `style="background-image:url('${show.backdrop_url}')"` : ""}>
@@ -3755,7 +3768,7 @@ async function openDetail(id, fromRouter) {
       episodesHtml = `<div class="detail-section">
         <h3 class="detail-section-title">${t("detail.episodes_label")} (${item.episodes.length})</h3>
         <div class="episode-list">${item.episodes.map(ep => {
-          const label = ep.season && ep.episode ? `S${String(ep.season).padStart(2,"0")} E${String(ep.episode).padStart(2,"0")}` : t("detail.episodes_label");
+          const label = ep.season && ep.episode ? episodeCodeLabel(ep.season, ep) : t("detail.episodes_label");
           return `<div class="ep-item" onclick='playItem("${ep.id}","${esc(item.title)} · ${label}")'>
             <span class="ep-num">${label}</span><span class="ep-name">${esc(ep.title||"")}</span><span>▶</span>
           </div>`;
@@ -4806,7 +4819,8 @@ async function playEpisode(id, showTitle, showId, season, episodeNum) {
   } catch {
     currentEpisodeData = null;
   }
-  const label = `S${String(season).padStart(2,"0")} E${String(episodeNum).padStart(2,"0")}`;
+  const epRecord = currentEpisodeData?.episodes?.find(e => e.episode === episodeNum);
+  const label = episodeCodeLabel(season, epRecord || { episode: episodeNum });
   playItem(id, showTitle + " · " + label);
 }
 
@@ -7863,15 +7877,18 @@ async function repairEpisodesOneLibrary(libId, libName) {
     var extra = "";
     if (dry.unparsed) extra += `\n\n${dry.unparsed} avsnitt kunde inte tolkas och lämnas som de är.`;
     if (dry.duplicates) extra += `\n\nObs: ${dry.duplicates} avsnitt skulle hamna på samma säsong och avsnitt som ett annat avsnitt i samma serie. De ändras ändå, och inget slås ihop.`;
-    if (!dry.changed) {
+    var ranges = dry.rangesAdded || 0;
+    if (!dry.changed && !ranges && !dry.rangesRemoved) {
       toast(`Inga avsnitt i "${libName}" behöver nya nummer (${dry.checked} kontrollerade).` + (dry.unparsed ? ` ${dry.unparsed} kunde inte tolkas.` : ""), "success");
       return;
     }
     var top = (dry.perShow || []).slice(0, 3).map(s => `${s.title}: ${s.changed}`).join(", ");
-    if (!confirm(`${dry.changed} av ${dry.checked} avsnitt får nytt säsong- eller avsnittsnummer. Fortsätta?` + (top ? `\n\nFlest ändringar: ${top}` : "") + extra + `\n\nEn säkerhetskopia av databasen tas först. Tittarhistorik, favoriter och undertexter påverkas inte.`)) return;
+    var rangeEx = (dry.rangeExamples || []).slice(0, 3).map(r => `${r.show}: ${r.to}`).join(", ");
+    if (dry.rangesRemoved) extra += `\n\n${dry.rangesRemoved} dubbelavsnitt-markeringar tas bort (filnamnet visar inget intervall längre).`;
+    if (!confirm(`${dry.changed} av ${dry.checked} avsnitt får nytt säsong- eller avsnittsnummer, ${ranges} markeras som dubbelavsnitt. Fortsätta?` + (top ? `\n\nFlest ändringar: ${top}` : "") + (rangeEx ? `\n\nDubbelavsnitt, till exempel: ${rangeEx}` : "") + extra + `\n\nEn säkerhetskopia av databasen tas först. Tittarhistorik, favoriter och undertexter påverkas inte.`)) return;
     toast(`⏳ Reparerar avsnittsnummer i "${libName}"...`, "info");
     var data = await API.post(`/scan/repair-episodes?${q}`, {});
-    var msg = `✓ ${data.changed} avsnitt fick nya nummer. Titlar och bilder hämtas om från TMDB i bakgrunden.`;
+    var msg = `✓ ${data.changed} avsnitt fick nya nummer` + (data.rangesApplied ? ` och ${data.rangesApplied} markerades som dubbelavsnitt` : "") + `. Titlar och bilder hämtas om från TMDB i bakgrunden.`;
     if (data.failed) msg += ` ${data.failed} kunde inte uppdateras.`;
     if (data.backup) msg += ` Säkerhetskopia: ${String(data.backup).split(/[\\/]/).pop()}`;
     toast(msg, data.failed ? "error" : "success");
