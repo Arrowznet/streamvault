@@ -2926,32 +2926,30 @@ async function processEpisodeEnrichQueue() {
   _episodeEnrichRunning = false;
 }
 
-async function scanEpisodes(showPath,showId,libId,depth=0) {
+const { parseEpisodeFromFilename, seasonHintFromFolderName } = require("./episodeParser");
+
+// seasonHint: season number taken from the folder name this directory was entered through
+// ("Season 3" -> 3), or null. Only used when the file name itself has no season marker.
+async function scanEpisodes(showPath,showId,libId,depth=0,seasonHint=null) {
   if (!fs.existsSync(showPath)) return;
   let newEpisodes = 0;
   let skipped = 0;
   for (const entry of fs.readdirSync(showPath,{withFileTypes:true})) {
     const fullPath=path.join(showPath,entry.name);
     if (entry.isDirectory()) {
-      await scanEpisodes(fullPath,showId,libId,depth+1);
+      await scanEpisodes(fullPath,showId,libId,depth+1,seasonHintFromFolderName(entry.name));
       continue;
     }
     if (!VIDEO_EXT.has(path.extname(entry.name).toLowerCase())) continue;
     const id=Buffer.from(fullPath).toString("base64url");
     if (await dbFindOne(db.media,{_id:id})) { skipped++; continue; }
-    // Try multiple naming conventions - order matters, most specific first!
-    const em = entry.name.match(/[Ss](\d+)[\s._-]?[Ee](\d+)/) ||   // S01E01, S01 E01, S01-E01
-               entry.name.match(/[Ss](\d+)[xX](\d+)/) ||              // S01x01
-               entry.name.match(/(?<![\d])(\d+)[xX](\d+)(?![\d])/) || // 1x01, 2x01
-               entry.name.match(/\.([1-9])(\d{2})\.|[-_\s]([1-9])(\d{2})[-_\s.]/); // .301. or -301-
-    // Last resort: a bare leading episode number with NO season marker at all — common for
-    // older/classic shows (e.g. some anime) released as one continuous run rather than
-    // separate seasons, e.g. "13.Candy Candy episode title.mkv". Defaults to season 1, since
-    // that's the only sensible assumption when the source material itself has no seasons.
-    const flatEm = !em ? entry.name.match(/^(\d{1,3})[.\s_-]/) : null;
-    if (!em && !flatEm) console.log(`[SCAN] Warning: could not detect season/episode from "${entry.name}"`);
-    const emSeason = em ? parseInt(em[1] || em[3]) : (flatEm ? 1 : 0);
-    const emEpisode = em ? parseInt(em[2] || em[4]) : (flatEm ? parseInt(flatEm[1]) : 0);
+    // Season/episode from the file name (the four original patterns first, then — only if the
+    // file sits in a season folder — a season-hint rule, then the bare-leading-number fallback).
+    // See episodeParser.js.
+    const parsedEp = parseEpisodeFromFilename(entry.name, seasonHint);
+    if (!parsedEp) console.log(`[SCAN] Warning: could not detect season/episode from "${entry.name}"`);
+    const emSeason = parsedEp ? parsedEp.season : 0;
+    const emEpisode = parsedEp ? parsedEp.episode : 0;
     const newEp = {_id:id,library_id:libId,type:"episode",title:path.parse(entry.name).name,file_path:fullPath,file_size:fs.statSync(fullPath).size,parent_id:showId,season:emSeason,episode:emEpisode,added_at:new Date().toISOString()};
     await dbInsert(db.media, newEp);
     queueEpisodeEnrich(newEp); // fetch episode title from TMDB in background
@@ -7903,6 +7901,171 @@ app.post("/api/scan/full-rescan", requireAdmin, async (req, res) => {
     console.log("Database cleared, starting full rescan...");
     await scanLibraries();
   } catch(e) { console.error("Full rescan error:", e); }
+});
+
+// ── REPAIR EPISODE NUMBERS (in place) ────────────────────────────────────────────
+// Recomputes season/episode for episodes that are already in the database, using the very same
+// logic as the scanner (parseEpisodeFromFilename + the season folder hint), WITHOUT clearing and
+// rescanning — so watch history, favorites and the subtitle cache (all tied to the episode's _id)
+// are never touched. Only season/episode change, plus the TMDB-enriched fields of just those
+// episodes (reset to the freshly-scanned state, then re-fetched in the background).
+// ?dryRun=1 only reports; optional libraryId limits it to one library.
+let _repairRunning = false;
+
+// NeDB's datafile is append-only; compactDatafile() rewrites it to its current contents. It is
+// asynchronous, so wait for the 'compaction.done' event (max timeoutMs) before copying the file.
+function compactMediaDbAndWait(timeoutMs = 10000) {
+  return new Promise((resolve, reject) => {
+    let finished = false;
+    const emitters = [db.media, db.media.persistence].filter(e => e && typeof e.on === "function");
+    const onDone = () => {
+      if (finished) return;
+      finished = true; clearTimeout(timer);
+      emitters.forEach(e => e.removeListener("compaction.done", onDone));
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      if (finished) return;
+      finished = true;
+      emitters.forEach(e => e.removeListener("compaction.done", onDone));
+      reject(new Error(`Komprimeringen av media.db blev inte klar inom ${Math.round(timeoutMs / 1000)} sekunder`));
+    }, timeoutMs);
+    emitters.forEach(e => e.on("compaction.done", onDone));
+    db.media.persistence.compactDatafile();
+  });
+}
+
+// Copies media.db to media.db.bak-<timestamp> and checks the copy. Throws (with a clear message)
+// if anything is off — the caller must then abort BEFORE writing anything.
+async function backupMediaDbVerified() {
+  const src = path.join(DATA_DIR, "media.db");
+  if (!fs.existsSync(src)) throw new Error("media.db hittades inte i datamappen");
+  await compactMediaDbAndWait(10000);
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const dest = path.join(DATA_DIR, `media.db.bak-${stamp}`);
+  const sizeBefore = fs.statSync(src).size;
+  fs.copyFileSync(src, dest);
+  const sizeAfter = fs.statSync(src).size;
+  if (!fs.existsSync(dest)) throw new Error("Säkerhetskopian skapades inte");
+  const copySize = fs.statSync(dest).size;
+  if (copySize === 0) throw new Error("Säkerhetskopian är tom");
+  // The live file can only grow (appends) while copying, so the copy must be between the two sizes.
+  if (copySize < sizeBefore || copySize > sizeAfter) {
+    throw new Error(`Säkerhetskopian har fel storlek (${copySize} byte, originalet ${sizeBefore}–${sizeAfter} byte)`);
+  }
+  return dest;
+}
+
+app.post("/api/scan/repair-episodes", requireAdmin, async (req, res) => {
+  const flag = String(req.query.dryRun ?? req.body?.dryRun ?? "");
+  const dryRun = flag === "1" || flag.toLowerCase() === "true";
+  const libraryId = req.query.libraryId || req.body?.libraryId || null;
+  if (isScanning) return res.status(409).json({ error: "En skanning pågår — vänta tills den är klar" });
+  if (_repairRunning) return res.status(409).json({ error: "En reparation av avsnittsnummer pågår redan" });
+  if (libraryId && !(config.libraries || []).some(l => l.id === libraryId)) return res.status(404).json({ error: "Bibliotek hittades inte" });
+
+  _repairRunning = true;
+  const heldScanLock = !dryRun; // a real run keeps scans from starting in the middle of the repair
+  if (heldScanLock) isScanning = true;
+  try {
+    const query = { type: "episode" };
+    if (libraryId) query.library_id = libraryId;
+    const episodes = await dbFind(db.media, query);
+    const shows = await dbFind(db.media, { type: "tvshow" });
+    const showTitle = new Map(shows.map(s => [s._id, s.title]));
+    const tag = (s, e) => `S${s}E${e}`;
+
+    const changes = [];       // { ep, season, episode }
+    let unparsed = 0;
+    const finalByKey = new Map(); // "parent|season|episode" -> [{ ep, changed }]
+    for (const ep of episodes) {
+      const base = path.basename(ep.file_path || "");
+      const hint = seasonHintFromFolderName(path.basename(path.dirname(ep.file_path || "")));
+      const parsed = parseEpisodeFromFilename(base, hint);
+      let season = ep.season, episode = ep.episode, changed = false;
+      if (!parsed) {
+        unparsed++;                       // couldn't be parsed: never touched
+      } else if (parsed.season !== ep.season || parsed.episode !== ep.episode) {
+        season = parsed.season; episode = parsed.episode; changed = true;
+        changes.push({ ep, season, episode });
+      }
+      if (season === 0 && episode === 0) continue; // "unknown" isn't a duplicate of anything
+      const key = `${ep.parent_id}|${season}|${episode}`;
+      if (!finalByKey.has(key)) finalByKey.set(key, []);
+      finalByKey.get(key).push({ ep, changed });
+    }
+
+    // Duplicates = groups of 2+ episodes of the same show that end up on the same season+episode,
+    // where at least one of them is being changed. Reported only — never merged or skipped.
+    let duplicates = 0;
+    const duplicateExamples = [];
+    for (const [key, group] of finalByKey) {
+      if (group.length < 2 || !group.some(g => g.changed)) continue;
+      duplicates += group.length;
+      if (duplicateExamples.length < 10) {
+        const [parent, s, e] = key.split("|");
+        duplicateExamples.push({ show: showTitle.get(parent) || parent, episode: tag(s, e), files: group.slice(0, 4).map(g => path.basename(g.ep.file_path || "")) });
+      }
+    }
+
+    const perShowMap = new Map();
+    for (const c of changes) perShowMap.set(c.ep.parent_id, (perShowMap.get(c.ep.parent_id) || 0) + 1);
+    const perShowAll = [...perShowMap.entries()].map(([id, n]) => ({ title: showTitle.get(id) || id, changed: n })).sort((a, b) => b.changed - a.changed);
+    const examples = changes.slice(0, 10).map(c => ({
+      show: showTitle.get(c.ep.parent_id) || c.ep.parent_id,
+      file: path.basename(c.ep.file_path || ""),
+      from: tag(c.ep.season, c.ep.episode),
+      to: tag(c.season, c.episode)
+    }));
+
+    const result = {
+      dryRun, libraryId, checked: episodes.length, changed: changes.length, unparsed, duplicates,
+      perShow: perShowAll.slice(0, 10), examples, duplicateExamples
+    };
+    if (dryRun || changes.length === 0) return res.json(result);
+
+    // Real run. Safety copy of media.db FIRST; any problem aborts before a single write.
+    let backupPath;
+    try {
+      backupPath = await backupMediaDbVerified();
+    } catch(e) {
+      console.error("[REPAIR] Avbröt – säkerhetskopian misslyckades:", e.message);
+      return res.status(500).json({ error: `Reparationen avbröts och ingenting ändrades: ${e.message}` });
+    }
+
+    let failed = 0, firstError = null;
+    const updated = [];
+    for (const c of changes) {
+      const stem = path.parse(path.basename(c.ep.file_path || "")).name;
+      try {
+        // season/episode, plus the TMDB-enriched fields reset to the freshly-scanned state
+        // (title = file name; overview/rating/still_url absent). _id, file_path, history,
+        // favorites and the subtitle cache are not touched.
+        await dbUpdate(db.media, { _id: c.ep._id }, {
+          $set: { season: c.season, episode: c.episode, title: stem },
+          $unset: { overview: true, rating: true, still_url: true }
+        });
+        updated.push({ ...c.ep, season: c.season, episode: c.episode, title: stem });
+      } catch(e) {
+        failed++; if (!firstError) firstError = e.message;
+        console.error(`[REPAIR] Kunde inte uppdatera ${c.ep.file_path}:`, e.message);
+      }
+    }
+
+    const updatedPerShow = new Map();
+    for (const u of updated) updatedPerShow.set(u.parent_id, (updatedPerShow.get(u.parent_id) || 0) + 1);
+    for (const [id, n] of updatedPerShow) console.log(`[REPAIR] ${showTitle.get(id) || id}: ${n} avsnitt ändrade`);
+    for (const u of updated) queueEpisodeEnrich(u); // re-fetch title/overview/rating/image from TMDB in the background
+    console.log(`[REPAIR] Klart: kontrollerade ${episodes.length}, ändrade ${updated.length} avsnitt i ${updatedPerShow.size} serier, ${unparsed} kunde inte tolkas, ${duplicates} i dubbletter, ${failed} misslyckades. Säkerhetskopia: ${backupPath}`);
+
+    res.json({ ...result, changed: updated.length, failed, firstError, backup: backupPath });
+  } catch(e) {
+    console.error("[REPAIR] Fel:", e);
+    res.status(500).json({ error: e.message });
+  } finally {
+    if (heldScanLock) isScanning = false;
+    _repairRunning = false;
+  }
 });
 
 // Rescans just ONE library (new files only, existing entries untouched) — for when you've

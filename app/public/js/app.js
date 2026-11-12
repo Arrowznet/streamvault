@@ -7588,6 +7588,7 @@ async function loadSettings() {
               <input class="s-input" id="lib-name-en-${l.id}" placeholder="Engelskt namn (valfritt)" value="${esc(l.name_en||"")}" style="width:150px;font-size:12px;flex-shrink:0" onblur="saveLibraryNameEn('${l.id}')">
               <input class="s-input" id="lib-name-fi-${l.id}" placeholder="Finskt namn (valfritt)" value="${esc(l.name_fi||"")}" style="width:150px;font-size:12px;flex-shrink:0" onblur="saveLibraryNameFi('${l.id}')">
               <button class="s-btn" style="flex-shrink:0" onclick="rescanOneLibrary('${l.id}','${esc(l.name)}')" title="Skanna efter nya filer i just detta bibliotek">↻ Skanna</button>
+              ${l.type === "tvshows" ? `<button class="s-btn" style="flex-shrink:0" onclick="repairEpisodesOneLibrary('${l.id}','${esc(l.name)}')" title="Räknar om säsong och avsnitt för avsnitt som redan finns i biblioteket, utan att rensa något (tittarhistorik, favoriter och undertexter påverkas inte)">🔧 Reparera avsnittsnummer</button>` : ""}
               <button class="s-btn" style="border-color:#e74c3c;color:#e74c3c;flex-shrink:0" onclick="fullRescanOneLibrary('${l.id}','${esc(l.name)}')" title="Rensa och skanna om bara detta bibliotek från grunden">🗑 Rensa om</button>
               <button class="s-btn danger" style="flex-shrink:0" onclick="removeLib('${l.id}')">Ta bort</button>
             </div>`;
@@ -7847,6 +7848,34 @@ async function fullRescanOneLibrary(libId, libName) {
     var data = await API.post(`/scan/library/${libId}/full-rescan`, {});
     toast(data.message || "Rensning och skanning startad", "success");
     startScanProgressPolling();
+  } catch(e) {
+    toast("Fel: " + e.message, "error");
+  }
+}
+
+// Fixes season/episode numbers of episodes already in one TV library, in place (nothing is
+// cleared). Does a dry run first, asks for confirmation, and only then does the real run.
+async function repairEpisodesOneLibrary(libId, libName) {
+  toast(`⏳ Kontrollerar avsnittsnummer i "${libName}"...`, "info");
+  try {
+    var q = "libraryId=" + encodeURIComponent(libId);
+    var dry = await API.post(`/scan/repair-episodes?dryRun=1&${q}`, {});
+    var extra = "";
+    if (dry.unparsed) extra += `\n\n${dry.unparsed} avsnitt kunde inte tolkas och lämnas som de är.`;
+    if (dry.duplicates) extra += `\n\nObs: ${dry.duplicates} avsnitt skulle hamna på samma säsong och avsnitt som ett annat avsnitt i samma serie. De ändras ändå, och inget slås ihop.`;
+    if (!dry.changed) {
+      toast(`Inga avsnitt i "${libName}" behöver nya nummer (${dry.checked} kontrollerade).` + (dry.unparsed ? ` ${dry.unparsed} kunde inte tolkas.` : ""), "success");
+      return;
+    }
+    var top = (dry.perShow || []).slice(0, 3).map(s => `${s.title}: ${s.changed}`).join(", ");
+    if (!confirm(`${dry.changed} av ${dry.checked} avsnitt får nytt säsong- eller avsnittsnummer. Fortsätta?` + (top ? `\n\nFlest ändringar: ${top}` : "") + extra + `\n\nEn säkerhetskopia av databasen tas först. Tittarhistorik, favoriter och undertexter påverkas inte.`)) return;
+    toast(`⏳ Reparerar avsnittsnummer i "${libName}"...`, "info");
+    var data = await API.post(`/scan/repair-episodes?${q}`, {});
+    var msg = `✓ ${data.changed} avsnitt fick nya nummer. Titlar och bilder hämtas om från TMDB i bakgrunden.`;
+    if (data.failed) msg += ` ${data.failed} kunde inte uppdateras.`;
+    if (data.backup) msg += ` Säkerhetskopia: ${String(data.backup).split(/[\\/]/).pop()}`;
+    toast(msg, data.failed ? "error" : "success");
+    loadSettings();
   } catch(e) {
     toast("Fel: " + e.message, "error");
   }
