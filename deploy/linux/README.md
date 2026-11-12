@@ -61,6 +61,14 @@ sudo apt install dotnet-runtime-10.0 libtesseract5 libleptonica6 unzip
   med `DOTNET_ROLL_FORWARD=Major` (bara för just det programmet) så att det kör på .NET 10.
 - Servern hittar Tesseract- och Leptonica-versionerna själv med `ldconfig -p`.
 
+## HDR-filmer (tone mapping på grafikkortet)
+
+4K HDR-filmer som omkodas för webbläsare färgmappas till SDR på grafikkortet med `libplacebo`
+(via Vulkan), så att färgerna inte blir urblekta. Det kräver NVIDIA/NVENC, ett ffmpeg med
+`libplacebo` och fungerande Vulkan (`/usr/share/vulkan/icd.d/nvidia_icd.json`). Servern testar
+detta en gång vid start och loggar en rad (`[HDR] …`) om det inte går; då används den vanliga
+omkodningen. Stäng av med `"hdr_tonemap": "off"` i `config.json` (standard är `"auto"`).
+
 ## Kända begränsningar på Linux
 
 - **Mappbevakningen upptäcker inte nya filer på nätverksmonteringar (CIFS/NFS).** Linux

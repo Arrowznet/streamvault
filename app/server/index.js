@@ -3378,6 +3378,70 @@ async function getDuration(item) {
   return item.duration || 0;
 }
 
+// ── HDR → SDR TONE MAPPING ON THE GPU (Linux + NVENC only) ───────────────────────
+// 4K HDR sources that get transcoded for browsers used to just be scaled down and converted to
+// 8-bit, which looks washed out and grey. On Linux with NVENC they can instead be tone mapped on
+// the GPU with libplacebo (via Vulkan). Everything here is Linux-only; on other platforms the
+// functions return immediately and the old pipeline is used unchanged.
+// Capability is checked once at startup (detectHdrTonemapSupport, further down) and cached.
+let _hdrTonemapCap = { available: false, reason: "inte kontrollerad" };
+
+// Shared by the HLS and DASH paths. targetW is the output width (height follows, kept even).
+function buildHdrTonemapChain(targetW) {
+  return {
+    inputArgs: ["-init_hw_device", "vulkan=vk", "-filter_hw_device", "vk"],
+    filter: `hwupload,libplacebo=w=${targetW}:h=-2:tonemapping=bt.2390:colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=tv:format=yuv420p,hwdownload,format=yuv420p`
+  };
+}
+
+// Reads the source's color transfer (smpte2084 = HDR10/Dolby Vision, arib-std-b67 = HLG) with a
+// 15 s time limit, asynchronously so it never blocks the server. A known value is cached in the
+// database; a failure/timeout/"unknown" returns null and is NOT stored, so the next playback
+// simply tries again.
+async function getSourceColorTransfer(item) {
+  if (typeof item.color_transfer === "string" && item.color_transfer) return item.color_transfer;
+  try {
+    const out = await new Promise((resolve, reject) => {
+      require("child_process").execFile(getFfprobePath(), [
+        "-v", "quiet", "-select_streams", "v:0",
+        "-show_entries", "stream=color_transfer",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        item.file_path
+      ], { timeout: 15000, windowsHide: true }, (err, stdout) => err ? reject(err) : resolve(stdout));
+    });
+    const value = String(out).trim().split(/\r?\n/)[0].trim();
+    if (!value || value === "unknown" || value === "N/A") return null;
+    try {
+      await dbUpdate(db.media, { _id: item._id }, { $set: { color_transfer: value } });
+      item.color_transfer = value;
+    } catch {}
+    return value;
+  } catch(e) {
+    console.log(`[HDR] Kunde inte läsa färgöverföring (ffprobe, max 15 s): ${(e.message || "").split("\n")[0]} – använder vanlig omkodning`);
+    return null;
+  }
+}
+
+// Decides, for one transcode start, whether to tone map on the GPU. Logs one line per start for
+// 4K HDR candidates on Linux. Returns { use, inputArgs, filter } (inputArgs/filter only when use).
+// On non-Linux platforms: returns { use: false } immediately, with no probing and no logging.
+async function resolveHdrTonemap(item, label, targetW) {
+  if (process.platform !== "linux") return { use: false };
+  const off = (reason) => {
+    console.log(`[${label}] HDR tone mapping avstängd: ${reason}`);
+    return { use: false };
+  };
+  if ((config.hdr_tonemap || "auto") === "off") return off('inställningen hdr_tonemap är "off"');
+  if (cachedEncoder.encoder !== "h264_nvenc") return off("kodaren är inte h264_nvenc");
+  if (!_hdrTonemapCap.available) return off(_hdrTonemapCap.reason);
+  const transfer = await getSourceColorTransfer(item);
+  if (!transfer) return off("källans färgöverföring är okänd");
+  if (transfer !== "smpte2084" && transfer !== "arib-std-b67") return off(`källan är inte HDR (${transfer})`);
+  console.log(`[${label}] HDR tone mapping: GPU (libplacebo), källa ${transfer}`);
+  const chain = buildHdrTonemapChain(targetW);
+  return { use: true, inputArgs: chain.inputArgs, filter: chain.filter };
+}
+
 // ── DIRECT STREAM (for native formats) ─────────────────────────────────────────
 app.get("/api/stream/:id", requireMediaAccess, async (req, res) => {
   const item = await dbFindOne(db.media, { _id: req.params.id });
@@ -3802,6 +3866,12 @@ async function startHlsTranscode(item, startSec = 0) {
       ? Math.round((item.height / item.width) * targetW / 2) * 2
       : 800;
     videoFilterArgs = ["-vf", `scale=${targetW}:${targetH},format=yuv420p`];
+    // Linux + NVENC: tone map HDR → SDR on the GPU instead of the plain scale above. No-op elsewhere.
+    const hdrTm = await resolveHdrTonemap(item, "HLS", targetW);
+    if (hdrTm.use) {
+      hwaccelArgs = [...hwaccelArgs, ...hdrTm.inputArgs];
+      videoFilterArgs = ["-vf", hdrTm.filter];
+    }
   } else {
     videoFilterArgs = ["-vf", "format=yuv420p"];
   }
@@ -4004,6 +4074,12 @@ async function startDashTranscode(item, seekSec = 0, audioTrackIndex = null, all
       console.log(`[DASH] 4K HDR detected (${item.width}x${item.height} 10-bit HEVC) - using software decode + scale`);
       hwaccelArgs = [];
       videoFilterArgs = ["-vf", `scale=${targetW}:${targetH},format=yuv420p`];
+    }
+    // Linux + NVENC: tone map HDR → SDR on the GPU instead of the plain scale above. No-op elsewhere.
+    const hdrTm = await resolveHdrTonemap(item, "DASH", targetW);
+    if (hdrTm.use) {
+      hwaccelArgs = [...hwaccelArgs, ...hdrTm.inputArgs];
+      videoFilterArgs = ["-vf", hdrTm.filter, "-pix_fmt", "yuv420p"];
     }
   } else {
     videoFilterArgs = ["-vf", "format=yuv420p"];
@@ -8076,6 +8152,43 @@ try {
 } catch(e) {
   console.log("⚠️  Could not detect GPU encoder, using CPU (libx264)");
 }
+
+// Check ONCE at startup whether GPU HDR tone mapping (libplacebo via Vulkan) can work here:
+// Linux only, only with h264_nvenc, only if ffmpeg has libplacebo, and only if the real filter
+// chain runs on a tiny test picture. Anything failing → old behaviour, with a log line saying why.
+// On other platforms nothing is checked and nothing is logged.
+function detectHdrTonemapSupport() {
+  if (process.platform !== "linux") { _hdrTonemapCap = { available: false, reason: "bara Linux" }; return; }
+  const fail = (reason) => {
+    _hdrTonemapCap = { available: false, reason };
+    console.log(`[HDR] GPU-tone mapping inte tillgänglig: ${reason} – 4K HDR omkodas som förut`);
+  };
+  if ((config.hdr_tonemap || "auto") === "off") return fail('inställningen hdr_tonemap är "off"');
+  if (cachedEncoder.encoder !== "h264_nvenc") return fail("kodaren är inte h264_nvenc");
+  try {
+    const { execFileSync } = require("child_process");
+    const filters = execFileSync(getFfmpegPath(), ["-hide_banner", "-filters"], { timeout: 10000, encoding: "utf8" });
+    if (!/\blibplacebo\b/.test(filters)) return fail("ffmpeg saknar filtret libplacebo");
+    const chain = buildHdrTonemapChain(320);
+    try {
+      execFileSync(getFfmpegPath(), [
+        "-hide_banner", "-loglevel", "error",
+        ...chain.inputArgs,
+        "-f", "lavfi", "-i", "color=black:size=320x240:rate=25:duration=1",
+        "-vf", chain.filter,
+        "-frames:v", "1", "-f", "null", "-"
+      ], { timeout: 20000, stdio: ["ignore", "ignore", "pipe"] });
+    } catch(e) {
+      const detail = (e.stderr ? e.stderr.toString() : e.message || "").trim().split("\n").slice(-1)[0];
+      return fail(`Vulkan/libplacebo-testet misslyckades (${detail})`);
+    }
+    _hdrTonemapCap = { available: true, reason: null };
+    console.log("[HDR] GPU-tone mapping (libplacebo) är tillgänglig");
+  } catch(e) {
+    fail(`kontrollen kunde inte köras (${(e.message || "").split("\n")[0]})`);
+  }
+}
+detectHdrTonemapSupport();
 
 const PUBLIC=path.join(__dirname,"..","public");
 if (fs.existsSync(PUBLIC)) {
