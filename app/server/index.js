@@ -2926,7 +2926,7 @@ async function processEpisodeEnrichQueue() {
   _episodeEnrichRunning = false;
 }
 
-const { parseEpisodeFromFilename, seasonHintFromFolderName } = require("./episodeParser");
+const { parseEpisodeFromFilename, seasonHintFromFolderName, detectFolderNumbering } = require("./episodeParser");
 
 // seasonHint: season number taken from the folder name this directory was entered through
 // ("Season 3" -> 3), or null. Only used when the file name itself has no season marker.
@@ -2934,7 +2934,13 @@ async function scanEpisodes(showPath,showId,libId,depth=0,seasonHint=null) {
   if (!fs.existsSync(showPath)) return;
   let newEpisodes = 0;
   let skipped = 0;
-  for (const entry of fs.readdirSync(showPath,{withFileTypes:true})) {
+  const dirEntries = fs.readdirSync(showPath,{withFileTypes:true});
+  // How the files in THIS folder are numbered ("compact" 101 = S1E01, or "absolute" 101 = episode
+  // 101), judged once from all the video files in the folder, new or already known.
+  const folderNumbering = seasonHint !== null
+    ? detectFolderNumbering(dirEntries.filter(e => !e.isDirectory() && VIDEO_EXT.has(path.extname(e.name).toLowerCase())).map(e => e.name))
+    : undefined;
+  for (const entry of dirEntries) {
     const fullPath=path.join(showPath,entry.name);
     if (entry.isDirectory()) {
       await scanEpisodes(fullPath,showId,libId,depth+1,seasonHintFromFolderName(entry.name));
@@ -2946,7 +2952,7 @@ async function scanEpisodes(showPath,showId,libId,depth=0,seasonHint=null) {
     // Season/episode from the file name (the four original patterns first, then — only if the
     // file sits in a season folder — a season-hint rule, then the bare-leading-number fallback).
     // See episodeParser.js.
-    const parsedEp = parseEpisodeFromFilename(entry.name, seasonHint);
+    const parsedEp = parseEpisodeFromFilename(entry.name, seasonHint, folderNumbering);
     if (!parsedEp) console.log(`[SCAN] Warning: could not detect season/episode from "${entry.name}"`);
     const emSeason = parsedEp ? parsedEp.season : 0;
     const emEpisode = parsedEp ? parsedEp.episode : 0;
@@ -7978,10 +7984,22 @@ app.post("/api/scan/repair-episodes", requireAdmin, async (req, res) => {
     const changes = [];       // { ep, season, episode }
     let unparsed = 0;
     const finalByKey = new Map(); // "parent|season|episode" -> [{ ep, changed }]
+    // Numbering style per folder ("compact" 101 = S1E01 / "absolute" 101 = episode 101), judged
+    // from the file names of the episodes in that folder as stored in the database (no disk
+    // access) — the same decision the scanner makes.
+    const namesByDir = new Map();
+    for (const ep of episodes) {
+      const dir = path.dirname(ep.file_path || "");
+      if (!namesByDir.has(dir)) namesByDir.set(dir, []);
+      namesByDir.get(dir).push(path.basename(ep.file_path || ""));
+    }
+    const numberingByDir = new Map();
+    for (const [dir, names] of namesByDir) numberingByDir.set(dir, detectFolderNumbering(names));
     for (const ep of episodes) {
       const base = path.basename(ep.file_path || "");
-      const hint = seasonHintFromFolderName(path.basename(path.dirname(ep.file_path || "")));
-      const parsed = parseEpisodeFromFilename(base, hint);
+      const dir = path.dirname(ep.file_path || "");
+      const hint = seasonHintFromFolderName(path.basename(dir));
+      const parsed = parseEpisodeFromFilename(base, hint, hint !== null ? numberingByDir.get(dir) : undefined);
       let season = ep.season, episode = ep.episode, changed = false;
       if (!parsed) {
         unparsed++;                       // couldn't be parsed: never touched
