@@ -3442,6 +3442,46 @@ async function resolveHdrTonemap(item, label, targetW) {
   return { use: true, inputArgs: chain.inputArgs, filter: chain.filter };
 }
 
+// ── NVENC QUALITY PROFILES (Linux + h264_nvenc only) ──────────────────────────────
+// config.transcode_quality: "balanced" (default if missing), "high" or "fast".
+// "fast" is exactly the flags built at startup (cachedEncoder.extraArgs) — i.e. what was used
+// before profiles existed. "balanced"/"high" use slower presets with VBR + constant quality,
+// look-ahead and adaptive quantization, which fixes blocky/banded dark grainy scenes.
+// They include "-b:v 0" so the quality target (-cq) isn't capped by a bitrate; the DASH path
+// therefore skips its own "-b:v 4000k" when one of these is in use.
+// Never applies on other platforms or to other encoders (amf, qsv, libx264) — those get the
+// original flags untouched.
+const NVENC_QUALITY_PROFILES = {
+  balanced: ["-preset", "p5", "-tune", "hq", "-rc", "vbr", "-cq", "21", "-b:v", "0", "-profile:v", "high", "-bf", "3", "-rc-lookahead", "20", "-spatial-aq", "1", "-temporal-aq", "1"],
+  high:     ["-preset", "p6", "-tune", "hq", "-rc", "vbr", "-cq", "18", "-b:v", "0", "-profile:v", "high", "-bf", "3", "-rc-lookahead", "32", "-spatial-aq", "1", "-temporal-aq", "1"]
+};
+// Startup test of these flags runs in the background (see runNvencQualityTest). Until it has
+// finished — or if it failed — transcodes use "fast".
+let _nvencQualityTest = { state: "pending", reason: null }; // state: pending | ok | failed
+
+// Returns { extraArgs, skipBitrate } for one transcode start. For anything other than
+// Linux + h264_nvenc this returns the original args and logs nothing.
+function resolveNvencQuality(label) {
+  const original = { extraArgs: cachedEncoder.extraArgs, skipBitrate: false };
+  if (process.platform !== "linux" || cachedEncoder.encoder !== "h264_nvenc") return original;
+  const wantedRaw = config.transcode_quality;
+  const wanted = (wantedRaw === "fast" || wantedRaw === "high" || wantedRaw === "balanced") ? wantedRaw : "balanced";
+  if (wanted === "fast") {
+    console.log(`[${label}] NVENC-kvalitetsprofil: fast`);
+    return original;
+  }
+  if (_nvencQualityTest.state === "pending") {
+    console.log(`[${label}] NVENC-kvalitetsprofil: ${wanted} är inte testad än (starttestet pågår) – använder fast den här gången`);
+    return original;
+  }
+  if (_nvencQualityTest.state === "failed") {
+    console.log(`[${label}] NVENC-kvalitetsprofil: ${wanted} fungerar inte här (${_nvencQualityTest.reason}) – använder fast`);
+    return original;
+  }
+  console.log(`[${label}] NVENC-kvalitetsprofil: ${wanted}`);
+  return { extraArgs: NVENC_QUALITY_PROFILES[wanted], skipBitrate: true };
+}
+
 // ── DIRECT STREAM (for native formats) ─────────────────────────────────────────
 app.get("/api/stream/:id", requireMediaAccess, async (req, res) => {
   const item = await dbFindOne(db.media, { _id: req.params.id });
@@ -3877,6 +3917,8 @@ async function startHlsTranscode(item, startSec = 0) {
   }
 
   console.log(`[HLS] Using encoder: ${encoder}`);
+  // NVENC quality profile (Linux + h264_nvenc only); otherwise this is exactly extraArgs as before.
+  const hlsEncoderArgs = resolveNvencQuality("HLS").extraArgs;
 
   const args = [
     "-hide_banner", "-loglevel", "warning",
@@ -3889,7 +3931,7 @@ async function startHlsTranscode(item, startSec = 0) {
     "-i", item.file_path,
     "-avoid_negative_ts", "make_zero",
     ...videoFilterArgs,
-    "-c:v", encoder, ...extraArgs,
+    "-c:v", encoder, ...hlsEncoderArgs,
     "-c:a", "aac", "-profile:a", "aac_low", "-ac", "2", "-b:a", "128k",
     "-async", "1",
     "-hls_time", "4",
@@ -4107,11 +4149,15 @@ async function startDashTranscode(item, seekSec = 0, audioTrackIndex = null, all
 
   // For DASH, AMF works without extra args - just encoder + bitrate, no -quality flag
   // -quality before -b:v sets VBR mode which conflicts with DASH muxer
-  const dashEncoderArgs = encoder === "h264_amf" ? [] : [...extraArgs];
+  // NVENC quality profile (Linux + h264_nvenc only); not resolved/logged when video is just copied.
+  const nvencQuality = canCopyVideo ? null : resolveNvencQuality("DASH");
+  const dashEncoderArgs = encoder === "h264_amf" ? [] : [...(nvencQuality ? nvencQuality.extraArgs : extraArgs)];
 
   const videoArgs = canCopyVideo
     ? ["-c:v", "copy", "-bsf:v", canCopyHevc ? "hevc_mp4toannexb" : "h264_mp4toannexb"]
-    : [...videoFilterArgs, "-c:v", encoder, ...dashEncoderArgs, "-b:v", "4000k"];
+    // "-b:v 4000k" would override the "-b:v 0" of the balanced/high NVENC profiles (and cap their
+    // quality), so it's only added when no such profile is in use — i.e. unchanged everywhere else.
+    : [...videoFilterArgs, "-c:v", encoder, ...dashEncoderArgs, ...(nvencQuality && nvencQuality.skipBitrate ? [] : ["-b:v", "4000k"])];
 
   // Audio stream selection - use specific track if requested, otherwise pick best audio stream
   // Prefer AC3/EAC3/AAC over TrueHD/DTS (TrueHD causes FFmpeg errors in DASH), and never pick
@@ -8189,6 +8235,39 @@ function detectHdrTonemapSupport() {
   }
 }
 detectHdrTonemapSupport();
+
+// Tests the NVENC "balanced"/"high" flags with a tiny encode, in the BACKGROUND: asynchronous and
+// limited to 8 seconds, so it can never hold up the server starting. "high" is the strictest
+// profile (the other uses a subset of the same options), so passing it covers both. Until it has
+// finished — or if it fails — transcodes use "fast" (see resolveNvencQuality, which logs that).
+// Linux + h264_nvenc only; on anything else nothing runs and nothing is logged.
+function runNvencQualityTest() {
+  if (process.platform !== "linux" || cachedEncoder.encoder !== "h264_nvenc") {
+    _nvencQualityTest = { state: "failed", reason: "bara Linux med h264_nvenc" };
+    return;
+  }
+  try {
+    require("child_process").execFile(getFfmpegPath(), [
+      "-hide_banner", "-loglevel", "error",
+      "-f", "lavfi", "-i", "color=black:size=320x240:rate=25:duration=1",
+      "-c:v", "h264_nvenc", ...NVENC_QUALITY_PROFILES.high,
+      "-frames:v", "1", "-f", "null", "-"
+    ], { timeout: 8000 }, (err, stdout, stderr) => {
+      if (!err) {
+        _nvencQualityTest = { state: "ok", reason: null };
+        console.log("[NVENC] Kvalitetsprofilerna (balanced/high) är godkända av ffmpeg");
+        return;
+      }
+      const reason = err.killed ? "testet tog för lång tid (8 s)" : ((stderr || err.message || "").toString().trim().split("\n").slice(-1)[0] || "okänt fel");
+      _nvencQualityTest = { state: "failed", reason };
+      console.log(`[NVENC] Kvalitetsprofilerna (balanced/high) fungerar inte här: ${reason} – använder fast`);
+    });
+  } catch(e) {
+    _nvencQualityTest = { state: "failed", reason: (e.message || "").split("\n")[0] };
+    console.log(`[NVENC] Kvalitetsprofilerna kunde inte testas: ${_nvencQualityTest.reason} – använder fast`);
+  }
+}
+runNvencQualityTest();
 
 const PUBLIC=path.join(__dirname,"..","public");
 if (fs.existsSync(PUBLIC)) {
