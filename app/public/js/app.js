@@ -311,6 +311,9 @@ const I18N = {
     "sidebar.iptv": "IPTV",
     "iptv.sort_provider": "Leverantörens ordning",
     "iptv.sort_name": "A–Ö",
+    "iptvdiv.title": "Rubrikkanaler (ett namn per rad)",
+    "iptvdiv.desc": "Vissa leverantörer lägger falska kanaler i listan som bara fungerar som rubriker (till exempel \"Barnkanaler\" eller \"Sport\"). Namnen här visas som små rubriker i live-TV-listan istället för som kanaler. Namnet måste vara exakt lika (skiftläge och mellanslag runt namnet spelar ingen roll).",
+    "iptvdiv.saved": "✓ Rubrikkanaler sparade",
     "sidebar.back": "Tillbaka",
     "sidebar.settings": "INSTÄLLNINGAR",
     "home.recommends": "StreamVault rekommenderar",
@@ -500,6 +503,9 @@ const I18N = {
     "sidebar.iptv": "IPTV",
     "iptv.sort_provider": "Provider order",
     "iptv.sort_name": "A–Z",
+    "iptvdiv.title": "Heading channels (one name per line)",
+    "iptvdiv.desc": "Some providers put fake channels in the list that only work as headings (for example \"Kids\" or \"Sport\"). The names here are shown as small headings in the live TV list instead of as channels. The name must match exactly (case and spaces around the name don't matter).",
+    "iptvdiv.saved": "✓ Heading channels saved",
     "sidebar.back": "Back",
     "sidebar.settings": "SETTINGS",
     "home.recommends": "StreamVault recommends",
@@ -691,6 +697,9 @@ const I18N = {
     "sidebar.iptv": "IPTV",
     "iptv.sort_provider": "Tarjoajan järjestys",
     "iptv.sort_name": "A–Ö",
+    "iptvdiv.title": "Otsikkokanavat (yksi nimi per rivi)",
+    "iptvdiv.desc": "Jotkut palveluntarjoajat lisäävät listaan näennäiskanavia, jotka toimivat vain otsikoina (esimerkiksi \"Lastenkanavat\" tai \"Urheilu\"). Tässä olevat nimet näytetään pieninä otsikkoina suoran TV:n listassa kanavien sijaan. Nimen on vastattava täsmälleen (isoilla ja pienillä kirjaimilla tai nimen ympärillä olevilla välilyönneillä ei ole väliä).",
+    "iptvdiv.saved": "✓ Otsikkokanavat tallennettu",
     "sidebar.back": "Takaisin",
     "sidebar.settings": "ASETUKSET",
     "home.recommends": "StreamVault suosittelee",
@@ -1277,6 +1286,24 @@ function iptvWithSort(url, type) {
   const s = getIptvSort(type);
   return s ? url + (url.includes("?") ? "&" : "?") + "sort=" + s : url;
 }
+// Same as iptvWithSort, plus headings=1 when the provider's order is in effect: the server then
+// keeps the provider's section headings (divider channels) in the list. In A–Z order they're not asked for.
+function iptvWithSortHeadings(url, type) {
+  const u = iptvWithSort(url, type);
+  return iptvEffectiveSort(type) === "list" ? u + (u.includes("?") ? "&" : "?") + "headings=1" : u;
+}
+// A heading (divider: true) is only kept if a real channel follows it — i.e. the next item exists and
+// isn't another heading (two headings in a row, or one last in the list, are skipped).
+function iptvDropEmptyHeadings(channels) {
+  return (channels || []).filter((c, i, all) => !c.divider || (all[i + 1] && !all[i + 1].divider));
+}
+// Channel grid contents: real channels as cards, headings as a small, discreet, non-clickable line
+// spanning the whole row of the grid.
+function iptvGridHtml(channels, cardOpts) {
+  return iptvDropEmptyHeadings(channels).map(c => c.divider
+    ? `<div class="iptv-heading" style="grid-column:1 / -1;display:flex;align-items:center;gap:10px;margin-top:6px;color:var(--muted);font-size:12px;font-weight:700;letter-spacing:0.8px;text-transform:uppercase"><span>${esc(c.name)}</span><span style="flex:1;height:1px;background:var(--border, #333)"></span></div>`
+    : buildIptvChannelCard(c, cardOpts)).join("");
+}
 function setIptvSort(type, mode) {
   try { localStorage.setItem("sv_iptv_sort_" + (type || "live"), mode); } catch {}
   if (typeof window._iptvSortReload === "function") window._iptvSortReload(); // redraw the current list
@@ -1421,14 +1448,14 @@ async function openIptvPlaylistCountry(playlistId, country, isCountry, playlistN
   sec.innerHTML = `<div class="spinner-wrap"><div class="spinner"></div></div>`;
   window._iptvSortReload = () => openIptvPlaylistCountry(playlistId, country, isCountry, playlistName, true);
   try {
-    const data = await API.get(iptvWithSort(`/iptv/playlists/${playlistId}/country-channels?country=${encodeURIComponent(country)}&isCountry=${isCountry}`, "live"));
+    const data = await API.get(iptvWithSortHeadings(`/iptv/playlists/${playlistId}/country-channels?country=${encodeURIComponent(country)}&isCountry=${isCountry}`, "live"));
     sec.innerHTML = `
       <div class="grid-wrap">
         <button onclick="history.back()" style="background:var(--card2, #1a1a28);color:var(--text, #fff);border:1px solid var(--border, #333);padding:8px 16px;border-radius:8px;cursor:pointer;font-size:14px;display:inline-block;margin-bottom:14px">← Tillbaka</button>
         <h2 style="margin-bottom:14px">🌍 ${esc(country)}</h2>
         ${iptvSortSwitchHtml("live")}
         <div class="media-grid">
-          ${data.channels.map(c => buildIptvChannelCard(c)).join("")}
+          ${iptvGridHtml(data.channels)}
         </div>
       </div>`;
     loadEpgForChannelList(data.channels);
@@ -1456,14 +1483,14 @@ async function openIptvGroup(groupName, type, fromRouter) {
   sec.innerHTML = `<div class="spinner-wrap"><div class="spinner"></div></div>`;
   window._iptvSortReload = () => openIptvGroup(groupName, type, true);
   try {
-    const data = await API.get(iptvWithSort("/iptv/channels?group=" + encodeURIComponent(groupName) + "&type=" + (type || "live"), type || "live"));
+    const data = await API.get(iptvWithSortHeadings("/iptv/channels?group=" + encodeURIComponent(groupName) + "&type=" + (type || "live"), type || "live"));
     sec.innerHTML = `
       <div class="grid-wrap">
         <button onclick="history.back()" style="background:var(--card2, #1a1a28);color:var(--text, #fff);border:1px solid var(--border, #333);padding:8px 16px;border-radius:8px;cursor:pointer;font-size:14px;display:inline-block;margin-bottom:14px">← Tillbaka</button>
         <h2 style="margin-bottom:14px">${esc(groupName)}</h2>
         ${iptvSortSwitchHtml(type || "live")}
         <div class="media-grid">
-          ${data.channels.map(c => buildIptvChannelCard(c, { showSaveButton: true })).join("")}
+          ${iptvGridHtml(data.channels, { showSaveButton: true })}
         </div>
       </div>`;
     loadEpgForChannelList(data.channels);
@@ -1611,7 +1638,7 @@ async function openChannelGuide(tvgId, channelName) {
   }
 }
 async function loadEpgForChannelList(channels) {
-  const withTvgId = channels.filter(c => c.tvg_id && c.type !== "movie" && c.type !== "series");
+  const withTvgId = channels.filter(c => !c.divider && c.tvg_id && c.type !== "movie" && c.type !== "series");
   if (!withTvgId.length) return;
   try {
     const data = await API.get("/iptv/epg/now-next");
@@ -1638,6 +1665,19 @@ async function parseIptvPlaylist() {
     toast(`✓ ${data.count} kanaler tolkade`, "success");
   } catch(e) {
     if (statusEl) statusEl.textContent = "";
+    toast("Fel: " + e.message, "error");
+  }
+}
+
+// Saves the names of the fake channels shown as headings in the live-TV list (admin).
+async function saveIptvDividers() {
+  const el = document.getElementById("iptv-dividers-input");
+  if (!el) return;
+  try {
+    const data = await API.post("/iptv/dividers", { names: el.value.split(/\r?\n/) });
+    el.value = (data.names || []).join("\n"); // shows what was actually saved (empty lines removed)
+    toast(t("iptvdiv.saved"), "success");
+  } catch(e) {
     toast("Fel: " + e.message, "error");
   }
 }
@@ -7516,14 +7556,15 @@ async function loadSettings() {
     // Start updating next scan label
     setTimeout(updateNextScanLabel, 500);
     setInterval(updateNextScanLabel, 30000);
-    const [cfg, users, libs, scanStatus, updateInfo, cacheStatus, pgsStatus, ocrLangConfig, pendingOcr, liveActivity] = await Promise.all([
+    const [cfg, users, libs, scanStatus, updateInfo, cacheStatus, pgsStatus, ocrLangConfig, pendingOcr, liveActivity, dividerCfg] = await Promise.all([
       API.get("/config"), API.get("/users"), API.get("/libraries"),
       API.get("/scan/status"), API.get("/updates/check").catch(() => null),
       API.get("/subtitles/cache-status").catch(() => null),
       API.get("/tools/pgstosrt-status").catch(() => ({ installed: false })),
       API.get("/subtitles/ocr-languages").catch(() => ({ mode: "selected", languages: [] })),
       currentUser?.role === "admin" ? API.get("/subtitles/ocr-pending").catch(() => ({ pending: [] })) : Promise.resolve({ pending: [] }),
-      currentUser?.role === "admin" ? API.get("/admin/live-activity").catch(() => null) : Promise.resolve(null)
+      currentUser?.role === "admin" ? API.get("/admin/live-activity").catch(() => null) : Promise.resolve(null),
+      API.get("/iptv/dividers").catch(() => null)
     ]);
     console.log("[SETTINGS] cacheStatus:", JSON.stringify(cacheStatus)?.slice(0,100));
     const counts = Object.fromEntries((scanStatus.counts || []).map(c => [c.type, c.c]));
@@ -7898,6 +7939,11 @@ async function loadSettings() {
           <button class="btn-fav" onclick="parseIptvPlaylist()">Hämta & tolka</button>
         </div>
         <div id="iptv-status" style="font-size:13px;color:var(--muted);margin-bottom:14px"></div>
+        ${dividerCfg ? `
+        <div style="font-size:13px;font-weight:600;margin-bottom:6px">${t("iptvdiv.title")}</div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:8px">${t("iptvdiv.desc")}</div>
+        <textarea id="iptv-dividers-input" class="s-input" rows="6" style="width:100%;font-family:inherit;margin-bottom:8px">${esc((dividerCfg.names || []).join("\n"))}</textarea>
+        <div style="margin-bottom:14px"><button class="btn-fav" onclick="saveIptvDividers()">${t("profile.save")}</button></div>` : ""}
         <div style="font-size:12px;color:var(--muted);margin-bottom:10px">
           Programtablå (EPG) — separat adress från din leverantör, i XMLTV-format. Visar vad som sänds just nu och härnäst under varje kanal. Uppdateras automatiskt var 4:e timme.
         </div>

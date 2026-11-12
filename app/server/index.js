@@ -1506,7 +1506,7 @@ function detectContentType(url, groupTitle) {
   return "live";
 }
 
-const { sortChannels, groupsByFirstOrder, reuseChannelIds, filterVisibleGroups } = require("./iptvOrder");
+const { sortChannels, groupsByFirstOrder, reuseChannelIds, filterVisibleGroups, dividerNames, markDividers } = require("./iptvOrder");
 
 function parseM3U(text) {
   const lines = text.split(/\r?\n/);
@@ -1663,6 +1663,25 @@ app.post("/api/iptv/refresh", requireAdmin, async (req, res) => {
   } catch(e) {
     res.status(500).json({ error: "Kunde inte hämta/tolka listan: " + e.message });
   }
+});
+
+// Names of the fake channels that are shown as headings instead of cards in the live-TV list.
+// GET gives the list in effect (the default list until the admin has saved one); POST saves it.
+app.get("/api/iptv/dividers", requireAdmin, (req, res) => {
+  res.json({ names: dividerNames(config.iptv_divider_names), isDefault: !Array.isArray(config.iptv_divider_names) });
+});
+
+app.post("/api/iptv/dividers", requireAdmin, (req, res) => {
+  const raw = req.body?.names;
+  if (!Array.isArray(raw) || !raw.every(n => typeof n === "string")) {
+    return res.status(400).json({ error: "names måste vara en lista med strängar" });
+  }
+  const names = raw.map(n => n.trim()).filter(Boolean); // empty lines are dropped
+  if (names.length > 100) return res.status(400).json({ error: "Högst 100 rubrikkanaler" });
+  if (names.some(n => n.length > 100)) return res.status(400).json({ error: "Ett namn får vara högst 100 tecken" });
+  config.iptv_divider_names = names;
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
+  res.json({ ok: true, names });
 });
 
 // EPG setup — separate from the M3U playlist since providers give it as its own URL.
@@ -1834,7 +1853,10 @@ app.get("/api/iptv/groups", requireAuth, async (req, res) => {
     // consolidation doesn't apply (country wasn't computed for those at parse time), so it
     // just falls through to the raw group-title, same as before.
     const counts = {};
-    for (const c of channels) {
+    // Divider "channels" (section headings in the provider's list) aren't real channels, so they
+    // don't count towards a group's number of channels.
+    const countable = type === "live" ? markDividers(channels, dividerNames(config.iptv_divider_names)).filter(c => !c.divider) : channels;
+    for (const c of countable) {
       const key = (type === "live" && c.country) ? c.country : c.group;
       counts[key] = (counts[key] || 0) + 1;
     }
@@ -1878,6 +1900,15 @@ function iptvSortMode(req, type) {
   const s = req.query.sort;
   if (s === "list" || s === "name") return s;
   return (type === "movie" || type === "series") ? "name" : "list";
+}
+
+// Dividers (fake channels used as section headings, picked out by name — see iptvOrder.js) are left
+// out of a channel list, nothing changes in the database. They only stay, with divider: true and
+// in their place in the order, when the call has headings=1 AND the order is the provider's list.
+function applyDividers(channels, req, mode) {
+  const marked = markDividers(channels, dividerNames(config.iptv_divider_names));
+  const keep = req.query.headings === "1" && mode === "list";
+  return keep ? marked : marked.filter(c => !c.divider);
 }
 
 function channelsForCountryQuery(country, isCountry) {
@@ -1943,6 +1974,13 @@ app.post("/api/iptv/playlists/:id/toggle-channel", requireAuth, async (req, res)
     const playlist = await dbFindOne(db.iptvPlaylists, { _id: req.params.id });
     if (!playlist || playlist.user_id !== req.user._id) return res.status(404).json({ error: "Hittades inte" });
     const { channelId, add } = req.body;
+    if (add) {
+      // a divider (fake channel used as a section heading) can never be put in a favorite list
+      const channel = await dbFindOne(db.iptvChannels, { _id: channelId });
+      if (channel && markDividers([channel], dividerNames(config.iptv_divider_names))[0].divider) {
+        return res.status(400).json({ error: "Det här är en rubrik, inte en kanal, och kan inte läggas i en spellista" });
+      }
+    }
     const current = new Set(playlist.channel_ids || []);
     if (add) current.add(channelId); else current.delete(channelId);
     await dbUpdate(db.iptvPlaylists, { _id: req.params.id }, { $set: { channel_ids: [...current] } });
@@ -1974,12 +2012,17 @@ app.get("/api/iptv/playlists/:id/channels", requireAuth, async (req, res) => {
     // Country entries stay collapsed — count is computed fresh, not stored, so it reflects
     // the playlist's current channel count even if channels were added/removed since.
     const countryEntries = [];
+    const divNames = dividerNames(config.iptv_divider_names);
     for (const c of countries) {
-      const count = await new Promise((resolve) => db.iptvChannels.count(channelsForCountryQuery(c.name, c.isCountry), (err, n) => resolve(err ? 0 : n)));
+      // dividers (section headings) aren't real channels, so they aren't counted
+      const found = await dbFind(db.iptvChannels, channelsForCountryQuery(c.name, c.isCountry));
+      const count = markDividers(found, divNames).filter(ch => !ch.divider).length;
       countryEntries.push({ name: c.name, isCountry: c.isCountry, count });
     }
     const ids = playlist.channel_ids || [];
-    const channels = ids.length ? sortChannels(await dbFind(db.iptvChannels, { _id: { $in: ids } }), iptvSortMode(req)) : [];
+    // Individually saved favorites never contain dividers (they can't be added), so any left over
+    // from before are always dropped here.
+    const channels = ids.length ? sortChannels(await dbFind(db.iptvChannels, { _id: { $in: ids } }), iptvSortMode(req)).filter(c => !markDividers([c], divNames)[0].divider) : [];
     res.json({
       name: playlist.name,
       countryEntries,
@@ -1995,8 +2038,9 @@ app.get("/api/iptv/playlists/:id/country-channels", requireAuth, async (req, res
     const playlist = await dbFindOne(db.iptvPlaylists, { _id: req.params.id });
     if (!playlist || playlist.user_id !== req.user._id) return res.status(404).json({ error: "Hittades inte" });
     const { country, isCountry } = req.query;
-    const channels = sortChannels(await dbFind(db.iptvChannels, channelsForCountryQuery(country, isCountry === "true")), iptvSortMode(req));
-    res.json({ channels: channels.map(c => ({ id: c._id, name: c.name, logo: c.logo, group: c.group, type: c.type || "live", url: c.url, tvg_id: c.tvg_id || null })) });
+    const mode = iptvSortMode(req);
+    const channels = applyDividers(sortChannels(await dbFind(db.iptvChannels, channelsForCountryQuery(country, isCountry === "true")), mode), req, mode);
+    res.json({ channels: channels.map(c => ({ id: c._id, name: c.name, logo: c.logo, group: c.group, type: c.type || "live", url: c.url, tvg_id: c.tvg_id || null, ...(c.divider ? { divider: true } : {}) })) });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -2005,7 +2049,8 @@ app.get("/api/iptv/subgroups", requireAuth, async (req, res) => {
   try {
     const country = req.query.country;
     if (!country) return res.status(400).json({ error: "Inget land angivet" });
-    const channels = await dbFind(db.iptvChannels, { country, type: "live" });
+    // dividers (section headings) aren't real channels, so they aren't counted
+    const channels = markDividers(await dbFind(db.iptvChannels, { country, type: "live" }), dividerNames(config.iptv_divider_names)).filter(c => !c.divider);
     let groups;
     if (iptvSortMode(req, "live") === "list") {
       // sub-groups in the order they first appear in the provider's list (lowest order in the group)
@@ -2024,13 +2069,15 @@ app.get("/api/iptv/channels", requireAuth, async (req, res) => {
   try {
     const query = req.query.group ? { group: req.query.group } : {};
     if (["live", "movie", "series"].includes(req.query.type)) query.type = req.query.type;
-    const channels = sortChannels(await dbFind(db.iptvChannels, query), iptvSortMode(req, query.type));
+    const mode = iptvSortMode(req, query.type);
+    const channels = applyDividers(sortChannels(await dbFind(db.iptvChannels, query), mode), req, mode);
     const userPlaylists = await dbFind(db.iptvPlaylists, { user_id: req.user._id });
     const favoritedChannelIds = new Set(userPlaylists.flatMap(p => p.channel_ids || []));
     const favoritedCountryNames = new Set(userPlaylists.flatMap(p => (p.countries || []).map(c => c.name)));
     res.json({ channels: channels.map(c => ({
       id: c._id, name: c.name, logo: c.logo, group: c.group, type: c.type || "live", url: c.url, tvg_id: c.tvg_id || null,
-      inAnyPlaylist: favoritedChannelIds.has(c._id) || (c.country && favoritedCountryNames.has(c.country)) || favoritedCountryNames.has(c.group)
+      inAnyPlaylist: favoritedChannelIds.has(c._id) || (c.country && favoritedCountryNames.has(c.country)) || favoritedCountryNames.has(c.group),
+      ...(c.divider ? { divider: true } : {})
     })) });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });

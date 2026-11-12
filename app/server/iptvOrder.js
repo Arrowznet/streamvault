@@ -81,4 +81,30 @@ function filterVisibleGroups(groups, user) {
   return all.filter(g => visible.has(g.name));
 }
 
-module.exports = { sortChannels, groupsByFirstOrder, reuseChannelIds, filterVisibleGroups };
+// ── Dividers ("rubrikkanaler") ─────────────────────────────────────────────────────
+// Some providers put fake channels in their list that only act as section headings ("Barnkanaler",
+// "Sport", ...). They can't be recognised from the data, so they're picked out by NAME, from a list
+// the admin can edit (config.iptv_divider_names). Without that setting this default list is used.
+const DEFAULT_DIVIDER_NAMES = [
+  "SWEDEN", "Barnkanaler", "AlienPlay", "Nyheter", "Entertainment", "Sport", "Film kanaler", "Lokala kanaler", "Pay Per View"
+];
+
+// The names in effect: the saved list (only if it really is a list of strings), else the default.
+// A saved EMPTY list is a real choice ("no headings") and is kept as it is.
+function dividerNames(configValue) {
+  if (Array.isArray(configValue) && configValue.every(n => typeof n === "string")) return configValue;
+  return [...DEFAULT_DIVIDER_NAMES];
+}
+
+// Marks channels that are dividers with divider: true (returns new objects; the input is not
+// changed). A channel is a divider if it is a live channel whose name, trimmed and case-insensitive,
+// is EXACTLY equal to one of the names — no partial matching ("AlienPlay: Wild Nature" is not one).
+function markDividers(channels, names) {
+  const set = new Set((names || []).map(n => String(n).trim().toLowerCase()).filter(Boolean));
+  return (channels || []).map(c => {
+    const isLive = (c.type || "live") === "live";
+    return isLive && set.has(String(c.name || "").trim().toLowerCase()) ? { ...c, divider: true } : c;
+  });
+}
+
+module.exports = { sortChannels, groupsByFirstOrder, reuseChannelIds, filterVisibleGroups, DEFAULT_DIVIDER_NAMES, dividerNames, markDividers };
