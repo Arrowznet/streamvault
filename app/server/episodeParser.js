@@ -9,6 +9,14 @@ const SEASON_FOLDER_RE = /^(season|säsong|sasong|series|saison|staffel|temporad
 // "101 Title", "01-Title", "116+117 Title", "00.Opening.mkv" — but not "2Fast.mkv".
 const LEADING_NUMBER_RE = /^(\d{1,4})(?![\p{L}\d])/u;
 
+// Letter runs that are technical tags, not part of a release name: audio/video codecs, and
+// resolution/source tags. A number right after one of these ("AAC192", "HD720", "WEB1080") is
+// never an episode. Compared case-insensitively against the WHOLE letter run before the number.
+const TECH_TAGS = new Set([
+  "aac", "eac", "ddp", "dd", "dts", "ac", "avc", "hevc", "xvid", "divx", "mpeg", "flac", "opus",
+  "hd", "sd", "fhd", "uhd", "bd", "web", "dl", "dvd"
+]);
+
 // "Season 3" -> 3, "Season 0" -> 0 (specials), anything that isn't a season folder -> null.
 function seasonHintFromFolderName(folderName) {
   const m = String(folderName || "").match(SEASON_FOLDER_RE);
@@ -58,6 +66,7 @@ function detectFolderNumbering(fileNames) {
 //       ("101 Title" in Season 1, "two.and.a.half.men.1101.hdtv" in Season 11) -> season/episode.
 //       "Stand-alone" means not touching other digits or letters, so "1080p" and "x264" are
 //       skipped. Numbers inside the name are handled this way whatever the folder's style is.
+//     - if still nothing: rule 2c (see below), "tpz-koq701" / "Scrubs.s711".
 //  3. The original last resort: a bare leading number (up to 3 digits) means season 1.
 function parseEpisodeFromFilename(fileName, seasonHint = null, numbering) {
   const name = String(fileName || "");
@@ -77,6 +86,23 @@ function parseEpisodeFromFilename(fileName, seasonHint = null, numbering) {
         const n = parseInt(m[1], 10);
         if (Math.floor(n / 100) === seasonHint && n % 100 >= 1) return { season: seasonHint, episode: n % 100 };
       }
+    }
+
+    // 2c (only reached if nothing above returned): release-style names with the season+episode
+    // packed into one number inside the name.
+    //  a) a stand-alone 3-4 digit number right after a run of 2+ letters, e.g. "tpz-koq701.avi".
+    //     The WHOLE letter run before the number must not be a technical tag (AAC192, HD720,
+    //     WEB1080, ...). A single letter before the number (x264, h265) never matches since 2+
+    //     letters are required, and a letter after it (720p, 1080p) never matches either.
+    //  b) "s" + 3-4 digits after a separator or at the start, e.g. "Scrubs.s711.pdtv-lol.mkv".
+    for (const m of name.matchAll(/(?<!\p{L})(\p{L}{2,})(\d{3,4})(?![\p{L}\d])/gu)) {
+      if (TECH_TAGS.has(m[1].toLowerCase())) continue;
+      const n = parseInt(m[2], 10);
+      if (Math.floor(n / 100) === seasonHint && n % 100 >= 1) return { season: seasonHint, episode: n % 100 };
+    }
+    for (const m of name.matchAll(/(?<![\p{L}\d])[sS](\d{3,4})(?!\d)/gu)) {
+      const n = parseInt(m[1], 10);
+      if (Math.floor(n / 100) === seasonHint && n % 100 >= 1) return { season: seasonHint, episode: n % 100 };
     }
   }
 
