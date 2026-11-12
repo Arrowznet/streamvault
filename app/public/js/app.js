@@ -375,6 +375,15 @@ const I18N = {
     "profile.theme_desc_other": "Välj tema för den här användaren.",
     "profile.streaming_services": "Streamingtjänster",
     "profile.streaming_services_desc": "Välj de tjänster du använder. \"Fler sätt att se den på\" visar bara ditt val, istället för alla tjänster som finns.",
+    "iptvgroups.title": "TV-länder och språk",
+    "iptvgroups.desc": "Välj vilka länder och språk i live-TV-listan som ska visas. Grupper som tillkommer senare är dolda tills du bockar i dem.",
+    "iptvgroups.search": "Sök land eller språk...",
+    "iptvgroups.select_all": "Markera alla",
+    "iptvgroups.deselect_all": "Avmarkera alla",
+    "iptvgroups.channels": "kanaler",
+    "iptvgroups.saved": "✓ Sparat",
+    "iptvgroups.saved_all": "✓ Sparat (alla visas)",
+    "iptvgroups.none_found": "Inga träffar",
     "profile.loading": "Laddar...",
     "profile.save": "Spara",
     "profile.show_all_again": "Visa alla igen (rensa val)",
@@ -555,6 +564,15 @@ const I18N = {
     "profile.theme_desc_other": "Choose a theme for this user.",
     "profile.streaming_services": "Streaming Services",
     "profile.streaming_services_desc": "Choose the services you use. \"More ways to watch\" will only show your picks, instead of every available service.",
+    "iptvgroups.title": "TV countries and languages",
+    "iptvgroups.desc": "Choose which countries and languages are shown in the live TV list. Groups added later stay hidden until you tick them.",
+    "iptvgroups.search": "Search country or language...",
+    "iptvgroups.select_all": "Select all",
+    "iptvgroups.deselect_all": "Deselect all",
+    "iptvgroups.channels": "channels",
+    "iptvgroups.saved": "✓ Saved",
+    "iptvgroups.saved_all": "✓ Saved (showing all)",
+    "iptvgroups.none_found": "No matches",
     "profile.loading": "Loading...",
     "profile.save": "Save",
     "profile.show_all_again": "Show all again (clear selection)",
@@ -737,6 +755,15 @@ const I18N = {
     "profile.theme_desc_other": "Valitse teema tälle käyttäjälle.",
     "profile.streaming_services": "Suoratoistopalvelut",
     "profile.streaming_services_desc": "Valitse käyttämäsi palvelut. \"Muita tapoja katsoa\" näyttää vain valintasi, kaikkien palveluiden sijaan.",
+    "iptvgroups.title": "TV-maat ja kielet",
+    "iptvgroups.desc": "Valitse, mitkä maat ja kielet näytetään suoran TV:n listassa. Myöhemmin lisätyt ryhmät pysyvät piilossa, kunnes valitset ne.",
+    "iptvgroups.search": "Hae maata tai kieltä...",
+    "iptvgroups.select_all": "Valitse kaikki",
+    "iptvgroups.deselect_all": "Poista kaikki valinnat",
+    "iptvgroups.channels": "kanavaa",
+    "iptvgroups.saved": "✓ Tallennettu",
+    "iptvgroups.saved_all": "✓ Tallennettu (kaikki näytetään)",
+    "iptvgroups.none_found": "Ei tuloksia",
     "profile.loading": "Ladataan...",
     "profile.save": "Tallenna",
     "profile.show_all_again": "Näytä kaikki uudelleen (tyhjennä valinta)",
@@ -6791,6 +6818,63 @@ async function clearStreamingServices(userId) {
   await saveStreamingServices(userId);
 }
 
+// ── "TV countries and languages" picker (live-TV groups a user wants to see) ──────
+// Only for users with IPTV access — the same condition as the TV menu item (sb-iptv):
+// IPTV switched on, and library_ids empty or containing "iptv". Otherwise nothing is drawn.
+function canChooseIptvGroups(user) {
+  return !!(window._iptvEnabled && user && (!user.library_ids?.length || user.library_ids.includes("iptv")));
+}
+
+async function loadIptvGroupsPicker(user) {
+  const el = document.getElementById(`iptv-groups-list-${user.id}`);
+  if (!el) return;
+  try {
+    const data = await API.get("/iptv/groups?type=live&all=1"); // every group, whatever the filter
+    // Nothing saved yet -> everything ticked. With a saved choice only those are ticked, so groups
+    // that appeared after it was saved are unticked.
+    const filterOn = user.iptv_group_filter === true && Array.isArray(user.iptv_visible_groups);
+    const saved = new Set(user.iptv_visible_groups || []);
+    el.innerHTML = (data.groups || []).map(g => `
+      <label class="iptv-group-row" data-name="${esc(g.name.toLowerCase())}" style="display:flex;align-items:center;gap:10px;padding:6px 8px;cursor:pointer;font-size:13px">
+        <input type="checkbox" value="${esc(g.name)}" ${(!filterOn || saved.has(g.name)) ? "checked" : ""}>
+        <span style="flex:1">${esc(g.name)}</span>
+        <span style="color:var(--muted);font-size:12px">${g.count} ${t("iptvgroups.channels")}</span>
+      </label>`).join("") || `<div style="color:var(--muted);font-size:13px;padding:10px">${t("iptvgroups.none_found")}</div>`;
+  } catch(e) {
+    el.innerHTML = `<div style="color:var(--danger);font-size:13px;padding:10px">${esc(e.message)}</div>`;
+  }
+}
+
+function filterIptvGroupsPicker(userId) {
+  const q = (document.getElementById(`iptv-groups-search-${userId}`)?.value || "").trim().toLowerCase();
+  document.querySelectorAll(`#iptv-groups-list-${userId} .iptv-group-row`).forEach(row => {
+    row.style.display = !q || (row.dataset.name || "").includes(q) ? "flex" : "none";
+  });
+}
+
+// "Select all" / "Deselect all" act on the rows currently shown (so they work on search results too).
+function setAllIptvGroups(userId, checked) {
+  document.querySelectorAll(`#iptv-groups-list-${userId} .iptv-group-row`).forEach(row => {
+    if (row.style.display !== "none") row.querySelector("input").checked = checked;
+  });
+}
+
+// Saves the ticked groups. If EVERY group is ticked that means "no filter" (enabled: false), so
+// countries that show up later are visible as usual; otherwise only the ticked ones are shown.
+async function saveIptvGroups(userId) {
+  const boxes = [...document.querySelectorAll(`#iptv-groups-list-${userId} input[type=checkbox]`)];
+  if (!boxes.length) return;
+  const checked = boxes.filter(b => b.checked).map(b => b.value);
+  const allChecked = checked.length === boxes.length;
+  try {
+    await API.patch(`/users/${userId}/iptv-groups`, { groups: checked, enabled: !allChecked });
+    if (userId === currentUser?.id) { currentUser.iptv_visible_groups = checked; currentUser.iptv_group_filter = !allChecked; }
+    toast(allChecked ? t("iptvgroups.saved_all") : t("iptvgroups.saved"), "success");
+  } catch(e) {
+    toast("Fel: " + e.message, "error");
+  }
+}
+
 async function saveUserTheme(userId, themeName) {
   const isOwnProfile = userId === currentUser?.id;
   if (isOwnProfile) applyTheme(themeName); // no reason to visually change YOUR OWN screen when setting someone else's theme
@@ -8066,6 +8150,18 @@ async function renderUserPage(user) {
           <button class="s-btn" onclick="clearStreamingServices('${user.id}')">${t("profile.show_all_again")}</button>
         </div>
       </div>
+      ${canChooseIptvGroups(user) ? `
+      <div class="settings-section" id="iptv-groups-section-${user.id}">
+        <div class="settings-section-title">${t("iptvgroups.title")}</div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:10px">${t("iptvgroups.desc")}</div>
+        <input class="s-input" id="iptv-groups-search-${user.id}" placeholder="${esc(t("iptvgroups.search"))}" oninput="filterIptvGroupsPicker('${user.id}')" style="margin-bottom:8px">
+        <div id="iptv-groups-list-${user.id}" style="max-height:280px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:8px"><div style="color:var(--muted);font-size:13px;padding:10px">${t("profile.loading")}</div></div>
+        <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+          <button class="s-btn primary" onclick="saveIptvGroups('${user.id}')">${t("profile.save")}</button>
+          <button class="s-btn" onclick="setAllIptvGroups('${user.id}', true)">${t("iptvgroups.select_all")}</button>
+          <button class="s-btn" onclick="setAllIptvGroups('${user.id}', false)">${t("iptvgroups.deselect_all")}</button>
+        </div>
+      </div>` : ""}
       <div class="settings-section">
         <div class="settings-section-title" style="display:flex;align-items:center;gap:8px">
           ${t("profile.smart_home")}
@@ -8136,6 +8232,7 @@ async function renderUserPage(user) {
     loadLibraryAccessUI(user);
   }
   loadStreamingServicesList(user.id, user.preferred_watch_providers);
+  if (canChooseIptvGroups(user)) loadIptvGroupsPicker(user);
 }
 
 async function loadLibraryAccessUI(user) {

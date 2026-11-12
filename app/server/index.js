@@ -870,6 +870,8 @@ app.get("/api/me", requireAuth, async (req, res) => {
     const user = await dbFindOne(db.users, { _id: req.user._id });
     if (!user) return res.status(404).json({ error: "Användare hittades inte" });
     const { password, ...safeUser } = user;
+    // The live-TV group choice only exists for users with IPTV access.
+    if (!userHasIptvAccess(user)) { delete safeUser.iptv_visible_groups; delete safeUser.iptv_group_filter; }
     res.json(safeUser);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -912,7 +914,9 @@ app.get("/api/users", requireAdmin, async (req, res) => {
   const users = await dbFind(db.users, { is_active: true });
   res.json(users.map(u => ({
     id: u._id, username: u.username, role: u.role, created_at: u.created_at, last_login: u.last_login,
-    library_ids: u.library_ids || [], language: u.language || null, subtitleLanguages: u.subtitleLanguages || [], theme: u.theme || null, webhook_url: u.webhook_url || null, webhook_enabled: !!u.webhook_enabled, preferred_watch_providers: u.preferred_watch_providers || []
+    library_ids: u.library_ids || [], language: u.language || null, subtitleLanguages: u.subtitleLanguages || [], theme: u.theme || null, webhook_url: u.webhook_url || null, webhook_enabled: !!u.webhook_enabled, preferred_watch_providers: u.preferred_watch_providers || [],
+    // live-TV group choice: only for users who have IPTV access (so an admin can see/edit it)
+    ...(userHasIptvAccess(u) ? { iptv_visible_groups: u.iptv_visible_groups || [], iptv_group_filter: u.iptv_group_filter === true } : {})
   })));
 });
 
@@ -1502,7 +1506,7 @@ function detectContentType(url, groupTitle) {
   return "live";
 }
 
-const { sortChannels, groupsByFirstOrder, reuseChannelIds } = require("./iptvOrder");
+const { sortChannels, groupsByFirstOrder, reuseChannelIds, filterVisibleGroups } = require("./iptvOrder");
 
 function parseM3U(text) {
   const lines = text.split(/\r?\n/);
@@ -1836,11 +1840,16 @@ app.get("/api/iptv/groups", requireAuth, async (req, res) => {
     }
     const userPlaylists = await dbFind(db.iptvPlaylists, { user_id: req.user._id });
     const favoritedCountryNames = new Set(userPlaylists.flatMap(p => (p.countries || []).map(c => c.name)));
-    const groups = Object.entries(counts).map(([name, count]) => ({
+    const allGroups = Object.entries(counts).map(([name, count]) => ({
       name, count,
       isCountry: type === "live" && Object.values(COUNTRY_NAMES).includes(name),
       inAnyPlaylist: favoritedCountryNames.has(name)
     })).sort((a, b) => a.name.localeCompare(b.name));
+    // Live TV only: trim the list to the groups this user has chosen to show (profile → "TV-länder
+    // och språk"). Done here on the server so the mobile app gets it too. Only the list of groups is
+    // affected — channels, favorite lists and EPG are untouched. ?all=1 (used by the picker itself,
+    // and only reachable with IPTV access, checked at the top) returns every group.
+    const groups = (type === "live" && req.query.all !== "1") ? filterVisibleGroups(allGroups, req.user) : allGroups;
     const typeCounts = { live: 0, movie: 0, series: 0 };
     for (const c of allChannels) typeCounts[c.type || "live"]++;
     res.json({ groups, total: channels.length, typeCounts, configuredUrl: config.iptv_m3u_url || null });
@@ -4712,6 +4721,30 @@ app.patch("/api/users/:id/preferred-providers", requireAuth, async (req, res) =>
       return res.status(403).json({ error: "Ej tillåtet" });
     }
     await dbUpdate(db.users, { _id: req.params.id }, { $set: { preferred_watch_providers: req.body.providers || [] } });
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Which live-TV groups (countries/languages) this user wants to see. Same permission model as
+// preferred-providers (the user themself, or an admin) — plus IPTV access, for both the person
+// asking and the user being changed: without IPTV access there is nothing to choose.
+// { groups: [...names], enabled: true|false } — the filter only applies while enabled is true.
+app.patch("/api/users/:id/iptv-groups", requireAuth, async (req, res) => {
+  try {
+    if (req.params.id !== req.user._id && req.user.role !== "admin") {
+      return res.status(403).json({ error: "Ej tillåtet" });
+    }
+    if (!userHasIptvAccess(req.user)) return res.status(403).json({ error: "Ej tillåtet" });
+    const target = req.params.id === req.user._id ? req.user : await dbFindOne(db.users, { _id: req.params.id });
+    if (!target) return res.status(404).json({ error: "Användare hittades inte" });
+    if (!userHasIptvAccess(target)) return res.status(403).json({ error: "Ej tillåtet" });
+
+    const { groups, enabled } = req.body || {};
+    if (!Array.isArray(groups) || groups.length > 500 || !groups.every(g => typeof g === "string" && g.length <= 200)) {
+      return res.status(400).json({ error: "groups måste vara en lista med högst 500 strängar på högst 200 tecken" });
+    }
+    if (typeof enabled !== "boolean") return res.status(400).json({ error: "enabled måste vara true eller false" });
+    await dbUpdate(db.users, { _id: req.params.id }, { $set: { iptv_visible_groups: [...new Set(groups)], iptv_group_filter: enabled } });
     res.json({ ok: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });

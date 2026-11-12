@@ -69,4 +69,16 @@ function reuseChannelIds(previous, fresh) {
   return { channels, preserved };
 }
 
-module.exports = { sortChannels, groupsByFirstOrder, reuseChannelIds };
+// Per-user choice of which top-level live-TV groups (countries/languages) are shown. The filter
+// only applies when the user has saved a choice (iptv_group_filter === true with a saved list);
+// otherwise everything is shown, as it always was. Groups that appear after the choice was saved
+// are not in the list, so they stay hidden until the user ticks them. Channels, favorite lists and
+// EPG are not affected — this only trims the list of groups. Returns a new array.
+function filterVisibleGroups(groups, user) {
+  const all = [...(groups || [])];
+  if (!user || user.iptv_group_filter !== true || !Array.isArray(user.iptv_visible_groups)) return all;
+  const visible = new Set(user.iptv_visible_groups);
+  return all.filter(g => visible.has(g.name));
+}
+
+module.exports = { sortChannels, groupsByFirstOrder, reuseChannelIds, filterVisibleGroups };
