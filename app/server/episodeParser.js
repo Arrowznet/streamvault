@@ -219,4 +219,39 @@ function mergeEpisodeMeta(a, b) {
   };
 }
 
-module.exports = { parseEpisodeFromFilename, seasonHintFromFolderName, detectFolderNumbering, mergeEpisodeMeta, SEASON_FOLDER_RE };
+// ── Season 0 (specials) ───────────────────────────────────────────────────────────
+// Sort order for the specials page: episodes with a number (> 0) first, in number order, then
+// the ones without (episode 0) in natural order on the title (case-insensitive, so "Special 2"
+// comes before "Special 10"). Returns a new array.
+function sortSpecialEpisodes(episodes) {
+  const num = e => (typeof e.episode === "number" && e.episode > 0) ? e.episode : 0;
+  return [...(episodes || [])].sort((a, b) => {
+    const na = num(a), nb = num(b);
+    if (na && nb) return na - nb || String(a.title || "").localeCompare(String(b.title || ""), undefined, { numeric: true, sensitivity: "base" });
+    if (na) return -1;
+    if (nb) return 1;
+    return String(a.title || "").localeCompare(String(b.title || ""), undefined, { numeric: true, sensitivity: "base" })
+        || String(a.file_path || "").localeCompare(String(b.file_path || ""), undefined, { numeric: true, sensitivity: "base" });
+  });
+}
+
+// Gives titles that occur more than once (case-insensitive) the name of the closest parent folder
+// in parentheses: ".../Season 3/Gag Reel.mkv" -> "Gag Reel (Season 3)". Unique titles are left as
+// they are. Takes [{ title, file_path }] and returns the new titles in the same order; nothing is
+// saved anywhere — it's only for what the specials page shows.
+function disambiguateTitles(entries) {
+  const path = require("path");
+  const counts = new Map();
+  for (const e of entries || []) {
+    const key = String(e.title || "").trim().toLowerCase();
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  return (entries || []).map(e => {
+    const title = String(e.title || "");
+    if (counts.get(title.trim().toLowerCase()) < 2 || !e.file_path) return title;
+    const folder = path.basename(path.dirname(String(e.file_path)));
+    return folder && folder !== "." && folder !== path.sep ? `${title} (${folder})` : title;
+  });
+}
+
+module.exports = { parseEpisodeFromFilename, seasonHintFromFolderName, detectFolderNumbering, mergeEpisodeMeta, sortSpecialEpisodes, disambiguateTitles, SEASON_FOLDER_RE };

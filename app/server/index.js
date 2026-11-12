@@ -2954,7 +2954,7 @@ async function processEpisodeEnrichQueue() {
   _episodeEnrichRunning = false;
 }
 
-const { parseEpisodeFromFilename, seasonHintFromFolderName, detectFolderNumbering, mergeEpisodeMeta } = require("./episodeParser");
+const { parseEpisodeFromFilename, seasonHintFromFolderName, detectFolderNumbering, mergeEpisodeMeta, sortSpecialEpisodes, disambiguateTitles } = require("./episodeParser");
 
 // seasonHint: season number taken from the folder name this directory was entered through
 // ("Season 3" -> 3), or null. Only used when the file name itself has no season marker.
@@ -7440,6 +7440,19 @@ app.get("/api/tvshow/:id/seasons", requireAuth, async (req, res) => {
         };
       });
 
+    // Season 0 = specials/extras. Shown as one extra "season" LAST in the list, after the regular
+    // ones, with the show's own poster (no TMDB lookup — TMDB's season 0 is a different set).
+    if (seasonMap[0] && seasonMap[0].length) {
+      seasons.push({
+        season: 0,
+        name: "Specialavsnitt",
+        overview: "",
+        poster_url: show.poster_url,
+        episode_count: seasonMap[0].length,
+        air_date: null
+      });
+    }
+
     res.json({ seasons });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -7451,6 +7464,29 @@ app.get("/api/tvshow/:id/season/:season", requireAuth, async (req, res) => {
 
     const seasonNum = parseInt(req.params.season);
     const episodes = await dbFind(db.media, { parent_id: req.params.id, type: "episode", season: seasonNum });
+
+    // Season 0 = specials/extras. TMDB's season 0 is a completely different set of episodes, so
+    // NOTHING is fetched from TMDB here (no episodes, season info or cast): the stored title (the
+    // file name) is shown, without overview/still/air date, keeping a stored runtime if there is
+    // one. Sorted: numbered specials first, then the unnumbered ones by title. Titles that occur
+    // more than once get their parent folder in parentheses — only in this response, never saved.
+    if (seasonNum === 0) {
+      const sorted = sortSpecialEpisodes(episodes);
+      const titles = disambiguateTitles(sorted.map(e => ({ title: e.title, file_path: e.file_path })));
+      return res.json({
+        season: 0, name: "Specialavsnitt", poster_url: show.poster_url, overview: "",
+        episodes: sorted.map((ep, i) => ({
+          ...safe(ep),
+          title: titles[i] || "Special",
+          overview: "",
+          still_url: null,
+          runtime: ep.runtime || null,
+          air_date: null
+        })),
+        cast: []
+      });
+    }
+
     episodes.sort((a,b) => a.episode - b.episode);
 
     // Get episode thumbnails + names from TMDB. Always in English — same "titel alltid

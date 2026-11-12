@@ -179,7 +179,8 @@ async function resolveAndRenderPath(path) {
         window._currentSeasonCast = seasonData.cast || [];
         // A double episode (episode 12–13) is also found by its second number (/13).
         const wantedEp = parseInt(parts[5], 10);
-        const ep = episodes.find(e => String(e.episode) === parts[5]) ||
+        const ep = (seasonNum === 0 ? episodes.find(e => e.id === parts[5]) : null) ||   // specials: by id
+                   episodes.find(e => String(e.episode) === parts[5]) ||
                    episodes.find(e => e.episode_end && wantedEp > e.episode && wantedEp <= e.episode_end);
         if (ep) return openEpisodeDetail(ep.id, true);
         return switchSection("home", true);
@@ -2402,8 +2403,17 @@ async function loadLibraryView(libId, libName, libType) {
 function episodeRangeText(ep) {
   return ep && ep.episode_end && ep.episode_end > ep.episode ? `${ep.episode}–${ep.episode_end}` : String(ep && ep.episode != null ? ep.episode : "");
 }
-// "S02 E12" or, for a double episode, "S02 E12–13".
+// Season 0 holds specials/extras. Several of them can share episode 0, so they're shown as
+// "Special" (or "Special 1" if the file has a number) — never "S00 E00" / "Avsnitt 0".
+function isSpecialSeason(season) {
+  return season !== null && season !== undefined && season !== "" && Number(season) === 0;
+}
+function specialLabel(ep) {
+  return ep && ep.episode > 0 ? `Special ${ep.episode}` : "Special";
+}
+// "S02 E12" or, for a double episode, "S02 E12–13". Specials: "Special" / "Special 1".
 function episodeCodeLabel(season, ep) {
+  if (isSpecialSeason(season)) return specialLabel(ep);
   const pad = n => String(n || 0).padStart(2, "0");
   return `S${pad(season)} E${pad(ep && ep.episode)}` + (ep && ep.episode_end && ep.episode_end > ep.episode ? `–${pad(ep.episode_end)}` : "");
 }
@@ -2421,7 +2431,7 @@ function buildEpisodeCard(ep, showId, showTitle, seasonNum) {
     </div>
     <div class="mcard-info">
       <div class="mcard-title">${esc(ep.title||"Avsnitt "+episodeRangeText(ep))}</div>
-      <div class="mcard-meta">Avsnitt ${ep.episode ? episodeRangeText(ep) : ""}${ep.runtime ? " · "+ep.runtime+" min" : ""}</div>
+      <div class="mcard-meta">${isSpecialSeason(seasonNum) ? specialLabel(ep) : "Avsnitt " + (ep.episode ? episodeRangeText(ep) : "")}${ep.runtime ? " · "+ep.runtime+" min" : ""}</div>
     </div>
   </div>`;
 }
@@ -2468,10 +2478,11 @@ async function openEpisodeDetail(episodeId, fromRouter) {
         } catch {}
       }
     }
-    const seasonNum = ep?.season || window._currentSeasonNum;
+    const seasonNum = ep?.season ?? window._currentSeasonNum;
     if (!fromRouter) {
       const slugForUrl = showSlug || (window._currentSeasonShowSlug);
-      if (slugForUrl) { const w = seasonEpisodeWords(); navigateToPath(`/serier/${slugForUrl}/${w.season}/${seasonNum}/${w.episode}/${ep.episode||0}`, `${showTitle} - ${ep.title||"Avsnitt "+ep.episode}`); }
+      // Specials (season 0) share episode 0, so their address ends with the episode's id instead.
+      if (slugForUrl) { const w = seasonEpisodeWords(); navigateToPath(`/serier/${slugForUrl}/${w.season}/${seasonNum}/${w.episode}/${isSpecialSeason(seasonNum) ? ep.id : (ep.episode||0)}`, `${showTitle} - ${ep.title||"Avsnitt "+ep.episode}`); }
     }
     const progress = await API.get("/media/" + episodeId + "/progress").catch(() => ({}));
     const label = episodeCodeLabel(seasonNum, ep);
@@ -3301,7 +3312,7 @@ async function openSeason(showId, seasonNum, fromRouter) {
       API.get("/tvshow/" + showId + "/season/" + seasonNum)
     ]);
     if (!fromRouter && show.slug) {
-      navigateToPath(`/serier/${show.slug}/${seasonEpisodeWords().season}/${seasonNum}`, `${show.title} - Säsong ${seasonNum}`);
+      navigateToPath(`/serier/${show.slug}/${seasonEpisodeWords().season}/${seasonNum}`, `${show.title} - ${isSpecialSeason(seasonNum) ? "Specialavsnitt" : "Säsong " + seasonNum}`);
     }
     const episodes = seasonData.episodes || [];
     // Stored so openEpisodeDetail() can look up an episode's already-fetched data (title,
@@ -3768,7 +3779,7 @@ async function openDetail(id, fromRouter) {
       episodesHtml = `<div class="detail-section">
         <h3 class="detail-section-title">${t("detail.episodes_label")} (${item.episodes.length})</h3>
         <div class="episode-list">${item.episodes.map(ep => {
-          const label = ep.season && ep.episode ? episodeCodeLabel(ep.season, ep) : t("detail.episodes_label");
+          const label = isSpecialSeason(ep.season) ? specialLabel(ep) : (ep.season && ep.episode ? episodeCodeLabel(ep.season, ep) : t("detail.episodes_label"));
           return `<div class="ep-item" onclick='playItem("${ep.id}","${esc(item.title)} · ${label}")'>
             <span class="ep-num">${label}</span><span class="ep-name">${esc(ep.title||"")}</span><span>▶</span>
           </div>`;
@@ -4814,20 +4825,24 @@ async function playEpisode(id, showTitle, showId, season, episodeNum) {
     currentEpisodeData = {
       showId, showTitle, season,
       episodes: seasonData.episodes || [],
-      currentEpisode: episodeNum
+      currentEpisode: episodeNum,
+      currentId: id   // specials share episode 0, so "next" is tracked by id
     };
   } catch {
     currentEpisodeData = null;
   }
-  const epRecord = currentEpisodeData?.episodes?.find(e => e.episode === episodeNum);
+  const epRecord = currentEpisodeData?.episodes?.find(e => e.id === id) || currentEpisodeData?.episodes?.find(e => e.episode === episodeNum);
   const label = episodeCodeLabel(season, epRecord || { episode: episodeNum });
   playItem(id, showTitle + " · " + label);
 }
 
 function getNextEpisode() {
   if (!currentEpisodeData) return null;
-  const { episodes, currentEpisode } = currentEpisodeData;
-  const idx = episodes.findIndex(ep => ep.episode === currentEpisode);
+  const { episodes, currentEpisode, currentId } = currentEpisodeData;
+  // By id first (specials share episode 0); the episode number as a fallback. The list is only
+  // the CURRENT season's, so "next" never jumps between a regular season and the specials.
+  let idx = currentId ? episodes.findIndex(ep => ep.id === currentId) : -1;
+  if (idx < 0) idx = episodes.findIndex(ep => ep.episode === currentEpisode);
   return idx >= 0 && idx < episodes.length - 1 ? episodes[idx + 1] : null;
 }
 
