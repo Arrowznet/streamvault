@@ -653,7 +653,14 @@ const app = express();
 // real IP instead of treating every request as coming from Caddy itself. Scoped to
 // "loopback" rather than trusting it universally, since blindly trusting the header would
 // let anyone spoof their IP if the server were ever reachable by another path.
-app.set("trust proxy", "loopback");
+// Optional config.trusted_proxies lets other proxies be trusted too (e.g. Caddy on another
+// computer): a list of IPs, CIDR networks, or "loopback"/"linklocal"/"uniquelocal". Anything that
+// trusts everyone is rejected. Without the setting this is exactly "loopback", as before.
+const { buildTrustProxy, expressTrustValue } = require("./trustProxy");
+const _trustProxy = buildTrustProxy(config.trusted_proxies);
+for (const w of _trustProxy.warnings) console.warn(`[PROXY] ${w}`);
+console.log(`[PROXY] Betrodda proxyservrar: ${_trustProxy.trust.join(", ")}`);
+app.set("trust proxy", expressTrustValue(_trustProxy.trust));
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: "10mb" }));
 app.use((req, res, next) => { res.setHeader("X-Content-Type-Options","nosniff"); res.setHeader("X-Frame-Options","SAMEORIGIN"); next(); });
