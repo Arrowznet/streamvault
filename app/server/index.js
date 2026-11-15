@@ -1456,6 +1456,18 @@ app.get("/api/admin/system-stats", requireAdmin, (req, res) => {
   res.json({ samples: _systemStatsBuffer, intervalMs: SYSTEM_STATS_INTERVAL_MS });
 });
 
+// Read-only summary for Home Assistant (who is watching what + bandwidth). Off unless
+// config.ha_stats_key is set (>= 32 chars); answers only local-network callers with
+// "Authorization: Bearer <key>". Everything else gets a plain 404/401. See haStats.js.
+const { haStatsKey, bearerFromHeader, keyMatches, buildHaStats } = require("./haStats");
+app.get("/api/ha/stats", (req, res) => {
+  const key = haStatsKey(config.ha_stats_key);
+  if (!key || !isLocalRequestIp(req.ip)) return res.status(404).json({ error: "Hittades inte" });
+  if (!keyMatches(key, bearerFromHeader(req.headers.authorization))) return res.status(401).json({ error: "Ej autentiserad" });
+  res.set("Cache-Control", "no-store");
+  res.json(buildHaStats([..._activeSessions.values()], new Set(activeDashTranscodes.keys()), _systemStatsBuffer[_systemStatsBuffer.length - 1], Date.now()));
+});
+
 // ── IPTV ──────────────────────────────────────────────────────────────────────
 // Parses a standard M3U/M3U8 playlist (the common format IPTV providers use) into
 // individual channels. Format is simple: a "#EXTINF:" metadata line immediately followed by
@@ -6678,7 +6690,7 @@ app.get("/api/public-config", requireAuth, (req, res) => {
 });
 
 app.get("/api/config", requireAdmin, (req, res) => {
-  const s={...config}; delete s.jwt_secret; res.json(s);
+  const s={...config}; delete s.jwt_secret; delete s.ha_stats_key; res.json(s);
 });
 
 app.patch("/api/config", requireAdmin, (req, res) => {
