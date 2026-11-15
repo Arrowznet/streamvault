@@ -1507,6 +1507,7 @@ function detectContentType(url, groupTitle) {
 }
 
 const { sortChannels, groupsByFirstOrder, reuseChannelIds, filterVisibleGroups, dividerNames, markDividers } = require("./iptvOrder");
+const { nvencEncoderArgs } = require("./nvencArgs");
 
 function parseM3U(text) {
   const lines = text.split(/\r?\n/);
@@ -3575,27 +3576,25 @@ const NVENC_QUALITY_PROFILES = {
 // finished — or if it failed — transcodes use "fast".
 let _nvencQualityTest = { state: "pending", reason: null }; // state: pending | ok | failed
 
+// "-forced-idr 1" (see nvencArgs.js): makes the keyframes forced by -force_key_frames real IDR frames,
+// so DASH segments come out an even 4 s instead of ~10.4 s. Tested at startup in the background
+// (runNvencForcedIdrTest); until it has passed — or if ffmpeg rejects it — it is left out.
+let _nvencForcedIdrTest = { state: "pending", reason: null }; // state: pending | ok | failed
+
 // Returns { extraArgs, skipBitrate } for one transcode start. For anything other than
-// Linux + h264_nvenc this returns the original args and logs nothing.
-function resolveNvencQuality(label) {
-  const original = { extraArgs: cachedEncoder.extraArgs, skipBitrate: false };
-  if (process.platform !== "linux" || cachedEncoder.encoder !== "h264_nvenc") return original;
+// Linux + h264_nvenc this returns the original args and logs nothing. forcesKeyframes: true when
+// the command uses -force_key_frames (DASH re-encoding) — only then is -forced-idr 1 added.
+function resolveNvencQuality(label, { forcesKeyframes = false } = {}) {
   const wantedRaw = config.transcode_quality;
   const wanted = (wantedRaw === "fast" || wantedRaw === "high" || wantedRaw === "balanced") ? wantedRaw : "balanced";
-  if (wanted === "fast") {
-    console.log(`[${label}] NVENC-kvalitetsprofil: fast`);
-    return original;
-  }
-  if (_nvencQualityTest.state === "pending") {
-    console.log(`[${label}] NVENC-kvalitetsprofil: ${wanted} är inte testad än (starttestet pågår) – använder fast den här gången`);
-    return original;
-  }
-  if (_nvencQualityTest.state === "failed") {
-    console.log(`[${label}] NVENC-kvalitetsprofil: ${wanted} fungerar inte här (${_nvencQualityTest.reason}) – använder fast`);
-    return original;
-  }
-  console.log(`[${label}] NVENC-kvalitetsprofil: ${wanted}`);
-  return { extraArgs: NVENC_QUALITY_PROFILES[wanted], skipBitrate: true };
+  const r = nvencEncoderArgs({
+    platform: process.platform, encoder: cachedEncoder.encoder, wanted,
+    baseArgs: cachedEncoder.extraArgs, profiles: NVENC_QUALITY_PROFILES,
+    qualityTest: _nvencQualityTest, forcedIdrTest: _nvencForcedIdrTest, forcesKeyFrames: forcesKeyframes
+  });
+  if (!r.applies) return { extraArgs: cachedEncoder.extraArgs, skipBitrate: false };
+  console.log(`[${label}] NVENC-kvalitetsprofil: ${r.profileText}${forcesKeyframes ? `, forced-idr: ${r.forcedIdr}` : ""}`);
+  return { extraArgs: r.extraArgs, skipBitrate: r.skipBitrate };
 }
 
 // ── DIRECT STREAM (for native formats) ─────────────────────────────────────────
@@ -4266,7 +4265,7 @@ async function startDashTranscode(item, seekSec = 0, audioTrackIndex = null, all
   // For DASH, AMF works without extra args - just encoder + bitrate, no -quality flag
   // -quality before -b:v sets VBR mode which conflicts with DASH muxer
   // NVENC quality profile (Linux + h264_nvenc only); not resolved/logged when video is just copied.
-  const nvencQuality = canCopyVideo ? null : resolveNvencQuality("DASH");
+  const nvencQuality = canCopyVideo ? null : resolveNvencQuality("DASH", { forcesKeyframes: true }); // DASH re-encoding uses -force_key_frames
   const dashEncoderArgs = encoder === "h264_amf" ? [] : [...(nvencQuality ? nvencQuality.extraArgs : extraArgs)];
 
   const videoArgs = canCopyVideo
@@ -8678,6 +8677,40 @@ function runNvencQualityTest() {
   }
 }
 runNvencQualityTest();
+
+// Tests "-forced-idr 1" (together with -force_key_frames, as DASH uses them) in the BACKGROUND, the
+// same way: asynchronous, 8 seconds at most, so it can never hold up the server starting. If ffmpeg
+// rejects it (an older version) the flag is simply left out and a line is logged — transcoding still
+// works. A separate test from the quality profiles, so the two failures can't be mixed up.
+// Linux + h264_nvenc only; on anything else nothing runs and nothing is logged.
+function runNvencForcedIdrTest() {
+  if (process.platform !== "linux" || cachedEncoder.encoder !== "h264_nvenc") {
+    _nvencForcedIdrTest = { state: "failed", reason: "bara Linux med h264_nvenc" };
+    return;
+  }
+  try {
+    require("child_process").execFile(getFfmpegPath(), [
+      "-hide_banner", "-loglevel", "error",
+      "-f", "lavfi", "-i", "color=black:size=320x240:rate=25:duration=1",
+      "-c:v", "h264_nvenc", "-preset", "p4", "-forced-idr", "1",
+      "-force_key_frames", "expr:gte(t,n_forced*2)",
+      "-frames:v", "1", "-f", "null", "-"
+    ], { timeout: 8000 }, (err, stdout, stderr) => {
+      if (!err) {
+        _nvencForcedIdrTest = { state: "ok", reason: null };
+        console.log("[NVENC] -forced-idr 1 är godkänd av ffmpeg (jämna 4-sekundersbitar i DASH)");
+        return;
+      }
+      const reason = err.killed ? "testet tog för lång tid (8 s)" : ((stderr || err.message || "").toString().trim().split("\n").slice(-1)[0] || "okänt fel");
+      _nvencForcedIdrTest = { state: "failed", reason };
+      console.log(`[NVENC] -forced-idr stöds inte här: ${reason} – utelämnas (DASH-bitarna kan bli längre än 4 s)`);
+    });
+  } catch(e) {
+    _nvencForcedIdrTest = { state: "failed", reason: (e.message || "").split("\n")[0] };
+    console.log(`[NVENC] -forced-idr kunde inte testas: ${_nvencForcedIdrTest.reason} – utelämnas`);
+  }
+}
+runNvencForcedIdrTest();
 
 const PUBLIC=path.join(__dirname,"..","public");
 if (fs.existsSync(PUBLIC)) {
