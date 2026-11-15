@@ -1508,6 +1508,7 @@ function detectContentType(url, groupTitle) {
 
 const { sortChannels, groupsByFirstOrder, reuseChannelIds, filterVisibleGroups, dividerNames, markDividers } = require("./iptvOrder");
 const { nvencEncoderArgs } = require("./nvencArgs");
+const { readrateArgs, dashIdleMinutes, dashKillDecision } = require("./readrateArgs");
 
 function parseM3U(text) {
   const lines = text.split(/\r?\n/);
@@ -3579,7 +3580,9 @@ let _nvencQualityTest = { state: "pending", reason: null }; // state: pending | 
 // "-forced-idr 1" (see nvencArgs.js): makes the keyframes forced by -force_key_frames real IDR frames,
 // so DASH segments come out an even 4 s instead of ~10.4 s. Tested at startup in the background
 // (runNvencForcedIdrTest); until it has passed — or if ffmpeg rejects it — it is left out.
-let _nvencForcedIdrTest = { state: "pending", reason: null }; // state: pending | ok | failed
+let _nvencForcedIdrTest = { state: "pending", reason: null };
+// Result of the startup test of "-readrate" / "-readrate_initial_burst" (DASH, Linux). See readrateArgs.js.
+let _dashReadrateTest = { state: "pending" }; // state: pending | ok | failed
 
 // Returns { extraArgs, skipBitrate } for one transcode start. For anything other than
 // Linux + h264_nvenc this returns the original args and logs nothing. forcesKeyframes: true when
@@ -4116,8 +4119,28 @@ setInterval(() => {
   // crashes, force-quits all skip that call). The server checks for itself instead.
   for (const [itemId, t] of activeDashTranscodes) {
     const hasActiveViewer = [..._activeSessions.values()].some(s => s.mediaId === itemId);
-    if (!hasActiveViewer && (now - t.startTime) > TRANSCODE_ORPHAN_GRACE_MS) {
+    // Windows: the old rule (no /progress heartbeat in the last 20 s). Linux: only the idle time
+    // limit config.dash_idle_minutes, counted from the latest manifest/init/segment/progress request
+    // (that's where -readrate makes a transcode live as long as the film, and a paused film must
+    // survive). See dashKillDecision in readrateArgs.js.
+    const decision = dashKillDecision({
+      platform: process.platform, now, startTime: t.startTime, lastActivity: t.lastActivity,
+      hasActiveViewer, idleMinutes: dashIdleMinutes(config.dash_idle_minutes), graceMs: TRANSCODE_ORPHAN_GRACE_MS
+    });
+    if (decision === "inga tittare") {
       console.log(`[DASH] No active viewer for "${t.title}" — killing orphaned transcode (ran for ${Math.round((now - t.startTime)/1000)}s)`);
+      t.proc._dashKillReason = "inga tittare";
+      try { t.proc.kill("SIGKILL"); } catch {}
+      activeDashTranscodes.delete(itemId);
+      const dashDir = path.join(DASH_CACHE, itemId);
+      setTimeout(() => {
+        fs.rm(dashDir, { recursive: true, force: true }, (e) => {
+          if (e) console.log(`[DASH] Kunde inte städa bort ${dashDir}:`, e.message);
+        });
+      }, 1000);
+    } else if (decision === "övergiven") {
+      console.log(`[DASH] Avslutar övergiven session: ${t.title} (inga anrop på ${Math.round((now - t.lastActivity) / 60000)} min)`);
+      t.proc._dashKillReason = "övergiven";
       try { t.proc.kill("SIGKILL"); } catch {}
       activeDashTranscodes.delete(itemId);
       const dashDir = path.join(DASH_CACHE, itemId);
@@ -4196,6 +4219,7 @@ async function startDashTranscode(item, seekSec = 0, audioTrackIndex = null, all
 
   // Kill existing if running
   if (activeDashTranscodes.has(itemId)) {
+    activeDashTranscodes.get(itemId).proc._dashKillReason = "seek/omstart";
     try { activeDashTranscodes.get(itemId).proc.kill("SIGKILL"); } catch {}
     activeDashTranscodes.delete(itemId);
     await new Promise(r => setTimeout(r, 3000)); // Wait for Windows file locks to release
@@ -4306,6 +4330,14 @@ async function startDashTranscode(item, seekSec = 0, audioTrackIndex = null, all
     ? ["-map", "0:v:0", "-map", `0:a:${audioTrackIndex}`]
     : ["-map", "0:v:0", "-map", `0:a:${bestAudioIndex}`];
 
+  // Linux only: make ffmpeg read at playback speed so it doesn't finish long before the film ends
+  // (see readrateArgs.js). On Windows rr.args is empty and the command is exactly as before.
+  const dashDuration = await getDuration(item);
+  const rr = readrateArgs({ platform: process.platform, configValue: config.dash_readrate, test: _dashReadrateTest, durationSec: dashDuration });
+  if (rr.invalid) console.log(`[DASH] dash_readrate har ogiltigt värde (${JSON.stringify(config.dash_readrate)}) – använder 1`);
+  if (rr.warn) console.log(`[DASH] VARNING: ${rr.warn}`);
+  if (process.platform === "linux") console.log(`[DASH] ${rr.text}`);
+
   const args = [
     "-hide_banner", "-loglevel", "warning",
     ...hwaccelArgs,
@@ -4313,6 +4345,7 @@ async function startDashTranscode(item, seekSec = 0, audioTrackIndex = null, all
     "-err_detect", "ignore_err",
     "-analyzeduration", "100M",
     "-probesize", "100M",
+    ...rr.args,
     ...(seekSec > 0 ? ["-ss", seekSec.toString()] : []),
     "-i", item.file_path,
     "-avoid_negative_ts", "make_zero",
@@ -4343,8 +4376,9 @@ async function startDashTranscode(item, seekSec = 0, audioTrackIndex = null, all
   console.log(`[DASH] ${new Date().toISOString().substring(11,23)} Starting transcode: ${item.title}`);
   console.log(`[DASH] Full args: ${args.join(' ')}`);
   const proc = spawn(ffmpeg, args, { windowsHide: false, cwd: dashDir });
+  const procStartedAt = Date.now();
   activeDashTranscodes.set(itemId, {
-    proc, startTime: Date.now(), startSec: seekSec, duration: await getDuration(item),
+    proc, startTime: procStartedAt, lastActivity: procStartedAt, startSec: seekSec, duration: dashDuration,
     title: item.title, videoMode: canCopyVideo ? (canCopyHevc ? "copy-hevc" : "copy-h264") : `encode-${encoder}`,
     sourceAudioCodec, sourceAudioChannels, sourceAudioLanguage
   });
@@ -4369,7 +4403,10 @@ async function startDashTranscode(item, seekSec = 0, audioTrackIndex = null, all
   });
 
   proc.on("exit", (code, signal) => {
-    console.log(`[DASH] Done: ${item.title} (code=${code} signal=${signal})`);
+    const killReason = proc._dashKillReason;
+    const endedHow = killReason ? `avslutad av oss (SIGKILL: ${killReason})`
+      : (code === 0 ? "avslutade själv (code=0)" : `avslutade själv med fel (code=${code})`);
+    console.log(`[DASH] Done: ${item.title} (code=${code} signal=${signal}) – ffmpeg höll på ${((Date.now() - procStartedAt) / 1000).toFixed(1)} s, ${endedHow}`);
     if (stderrBuf) console.log(`[DASH] Stderr: ${stderrBuf.substring(0, 500)}`);
     // Only remove from map if THIS process is still the active one
     // (a newer process may have already replaced it)
@@ -4407,12 +4444,13 @@ app.post("/api/dash/:id/start", requireAuth, async (req, res) => {
     if (Math.abs((existing.startSec || 0) - startSec) > 5) {
       const oldProc = existing.proc;
       activeDashTranscodes.delete(item._id);
+      oldProc._dashKillReason = "ny startposition";
       try { oldProc.kill("SIGKILL"); } catch {}
       // Wait for old process to fully release file locks on Windows
       await new Promise(r => setTimeout(r, 3000));
       startDashTranscode(item, startSec, audioTrack, allowedVideoCodecs);
     }
-    // else reuse existing
+    else existing.lastActivity = Date.now(); // reuse existing
   } else {
     startDashTranscode(item, startSec, audioTrack, allowedVideoCodecs);
   }
@@ -4509,6 +4547,7 @@ app.post("/api/media/:id/stop", requireAuth, async (req, res) => {
 app.post("/api/dash/:id/stop", requireAuth, (req, res) => {
   const t = activeDashTranscodes.get(req.params.id);
   if (t) {
+    t.proc._dashKillReason = "stop";
     try { t.proc.kill("SIGKILL"); } catch {}
     activeDashTranscodes.delete(req.params.id);
   }
@@ -4532,6 +4571,10 @@ app.get("/api/dash/:id/:file", async (req, res) => {
   const fileName = req.params.file;
 
   if (!filePath.startsWith(dashDir)) return res.status(403).end();
+
+  // "Latest request" for the idle timeout: every manifest, init, segment and /progress request.
+  const _tcActive = activeDashTranscodes.get(req.params.id);
+  if (_tcActive) _tcActive.lastActivity = Date.now();
 
   const ext = path.extname(fileName);
   const mimeTypes = {
@@ -8711,6 +8754,44 @@ function runNvencForcedIdrTest() {
   }
 }
 runNvencForcedIdrTest();
+
+// Tests "-readrate" and "-readrate_initial_burst" in the BACKGROUND (asynchronous, 8 seconds per
+// run at most) on a tiny colour-picture run. First both flags together; if that fails, -readrate
+// alone, to tell "burst rejected" from "readrate rejected". Until it is done DASH uses -readrate
+// without the burst. Linux only; nothing runs (and nothing is logged) on other platforms.
+function runDashReadrateTest() {
+  if (process.platform !== "linux") return;
+  const { execFile } = require("child_process");
+  const run = (flags, cb) => {
+    try {
+      execFile(getFfmpegPath(), [
+        "-hide_banner", "-loglevel", "error", ...flags,
+        "-f", "lavfi", "-i", "color=black:size=320x240:rate=25:duration=1",
+        "-frames:v", "1", "-f", "null", "-"
+      ], { timeout: 8000 }, (err, stdout, stderr) => {
+        if (!err) return cb(null);
+        cb(err.killed ? "testet tog för lång tid (8 s)" : ((stderr || err.message || "").toString().trim().split("\n").slice(-1)[0] || "okänt fel"));
+      });
+    } catch (e) { cb((e.message || "").split("\n")[0] || "okänt fel"); }
+  };
+  run(["-readrate", "1", "-readrate_initial_burst", "20"], (bothErr) => {
+    if (!bothErr) {
+      _dashReadrateTest = { state: "done", readrateOk: true, burstOk: true };
+      console.log("[DASH] -readrate och -readrate_initial_burst är godkända av ffmpeg");
+      return;
+    }
+    run(["-readrate", "1"], (rateErr) => {
+      if (!rateErr) {
+        _dashReadrateTest = { state: "done", readrateOk: true, burstOk: false, burstReason: bothErr };
+        console.log(`[DASH] -readrate_initial_burst avvisas av ffmpeg: ${bothErr} – utelämnas (bara -readrate används)`);
+      } else {
+        _dashReadrateTest = { state: "done", readrateOk: false, burstOk: false, readrateReason: rateErr };
+        console.log(`[DASH] -readrate avvisas av ffmpeg: ${rateErr} – utelämnas (DASH kodas utan takt och kan bli klar långt före filmens slut)`);
+      }
+    });
+  });
+}
+runDashReadrateTest();
 
 const PUBLIC=path.join(__dirname,"..","public");
 if (fs.existsSync(PUBLIC)) {
