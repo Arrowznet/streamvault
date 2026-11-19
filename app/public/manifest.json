@@ -4,8 +4,8 @@
   "description": "Din personliga mediaserver",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#08080f",
-  "theme_color": "#08080f",
+  "background_color": "#0a0908",
+  "theme_color": "#0a0908",
   "orientation": "any",
   "icons": [
     { "src": "/img/icon-192.png", "sizes": "192x192", "type": "image/png" },

@@ -21,7 +21,7 @@ window.addEventListener("DOMContentLoaded", async () => {
     const user = JSON.parse(localStorage.getItem("sv_user") || "null");
     if (user) {
       currentUser = user;
-      applyTheme(user.theme || "standard");
+      applyTheme(user.theme || DEFAULT_THEME);
       try {
         const c = await API.get("/public-config");
         window._serverName = c.server_name || "StreamVault";
@@ -49,7 +49,7 @@ window.addEventListener("DOMContentLoaded", async () => {
     if (data?.accessToken) {
       API.setTokens(data.accessToken, data.refreshToken);
       const user = JSON.parse(localStorage.getItem("sv_user") || "null");
-      if (user) { currentUser = user; applyTheme(user.theme || "standard"); showApp(); return; }
+      if (user) { currentUser = user; applyTheme(user.theme || DEFAULT_THEME); showApp(); return; }
     }
   } catch {}
 });
@@ -79,7 +79,7 @@ async function login() {
       if (fresh && fresh._id) {
         currentUser = Object.assign({}, currentUser, fresh, { id: fresh._id });
         localStorage.setItem("sv_user", JSON.stringify(currentUser));
-        applyTheme(currentUser.theme || "standard");
+        applyTheme(currentUser.theme || DEFAULT_THEME);
         console.log("[LOGIN] Full profile refreshed — language:", currentUser.language, "subtitleLanguages:", currentUser.subtitleLanguages);
       } else {
         console.log("[LOGIN] /me returned no usable data:", fresh);
@@ -405,7 +405,8 @@ const I18N = {
     "profile.new_password": "Nytt lösenord",
     "profile.confirm_password": "Bekräfta lösenord",
     "profile.save_password": "Spara lösenord",
-    "theme.standard": "Standard (mörk)",
+    "theme.guld": "Guld (svart, guld)",
+    "theme.standard": "Standard (mörk, orange)",
     "theme.plexlik": "Plex-liknande (mörk, guld)",
     "theme.midnatt": "Midnattsblå (mörk)",
     "theme.skog": "Skog (mörk, grön)",
@@ -597,7 +598,8 @@ const I18N = {
     "profile.new_password": "New password",
     "profile.confirm_password": "Confirm password",
     "profile.save_password": "Save Password",
-    "theme.standard": "Standard (Dark)",
+    "theme.guld": "Gold (Black, Gold)",
+    "theme.standard": "Standard (Dark, Orange)",
     "theme.plexlik": "Plex-like (Dark, Gold)",
     "theme.midnatt": "Midnight Blue (Dark)",
     "theme.skog": "Forest (Dark, Green)",
@@ -791,7 +793,8 @@ const I18N = {
     "profile.new_password": "Uusi salasana",
     "profile.confirm_password": "Vahvista salasana",
     "profile.save_password": "Tallenna salasana",
-    "theme.standard": "Perus (tumma)",
+    "theme.guld": "Kulta (musta, kulta)",
+    "theme.standard": "Perus (tumma, oranssi)",
     "theme.plexlik": "Plex-tyylinen (tumma, kulta)",
     "theme.midnatt": "Yönsininen (tumma)",
     "theme.skog": "Metsä (tumma, vihreä)",
@@ -1312,7 +1315,7 @@ function iptvSortSwitchHtml(type) {
   const eff = iptvEffectiveSort(type);
   const btn = (mode, label) => {
     const on = eff === mode;
-    return `<button onclick="setIptvSort('${type || "live"}','${mode}')" aria-pressed="${on}" style="padding:7px 14px;font-size:13px;font-family:inherit;cursor:pointer;border-radius:8px;border:1px solid ${on ? "var(--accent)" : "var(--border, #333)"};background:${on ? "var(--accent)" : "var(--card2, #1a1a28)"};color:${on ? "#fff" : "var(--muted, #999)"};font-weight:${on ? "700" : "400"}">${esc(label)}</button>`;
+    return `<button onclick="setIptvSort('${type || "live"}','${mode}')" aria-pressed="${on}" style="padding:7px 14px;font-size:13px;font-family:inherit;cursor:pointer;border-radius:8px;border:1px solid ${on ? "var(--accent)" : "var(--border, #333)"};background:${on ? "var(--accent)" : "var(--card2, #1a1a28)"};color:${on ? "var(--on-accent,#fff)" : "var(--muted, #999)"};font-weight:${on ? "700" : "400"}">${esc(label)}</button>`;
   };
   return `<div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap">${btn("list", t("iptv.sort_provider"))}${btn("name", t("iptv.sort_name"))}</div>`;
 }
@@ -1606,7 +1609,7 @@ function renderScheduleList(programmes) {
     const isNow = p.start <= now && (!p.stop || p.stop > now);
     const time = new Date(p.start).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
     return `
-      <div style="display:flex;gap:12px;padding:8px 6px;border-radius:6px;${isNow ? "background:var(--accent);color:#fff" : ""}">
+      <div style="display:flex;gap:12px;padding:8px 6px;border-radius:6px;${isNow ? "background:var(--accent);color:var(--on-accent,#fff)" : ""}">
         <span style="font-size:13px;font-weight:600;min-width:44px">${time}</span>
         <span style="font-size:13px;flex:1">${esc(p.title)}</span>
         ${isNow ? `<span style="font-size:11px;text-transform:uppercase;font-weight:700">${t("iptv.now")}</span>` : ""}
@@ -1750,13 +1753,13 @@ function renderExploreShell(sec) {
     <div class="grid-wrap">
       <h2 style="margin-bottom:14px">${t("explore.title")}</h2>
       <div style="display:flex;gap:6px;margin-bottom:12px">
-        <button class="btn-fav" id="explore-type-movie" onclick="setExploreMediaType('movie')" style="${_exploreState.mediaType==='movie'?"background:var(--accent);color:#fff":""}">${t("explore.movies_tab")}</button>
-        <button class="btn-fav" id="explore-type-tv" onclick="setExploreMediaType('tv')" style="${_exploreState.mediaType==='tv'?"background:var(--accent);color:#fff":""}">${t("explore.tv_tab")}</button>
+        <button class="btn-fav" id="explore-type-movie" onclick="setExploreMediaType('movie')" style="${_exploreState.mediaType==='movie'?"background:var(--accent);color:var(--on-accent,#fff)":""}">${t("explore.movies_tab")}</button>
+        <button class="btn-fav" id="explore-type-tv" onclick="setExploreMediaType('tv')" style="${_exploreState.mediaType==='tv'?"background:var(--accent);color:var(--on-accent,#fff)":""}">${t("explore.tv_tab")}</button>
       </div>
       <div class="filter-bar" style="flex-wrap:wrap;gap:8px">
         <div style="display:flex;gap:6px;flex-wrap:wrap" id="explore-category-tabs">
           ${categories.map(([key,labelKey]) => `
-            <button class="btn-fav explore-cat-btn" data-cat="${key}" onclick="setExploreCategory('${key}')" style="${_exploreState.category===key?"background:var(--accent);color:#fff":""}">${t(labelKey)}</button>
+            <button class="btn-fav explore-cat-btn" data-cat="${key}" onclick="setExploreCategory('${key}')" style="${_exploreState.category===key?"background:var(--accent);color:var(--on-accent,#fff)":""}">${t(labelKey)}</button>
           `).join("")}
         </div>
         <select class="filter-select" id="explore-genre" onchange="setExploreGenre(this.value)">
@@ -2135,7 +2138,7 @@ async function createCollection() {
       </div>
       <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px">
         <button onclick="this.closest('[style*=fixed]').remove()" style="background:var(--card2);border:1px solid var(--border);color:var(--text);padding:10px 20px;border-radius:8px;cursor:pointer;font-size:14px">Avbryt</button>
-        <button onclick="saveNewCollection()" style="background:var(--accent);border:none;color:white;padding:10px 20px;border-radius:8px;cursor:pointer;font-size:14px;font-weight:600">➕ Skapa</button>
+        <button onclick="saveNewCollection()" style="background:var(--accent);border:none;color:var(--on-accent,#fff);padding:10px 20px;border-radius:8px;cursor:pointer;font-size:14px;font-weight:600">➕ Skapa</button>
       </div>
     </div>`;
   document.body.appendChild(modal);
@@ -2172,7 +2175,7 @@ async function openNewCollectionEditor(name) {
       </div>
       <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px">
         <button onclick="this.closest('[style*=fixed]').remove()" style="background:var(--card2);border:1px solid var(--border);color:var(--text);padding:10px 20px;border-radius:8px;cursor:pointer;font-size:14px">Avbryt</button>
-        <button onclick="saveNewCollectionWithMovies()" style="background:var(--accent);border:none;color:white;padding:10px 20px;border-radius:8px;cursor:pointer;font-size:14px;font-weight:600">💾 Spara samling</button>
+        <button onclick="saveNewCollectionWithMovies()" style="background:var(--accent);border:none;color:var(--on-accent,#fff);padding:10px 20px;border-radius:8px;cursor:pointer;font-size:14px;font-weight:600">💾 Spara samling</button>
       </div>
     </div>`;
   document.body.appendChild(modal);
@@ -2254,7 +2257,7 @@ async function editCollection(collectionId) {
 
       <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px">
         <button onclick="this.closest('[style*=fixed]').remove()" style="background:var(--card2);border:1px solid var(--border);color:var(--text);padding:10px 20px;border-radius:8px;cursor:pointer;font-size:14px">Avbryt</button>
-        <button onclick="saveCollectionEdit('${collectionId}')" style="background:var(--accent);border:none;color:white;padding:10px 20px;border-radius:8px;cursor:pointer;font-size:14px;font-weight:600">💾 Spara</button>
+        <button onclick="saveCollectionEdit('${collectionId}')" style="background:var(--accent);border:none;color:var(--on-accent,#fff);padding:10px 20px;border-radius:8px;cursor:pointer;font-size:14px;font-weight:600">💾 Spara</button>
       </div>
     </div>`;
   document.body.appendChild(modal);
@@ -3694,7 +3697,7 @@ function openWatchProvidersModal(itemId) {
         ${section(t("detail.buy"), data.buy || [])}
       </div>
       <div style="padding:12px 20px;border-top:1px solid var(--border);display:flex;justify-content:flex-end">
-        <button onclick="document.getElementById('wtw-modal-overlay').remove()" style="background:var(--accent,#e05724);color:#fff;border:none;padding:8px 20px;border-radius:8px;font-size:14px;cursor:pointer">${t("detail.done")}</button>
+        <button onclick="document.getElementById('wtw-modal-overlay').remove()" style="background:var(--accent,#e05724);color:var(--on-accent,#fff);border:none;padding:8px 20px;border-radius:8px;font-size:14px;cursor:pointer">${t("detail.done")}</button>
       </div>
     </div>`;
   document.body.appendChild(overlay);
@@ -4974,7 +4977,7 @@ function showNextEpisodeBanner(nextEp) {
         <div style="font-size:14px;font-weight:600">${esc(nextEp.title||"Avsnitt "+nextEp.episode)}</div>
       </div>
       <button onclick="playEpisode('${nextEp.id}','${esc(currentEpisodeData.showTitle||"")}','${currentEpisodeData.showId}',${currentEpisodeData.season},${nextEp.episode})" 
-        style="background:var(--accent);border:none;color:white;font-family:'DM Sans',sans-serif;font-size:13px;font-weight:600;padding:8px 16px;border-radius:8px;cursor:pointer;white-space:nowrap">
+        style="background:var(--accent);border:none;color:var(--on-accent,#fff);font-family:'DM Sans',sans-serif;font-size:13px;font-weight:600;padding:8px 16px;border-radius:8px;cursor:pointer;white-space:nowrap">
         ▶ Spela nu
       </button>
       <button onclick="document.getElementById('next-ep-banner').remove();clearTimeout(_nextEpTimer)"
@@ -5463,7 +5466,7 @@ async function openSubtitles(mediaId, title) {
   
   var searchBtn2 = document.createElement("button");
   searchBtn2.textContent = "Sök";
-  searchBtn2.style.cssText = "background:var(--accent);border:none;color:white;font-size:13px;padding:8px 14px;border-radius:8px;cursor:pointer;margin-top:8px;width:100%";
+  searchBtn2.style.cssText = "background:var(--accent);border:none;color:var(--on-accent,#fff);font-size:13px;padding:8px 14px;border-radius:8px;cursor:pointer;margin-top:8px;width:100%";
   searchBtn2.onclick = function() { searchSubtitles(mediaId); };
   footer.appendChild(searchBtn2);
   modal.appendChild(footer);
@@ -5510,7 +5513,7 @@ async function openSubtitles(mediaId, title) {
           btn.textContent = isActiveSub ? "✅ Aktiv" : "Aktivera";
           btn.style.cssText = isActiveSub
             ? "background:#1a7a3c;border:none;color:#4eff8a;font-size:12px;padding:6px 12px;border-radius:6px;cursor:default;font-weight:700"
-            : "background:var(--accent);border:none;color:white;font-size:12px;padding:6px 12px;border-radius:6px;cursor:pointer";
+            : "background:var(--accent);border:none;color:var(--on-accent,#fff);font-size:12px;padding:6px 12px;border-radius:6px;cursor:pointer";
           var subUrl = s.url, subLabel = s.label;
           btn.onclick = function() { 
             if (s.type === "embedded") {
@@ -5841,7 +5844,7 @@ async function searchSubtitles(mediaId) {
       row.innerHTML = "<div style='flex:1'><div style='font-size:13px;font-weight:500'>" + esc(s.release || "Okänd release") + "</div><div style='font-size:11px;color:var(--muted)'>" + (s.downloads || 0) + " nedladdningar</div></div>";
       var btn = document.createElement("button");
       btn.textContent = "⬇ Ladda ner";
-      btn.style.cssText = "background:var(--accent);border:none;color:white;font-size:12px;padding:6px 12px;border-radius:6px;cursor:pointer";
+      btn.style.cssText = "background:var(--accent);border:none;color:var(--on-accent,#fff);font-size:12px;padding:6px 12px;border-radius:6px;cursor:pointer";
       var fileId = s.file_id;
       btn.onclick = function() { downloadSubtitle(fileId, mediaId); };
       row.appendChild(btn);
@@ -6681,7 +6684,7 @@ async function handleSearch(q) {
             return `<div class="mcard" onclick='${clickFn}'>
               ${r.poster ? `<img class="mcard-poster" src="${r.poster}" loading="lazy">` : `<div class="mcard-poster-ph"><span>${r.type==="tv"?"📺":"🎬"}</span></div>`}
               <div class="mcard-overlay"><span class="mcard-play">▶</span></div>
-              ${inLib ? `<div style="position:absolute;top:6px;right:6px;background:var(--accent);color:white;font-size:10px;font-weight:700;padding:3px 7px;border-radius:10px">✓ Bibliotek</div>` : ""}
+              ${inLib ? `<div style="position:absolute;top:6px;right:6px;background:var(--accent);color:var(--on-accent,#fff);font-size:10px;font-weight:700;padding:3px 7px;border-radius:10px">✓ Bibliotek</div>` : ""}
               <div class="mcard-info"><div class="mcard-title">${esc(r.title)}</div><div class="mcard-meta">${r.year || ""}</div></div>
             </div>`;
           }).join("")}</div>`;
@@ -6703,35 +6706,45 @@ var SUBTITLE_LANG_ADJ = { swe:"svensk", eng:"engelsk", nor:"norsk", dan:"dansk",
 // Each theme is just a different set of values for the same CSS custom properties the whole
 // app already uses (--bg, --card, --text, --accent, etc.) — switching themes never touches
 // any actual page markup, just re-points what those variables resolve to.
+// Extra variables (added with the "guld" theme): values that used to be hardcoded in app.css.
+// The older themes get exactly the old hardcoded values so they look as before, except that
+// accent tints and hover now follow each theme's own accent instead of always being orange.
+const THEME_EXTRA_OLD = { "--sidebar-bg":"#0e0e16", "--icon-filter":"none", "--shade-rgb":"8,8,15", "--on-accent":"#fff", "--text-soft":"#a0a0c8", "--link-soft":"#9090d0", "--glass-rgb":"20,20,32", "--glass2-rgb":"14,14,22" };
+const DEFAULT_THEME = "guld";
 const THEMES = {
+  guld: {
+    label: "Guld (svart, guld)",
+    vars: { "--bg":"#0a0908", "--surface":"#141210", "--card":"#1a1714", "--card2":"#211d19", "--border":"#2e2820", "--accent":"#d6aa5b", "--accent2":"#f0c97a", "--text":"#ece3d2", "--muted":"#8b8172", "--success":"#9fb87a", "--danger":"#d9765f",
+            "--accent-rgb":"214,170,91", "--accent-hover":"#f0c97a", "--on-accent":"#1a1408", "--shade-rgb":"10,9,8", "--text-soft":"#c4b9a6", "--link-soft":"#b9a27a", "--glass-rgb":"27,24,21", "--glass2-rgb":"20,18,16", "--sidebar-bg":"#0f0d0b", "--icon-filter":"grayscale(1) sepia(1) saturate(1.8) brightness(1.05)" }
+  },
   standard: {
     label: "Standard (mörk)",
-    vars: { "--bg":"#0a0a12", "--surface":"#0f0f1a", "--card":"#141420", "--card2":"#1a1a28", "--border":"#222235", "--accent":"#e05724", "--accent2":"#e05724", "--text":"#eeeef8", "--muted":"#8080a0", "--success":"#2ecc71", "--danger":"#e05724" }
+    vars: { "--bg":"#0a0a12", "--surface":"#0f0f1a", "--card":"#141420", "--card2":"#1a1a28", "--border":"#222235", "--accent":"#e05724", "--accent2":"#e05724", "--text":"#eeeef8", "--muted":"#8080a0", "--success":"#2ecc71", "--danger":"#e05724", ...THEME_EXTRA_OLD, "--accent-rgb":"224,87,36", "--accent-hover":"#ff6535" }
   },
   plexlik: {
     label: "Plex-liknande (mörk, guld)",
-    vars: { "--bg":"#1f1f1f", "--surface":"#232323", "--card":"#282828", "--card2":"#2f2f2f", "--border":"#3a3a3a", "--accent":"#cc7b19", "--accent2":"#e5a00d", "--text":"#f2f2f2", "--muted":"#a3a3a3", "--success":"#2ecc71", "--danger":"#e5541b" }
+    vars: { "--bg":"#1f1f1f", "--surface":"#232323", "--card":"#282828", "--card2":"#2f2f2f", "--border":"#3a3a3a", "--accent":"#cc7b19", "--accent2":"#e5a00d", "--text":"#f2f2f2", "--muted":"#a3a3a3", "--success":"#2ecc71", "--danger":"#e5541b", ...THEME_EXTRA_OLD, "--accent-rgb":"204,123,25", "--accent-hover":"#e5a00d" }
   },
   midnatt: {
     label: "Midnattsblå (mörk)",
-    vars: { "--bg":"#0a0e1a", "--surface":"#0f1524", "--card":"#141b2e", "--card2":"#1b2338", "--border":"#253048", "--accent":"#3498db", "--accent2":"#5dade2", "--text":"#e8ecf5", "--muted":"#7c8aa8", "--success":"#2ecc71", "--danger":"#e74c3c" }
+    vars: { "--bg":"#0a0e1a", "--surface":"#0f1524", "--card":"#141b2e", "--card2":"#1b2338", "--border":"#253048", "--accent":"#3498db", "--accent2":"#5dade2", "--text":"#e8ecf5", "--muted":"#7c8aa8", "--success":"#2ecc71", "--danger":"#e74c3c", ...THEME_EXTRA_OLD, "--accent-rgb":"52,152,219", "--accent-hover":"#5dade2" }
   },
   skog: {
     label: "Skog (mörk, grön)",
-    vars: { "--bg":"#0d1410", "--surface":"#111c15", "--card":"#16211a", "--card2":"#1c2921", "--border":"#28382c", "--accent":"#4caf7d", "--accent2":"#6ec99a", "--text":"#e8f0ea", "--muted":"#84998c", "--success":"#4caf7d", "--danger":"#e05724" }
+    vars: { "--bg":"#0d1410", "--surface":"#111c15", "--card":"#16211a", "--card2":"#1c2921", "--border":"#28382c", "--accent":"#4caf7d", "--accent2":"#6ec99a", "--text":"#e8f0ea", "--muted":"#84998c", "--success":"#4caf7d", "--danger":"#e05724", ...THEME_EXTRA_OLD, "--accent-rgb":"76,175,125", "--accent-hover":"#6ec99a" }
   },
   ljus: {
     label: "Ljus",
-    vars: { "--bg":"#f4f4f7", "--surface":"#ffffff", "--card":"#ffffff", "--card2":"#eef0f4", "--border":"#dcdfe6", "--accent":"#d9531e", "--accent2":"#d9531e", "--text":"#1a1a24", "--muted":"#6b6b7d", "--success":"#27ae60", "--danger":"#d9531e" }
+    vars: { "--bg":"#f4f4f7", "--surface":"#ffffff", "--card":"#ffffff", "--card2":"#eef0f4", "--border":"#dcdfe6", "--accent":"#d9531e", "--accent2":"#d9531e", "--text":"#1a1a24", "--muted":"#6b6b7d", "--success":"#27ae60", "--danger":"#d9531e", ...THEME_EXTRA_OLD, "--accent-rgb":"217,83,30", "--accent-hover":"#e8652f" }
   },
   ljusvarm: {
     label: "Ljus (varm)",
-    vars: { "--bg":"#faf6f0", "--surface":"#fffdf9", "--card":"#fffdf9", "--card2":"#f3ece1", "--border":"#e5dbc9", "--accent":"#c1701e", "--accent2":"#c1701e", "--text":"#2b2418", "--muted":"#7a6f5c", "--success":"#27ae60", "--danger":"#c1381e" }
+    vars: { "--bg":"#faf6f0", "--surface":"#fffdf9", "--card":"#fffdf9", "--card2":"#f3ece1", "--border":"#e5dbc9", "--accent":"#c1701e", "--accent2":"#c1701e", "--text":"#2b2418", "--muted":"#7a6f5c", "--success":"#27ae60", "--danger":"#c1381e", ...THEME_EXTRA_OLD, "--accent-rgb":"193,112,30", "--accent-hover":"#d4802a" }
   }
 };
 
 function applyTheme(themeName) {
-  const theme = THEMES[themeName] || THEMES.standard;
+  const theme = THEMES[themeName] || THEMES[DEFAULT_THEME];
   for (const [key, val] of Object.entries(theme.vars)) {
     document.documentElement.style.setProperty(key, val);
   }
@@ -6741,7 +6754,7 @@ function applyTheme(themeName) {
   // directly here guarantees they follow the theme regardless of how the stylesheet itself
   // is written.
   const sidebar = document.getElementById("sidebar");
-  if (sidebar) { sidebar.style.background = theme.vars["--surface"]; sidebar.style.borderColor = theme.vars["--border"]; }
+  if (sidebar) { sidebar.style.background = theme.vars["--sidebar-bg"] || theme.vars["--surface"]; sidebar.style.borderColor = theme.vars["--border"]; }
   const topbar = document.getElementById("topbar");
   if (topbar) { topbar.style.background = theme.vars["--surface"]; topbar.style.borderColor = theme.vars["--border"]; }
   window._currentTheme = themeName;
@@ -7309,7 +7322,7 @@ async function loadPlaybackStats() {
           ${s.mostActiveUsers.map(u => `
             <div style="background:var(--card2);border-radius:8px;overflow:hidden;flex:1;min-width:240px">
               <div style="display:flex;align-items:center;gap:10px;padding:10px 12px">
-                <span style="width:28px;height:28px;border-radius:50%;background:var(--accent,#3498db);color:#fff;font-size:13px;display:flex;align-items:center;justify-content:center;flex-shrink:0">${esc((u.username||"?")[0].toUpperCase())}</span>
+                <span style="width:28px;height:28px;border-radius:50%;background:var(--accent,#3498db);color:var(--on-accent,#fff);font-size:13px;display:flex;align-items:center;justify-content:center;flex-shrink:0">${esc((u.username||"?")[0].toUpperCase())}</span>
                 <div>
                   <div style="font-weight:600;font-size:13px">${esc(u.username)}</div>
                   <div style="font-size:11px;color:var(--muted)">${u.plays} spelningar · ${fmtHoursMin(u.totalMinutes)}</div>
@@ -7361,7 +7374,7 @@ function renderNowPlayingContent(sessions) {
       <div style="flex:1;padding:10px 12px;min-width:0">
         <div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(s.title)}</div>
         <div style="display:flex;align-items:center;gap:6px;margin-top:4px">
-          <span style="width:18px;height:18px;border-radius:50%;background:var(--accent,#3498db);color:#fff;font-size:10px;display:flex;align-items:center;justify-content:center;flex-shrink:0">${esc((s.username||"?")[0].toUpperCase())}</span>
+          <span style="width:18px;height:18px;border-radius:50%;background:var(--accent,#3498db);color:var(--on-accent,#fff);font-size:10px;display:flex;align-items:center;justify-content:center;flex-shrink:0">${esc((s.username||"?")[0].toUpperCase())}</span>
           <span style="font-size:12px;color:var(--muted)">${esc(s.username)}</span>
           <span style="font-size:11px;padding:1px 7px;border-radius:10px;margin-left:auto;background:${s.method === "direct" ? "rgba(46,204,113,0.15)" : "rgba(230,126,34,0.15)"};color:${s.method === "direct" ? "#2ecc71" : "#e67e22"}">${s.method === "direct" ? "Direct" : "Transkodning"}</span>
         </div>
@@ -8178,7 +8191,7 @@ async function renderUserPage(user) {
         <div style="font-size:12px;color:var(--muted);margin-bottom:10px">${(user.id === currentUser?.id || user._id === currentUser?.id) ? t("profile.theme_desc_self") : t("profile.theme_desc_other")}</div>
         <div style="display:flex;flex-wrap:wrap;gap:10px">
           ${Object.entries(THEMES).map(([key, theme]) => `
-            <div onclick="saveUserTheme('${user.id}', '${key}')" style="cursor:pointer;width:120px;border-radius:10px;overflow:hidden;border:2px solid ${(user.theme||"standard")===key ? "var(--accent)" : "var(--border)"}">
+            <div onclick="saveUserTheme('${user.id}', '${key}')" style="cursor:pointer;width:120px;border-radius:10px;overflow:hidden;border:2px solid ${(user.theme||DEFAULT_THEME)===key ? "var(--accent)" : "var(--border)"}">
               <div style="height:50px;background:${theme.vars["--bg"]};display:flex;align-items:center;justify-content:center">
                 <span style="width:16px;height:16px;border-radius:50%;background:${theme.vars["--accent"]}"></span>
                 <span style="width:24px;height:10px;border-radius:3px;background:${theme.vars["--card2"]};margin-left:6px"></span>
@@ -8591,7 +8604,7 @@ async function openMusicFixMeta(kind, folderKey, currentName, artistFolderKey) {
         <div style="display:flex;gap:8px;margin-bottom:10px">
           <input id="fix-music-search-input" style="flex:1;background:var(--card2);border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:14px;padding:10px 14px;border-radius:8px;outline:none;" 
             type="text" placeholder="Sök på Spotify..." value="${esc(currentName)}"/>
-          <button onclick="runMusicFixSearch('${kind}','${folderKey}','${artistFolderKey||""}')" style="background:var(--accent);border:none;color:white;font-family:inherit;font-size:14px;font-weight:500;padding:10px 18px;border-radius:8px;cursor:pointer;">Sök</button>
+          <button onclick="runMusicFixSearch('${kind}','${folderKey}','${artistFolderKey||""}')" style="background:var(--accent);border:none;color:var(--on-accent,#fff);font-family:inherit;font-size:14px;font-weight:500;padding:10px 18px;border-radius:8px;cursor:pointer;">Sök</button>
         </div>
         <div style="display:flex;align-items:center;gap:8px">
           <input type="file" id="fix-music-file-input" accept="image/*" style="display:none" onchange="handleMusicCoverUpload('${kind}','${folderKey}','${artistFolderKey||""}')"/>
@@ -8702,7 +8715,7 @@ async function openFixMeta(mediaId, currentTitle, type) {
         <div style="display:flex;gap:8px;margin-bottom:8px;">
           <input id="fix-search-input" style="flex:1;background:var(--card2);border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:14px;padding:10px 14px;border-radius:8px;outline:none;" 
             type="text" placeholder="Sök efter rätt film..." value="${esc(currentTitle)}"/>
-          <button onclick="runFixSearch('${mediaId}','${type}')" style="background:var(--accent);border:none;color:white;font-family:inherit;font-size:14px;font-weight:500;padding:10px 18px;border-radius:8px;cursor:pointer;">Sök</button>
+          <button onclick="runFixSearch('${mediaId}','${type}')" style="background:var(--accent);border:none;color:var(--on-accent,#fff);font-family:inherit;font-size:14px;font-weight:500;padding:10px 18px;border-radius:8px;cursor:pointer;">Sök</button>
         </div>
         <div style="display:flex;gap:8px;">
           <input id="fix-tmdb-id-input" style="flex:1;background:var(--card2);border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:14px;padding:8px 14px;border-radius:8px;outline:none;" 
@@ -8767,7 +8780,7 @@ async function applyTmdbId(mediaId, type) {
           <div style="font-size:12px;color:var(--muted);margin-top:4px">TMDB ID: ${data.id}</div>
         </div>
         <button onclick="applyFixedMeta('${mediaId}', ${data.id}, '${type}')" 
-          style="background:var(--accent);border:none;color:white;font-family:inherit;font-size:13px;padding:10px 16px;border-radius:8px;cursor:pointer;">
+          style="background:var(--accent);border:none;color:var(--on-accent,#fff);font-family:inherit;font-size:13px;padding:10px 16px;border-radius:8px;cursor:pointer;">
           ✓ Använd denna
         </button>
       </div>`;
