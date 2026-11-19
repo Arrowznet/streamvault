@@ -1460,13 +1460,47 @@ app.get("/api/admin/system-stats", requireAdmin, (req, res) => {
 // config.ha_stats_key is set (>= 32 chars); answers only local-network callers with
 // "Authorization: Bearer <key>". Everything else gets a plain 404/401. See haStats.js.
 const { haStatsKey, bearerFromHeader, keyMatches, buildHaStats } = require("./haStats");
-app.get("/api/ha/stats", (req, res) => {
+app.get("/api/ha/stats", async (req, res) => {
   const key = haStatsKey(config.ha_stats_key);
   if (!key || !isLocalRequestIp(req.ip)) return res.status(404).json({ error: "Hittades inte" });
   if (!keyMatches(key, bearerFromHeader(req.headers.authorization))) return res.status(401).json({ error: "Ej autentiserad" });
   res.set("Cache-Control", "no-store");
-  res.json(buildHaStats([..._activeSessions.values()], new Set(activeDashTranscodes.keys()), _systemStatsBuffer[_systemStatsBuffer.length - 1], Date.now()));
+  const sessions = [..._activeSessions.values()];
+  // Media items for the quality line; a missing audio description is probed in the background
+  // (never awaited here) and shows up on a later poll.
+  const itemsById = new Map();
+  for (const id of new Set(sessions.map(s => s.mediaId).filter(Boolean))) {
+    try {
+      const item = await dbFindOne(db.media, { _id: id });
+      if (item) { itemsById.set(id, item); if (!item.audio_info) probeAudioInfo(item); }
+    } catch {}
+  }
+  res.json(buildHaStats(sessions, new Set(activeDashTranscodes.keys()), _systemStatsBuffer[_systemStatsBuffer.length - 1], Date.now(), itemsById));
 });
+
+// First audio stream of a file (codec, profile, channels), read once with ffprobe (15 s limit,
+// background, one at a time per item) and stored on the media item as audio_info. Used only for
+// the Home Assistant quality line. A failure is not stored, so a later poll tries again.
+const _audioProbing = new Set();
+function probeAudioInfo(item) {
+  if (!item || !item._id || !item.file_path || _audioProbing.has(item._id)) return;
+  _audioProbing.add(item._id);
+  require("child_process").execFile(getFfprobePath(), [
+    "-v", "quiet", "-select_streams", "a:0",
+    "-show_entries", "stream=codec_name,profile,channels,channel_layout",
+    "-of", "json", item.file_path
+  ], { timeout: 15000, windowsHide: true }, async (err, stdout) => {
+    try {
+      if (err) throw err;
+      const st = (JSON.parse(String(stdout || "{}")).streams || [])[0];
+      if (!st || !st.codec_name) return;
+      const audio_info = { codec: String(st.codec_name).slice(0, 32), profile: st.profile ? String(st.profile).slice(0, 64) : null, channels: Number(st.channels) || null, layout: st.channel_layout ? String(st.channel_layout).slice(0, 32) : null };
+      await dbUpdate(db.media, { _id: item._id }, { $set: { audio_info } });
+    } catch (e) {
+      console.log(`[HA] Kunde inte läsa ljudspår (ffprobe, max 15 s): ${((e && e.message) || "").split("\n")[0]}`);
+    } finally { _audioProbing.delete(item._id); }
+  });
+}
 
 // ── IPTV ──────────────────────────────────────────────────────────────────────
 // Parses a standard M3U/M3U8 playlist (the common format IPTV providers use) into
